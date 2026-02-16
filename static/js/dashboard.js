@@ -1237,9 +1237,9 @@ function renderRichText(text, keyPeople) {
 }
 
 // ── Sync Status ────────────────────────────────────────────────────────
-// Server writes a .sync_requested marker every 30 min (PeriodicCallback).
-// Claude's Stop hook picks it up and runs /todo-refresh.
-// Dashboard shows status and allows manual trigger.
+// Server runs `claude -p /todo-refresh` every 30 min via PeriodicCallback.
+// Dashboard button also triggers it on demand.
+var _syncPollTimer = null;
 
 function fetchSyncStatus() {
     fetch('/api/sync-status')
@@ -1254,14 +1254,18 @@ function updateSyncUI(data) {
     var btn = document.getElementById('sync-btn');
     var statusText = document.getElementById('sync-status-text');
 
-    if (data.sync_pending) {
-        btn.classList.add('queued');
-        btn.classList.remove('syncing');
-        btn.title = 'Sync queued — will run on next Claude interaction';
+    if (data.sync_running) {
+        btn.classList.add('syncing');
+        btn.title = 'Sync running...';
+        _startFastPoll();
     } else {
-        btn.classList.remove('queued');
+        var wasSyncing = btn.classList.contains('syncing');
         btn.classList.remove('syncing');
         btn.title = 'Sync with M365';
+        if (wasSyncing) {
+            fetchTasks();
+            _stopFastPoll();
+        }
     }
 
     if (data.last_sync && data.last_sync.synced_at) {
@@ -1276,12 +1280,27 @@ function updateSyncUI(data) {
     }
 }
 
+function _startFastPoll() {
+    if (_syncPollTimer) return;
+    _syncPollTimer = setInterval(function() {
+        fetchSyncStatus();
+        fetchTasks();
+    }, 5000);
+}
+
+function _stopFastPoll() {
+    if (_syncPollTimer) {
+        clearInterval(_syncPollTimer);
+        _syncPollTimer = null;
+    }
+}
+
 function requestSync() {
     var btn = document.getElementById('sync-btn');
-    if (btn.classList.contains('queued')) return;
+    if (btn.classList.contains('syncing')) return;
 
-    btn.classList.add('queued');
-    btn.title = 'Sync queued — will run on next Claude interaction';
+    btn.classList.add('syncing');
+    btn.title = 'Sync running...';
 
     fetch('/api/sync-status', {
         method: 'POST',
@@ -1289,13 +1308,15 @@ function requestSync() {
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
-        if (!data.ok) {
-            btn.classList.remove('queued');
+        if (data.ok) {
+            _startFastPoll();
+        } else {
+            btn.classList.remove('syncing');
             btn.title = data.message || 'Sync failed';
         }
     })
     .catch(function(err) {
-        btn.classList.remove('queued');
+        btn.classList.remove('syncing');
         btn.title = 'Sync with M365';
         console.error('Sync request failed:', err);
     });

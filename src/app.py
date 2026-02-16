@@ -12,7 +12,7 @@ from .handlers.dashboard import DashboardHandler
 from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler
 from .handlers.ws import TaskWebSocketHandler
-from .handlers.sync_api import SyncStatusHandler, request_sync
+from .handlers.sync_api import SyncStatusHandler, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,9 @@ SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
 
 
 def _periodic_sync():
-    """Called every 30 minutes to write the sync marker file.
-
-    The marker is picked up by Claude's Stop hook (check_unparsed.py),
-    which tells Claude to run /todo-refresh on next interaction.
-    """
-    result = request_sync()
-    logger.info(f"Periodic sync marker: {result['message']}")
+    """Called every 30 minutes to launch `claude -p /todo-refresh`."""
+    result = run_sync()
+    logger.info(f"Periodic sync: {result['message']}")
 
 
 def make_app() -> tornado.web.Application:
