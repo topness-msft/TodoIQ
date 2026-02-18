@@ -7,6 +7,7 @@ from ..models import (
     promote_task, dismiss_task, complete_task, start_task,
     transition_task, get_task, update_task,
 )
+from ..services.claude_runner import run_claude
 from .ws import broadcast
 
 
@@ -89,3 +90,45 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         updated = update_task(tid, parse_status="queued")
         self.write(json.dumps({"task": updated}))
         broadcast({"type": "task_updated", "task": updated})
+        # Auto-trigger parsing
+        run_claude("/todo-parse", label="parse")
+
+
+_VALID_SKILLS = {"respond-email", "schedule-meeting", "follow-up", "prepare", "teams-message"}
+
+
+class TaskSkillHandler(tornado.web.RequestHandler):
+    """POST /api/tasks/<id>/skill — run a Claude skill on a task."""
+
+    def set_default_headers(self):
+        self.set_header("Content-Type", "application/json")
+
+    def post(self, task_id):
+        try:
+            body = json.loads(self.request.body)
+        except (json.JSONDecodeError, TypeError):
+            self.set_status(400)
+            self.write(json.dumps({"error": "Invalid JSON"}))
+            return
+
+        skill = body.get("skill", "")
+        tid = int(task_id)
+
+        if skill not in _VALID_SKILLS:
+            self.set_status(400)
+            self.write(json.dumps({
+                "error": f"Unknown skill '{skill}'",
+                "valid": sorted(_VALID_SKILLS),
+            }))
+            return
+
+        task = get_task(tid)
+        if not task:
+            self.set_status(404)
+            self.write(json.dumps({"error": "Task not found"}))
+            return
+
+        label = f"skill:{skill}:{tid}"
+        result = run_claude(f"/{skill} {tid}", label=label)
+        broadcast({"type": "skill_running", "task_id": tid, "skill": skill})
+        self.write(json.dumps(result))

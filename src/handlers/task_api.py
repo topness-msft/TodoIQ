@@ -7,6 +7,7 @@ from ..models import (
     create_task, get_task, list_tasks, update_task, delete_task,
     get_contexts, get_stats, get_last_sync,
 )
+from ..services.claude_runner import run_claude
 from .ws import broadcast
 
 
@@ -41,14 +42,20 @@ class TaskListHandler(tornado.web.RequestHandler):
                 status="active",
                 parse_status="unparsed",
             )
+            # Auto-trigger parsing
+            run_claude("/todo-parse", label="parse")
         elif title:
             task = create_task(
                 title=title,
                 description=body.get("description", ""),
                 status=body.get("status", "active"),
+                parse_status=body.get("parse_status", "unparsed"),
                 priority=int(body.get("priority", 3)),
                 due_date=body.get("due_date"),
                 source_type=body.get("source_type", "manual"),
+                source_id=body.get("source_id"),
+                source_snippet=body.get("source_snippet"),
+                source_url=body.get("source_url"),
                 action_type=body.get("action_type", "general"),
                 key_people=body.get("key_people"),
                 user_notes=body.get("user_notes", ""),

@@ -6,20 +6,48 @@ to query WorkIQ for M365 context. The Tornado server never calls these directly.
 
 # ── Query Templates ────────────────────────────────────────────────────────
 
-FULL_SCAN = (
-    "What items across my Inbox emails, Teams messages, and meetings need my attention or action? "
-    "For ALL email searches, only look in my Inbox folder (not Sent, Archive, or other folders). "
+_TASK_OUTPUT_FORMAT = (
+    "For each item, return it as a structured task suggestion with ALL of these fields: "
+    "1. **Task title**: A clean imperative action describing WHAT I NEED TO DO "
+    "(e.g. 'Reply to Sarah's budget proposal', 'Schedule workshop walkthrough with Steve'). "
+    "Not the email subject — describe the action. "
+    "2. **Description**: 2-3 sentences of context: what was the original ask, current state, "
+    "what specifically needs to happen next. "
+    "3. **Source type**: email, teams, or meeting. "
+    "4. **Key people**: For each person involved, give their FULL resolved name and email address "
+    "(e.g. 'Phil Topness, phil.topness@microsoft.com'). Resolve aliases and short names to full directory names. "
+    "5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). "
+    "6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). "
+    "7. **Date**: When the item was sent/occurred. "
+    "8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. "
+    "Format each item as a numbered task with clear field labels."
+)
+
+SCAN_EMAIL = (
+    "What emails in my Inbox need my attention or action? "
+    "ONLY search my Inbox folder (not Sent, Archive, or other folders). "
     "Include: "
     "(1) ALL emails currently flagged in my Inbox (no time limit — include every flagged email), "
-    "(2) any emails in my Inbox categorized as 'TodoNess' (no time limit), "
-    "(3) emails in my Inbox from the last {days} days asking for my response that I haven't replied to, "
-    "(4) Teams messages from the last 3 days directed at me or @mentioning me that I haven't responded to, "
-    "(5) action items from meetings in the last 3 days assigned to me or that I committed to, "
-    "(6) emails or Teams messages I SENT in the last {days} days that contain a question or request "
-    "where the recipient hasn't responded yet. "
-    "For each item, give me: source type (email/teams/meeting), subject or topic, "
-    "person name and email, date, and a brief summary of what's needed."
+    "(2) emails in my Inbox from the last {days} days where I am on the To line (not just CC or BCC) "
+    "that ask me specifically for a response or action and I haven't replied yet. "
+    "Exclude emails sent to distribution lists or broad groups unless I am specifically called out by name in the body. "
+    "Exclude automated/noreply emails (confirmations, receipts, notifications, alerts) unless they contain a genuine action I must take. "
+    + _TASK_OUTPUT_FORMAT
 )
+
+SCAN_TEAMS_MEETINGS = (
+    "What Teams messages and meeting action items need my attention or action? "
+    "Include: "
+    "(1) Teams messages from the last 3 days directed at me by name or @mentioning me "
+    "that I haven't responded to, "
+    "(2) action items from meetings in the last 3 days assigned to me or that I committed to, "
+    "(3) Teams messages I SENT in the last {days} days that contain a question or request "
+    "where the recipient hasn't responded yet. "
+    + _TASK_OUTPUT_FORMAT
+)
+
+# Legacy single-call query (kept for reference, no longer used)
+FULL_SCAN = SCAN_TEAMS_MEETINGS
 
 EMAIL_THREAD = (
     "Show me the full email thread for the email with subject '{subject}' "

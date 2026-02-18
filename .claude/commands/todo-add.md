@@ -14,7 +14,7 @@ Read the natural language text and infer ALL of the following:
 
 - **title**: Clean, concise task title in imperative form
 - **description**: Fuller description of what the task involves, including implied sub-steps
-- **priority**: Integer 1-5 (1=urgent/ASAP/critical, 2=important/soon, 3=normal, 4=low, 5=backlog/no rush)
+- **priority**: Integer 1-5 (1=urgent/ASAP/critical, 2=important/soon, 3=normal, 4=low, 5=information/FYI)
 - **due_date**: ISO date (YYYY-MM-DD) resolved from any time references relative to today. null if none implied.
 - **key_people**: A JSON array of resolved people (see format below)
 - **source_type**: One of 'email', 'meeting', 'chat', 'manual'. Infer from the action described (e.g. "reply to the email from John" → 'email', "schedule a meeting" → 'meeting'). Default to 'manual' for general tasks.

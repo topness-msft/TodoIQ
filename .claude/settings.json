@@ -1,16 +1,4 @@
 {
   "hooks": {
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python scripts/check_unparsed.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
   }
 }

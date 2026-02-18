@@ -1,71 +1,28 @@
 """Sync status and trigger handler.
 
-Launches `claude -p /todo-refresh` as a subprocess.  Used by the 30-min
-PeriodicCallback in app.py and by the dashboard's manual sync button.
+Launches `claude -p /todo-refresh` via the shared claude_runner.
+Used by the 30-min PeriodicCallback in app.py and by the dashboard's
+manual sync button.
 """
 
 import json
-import os
-import subprocess
 import logging
 import tornado.web
-from pathlib import Path
 
 from ..models import get_last_sync
+from ..services.claude_runner import run_claude, is_running, get_status
 
 logger = logging.getLogger(__name__)
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-SYNC_LOG_FILE = PROJECT_ROOT / "data" / "sync_output.log"
-
-# Track the running subprocess in-process (no PID files needed)
-_sync_proc: subprocess.Popen | None = None
 
 
 def is_sync_running() -> bool:
     """Check if a background sync process is still running."""
-    global _sync_proc
-    if _sync_proc is None:
-        return False
-    if _sync_proc.poll() is not None:
-        _sync_proc = None
-        return False
-    return True
+    return is_running("sync")
 
 
 def run_sync() -> dict:
     """Launch `claude -p /todo-refresh` if not already running."""
-    global _sync_proc
-    if is_sync_running():
-        return {"ok": False, "message": "Sync already running."}
-
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-
-    try:
-        SYNC_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(str(SYNC_LOG_FILE), "w")
-        _sync_proc = subprocess.Popen(
-            [
-                "claude", "-p", "/todo-refresh",
-                "--no-session-persistence",
-                "--allowedTools",
-                "mcp__workiq__ask_work_iq,Bash,Read,Write,Glob,Grep",
-            ],
-            cwd=str(PROJECT_ROOT),
-            env=env,
-            stdout=log_file,
-            stderr=log_file,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        logger.info(f"Sync started: PID {_sync_proc.pid}")
-        return {"ok": True, "message": f"Sync started (PID {_sync_proc.pid})."}
-    except FileNotFoundError:
-        logger.warning("claude CLI not found on PATH")
-        return {"ok": False, "message": "claude CLI not found on PATH."}
-    except Exception as e:
-        logger.error(f"Sync launch failed: {e}")
-        return {"ok": False, "message": str(e)}
+    return run_claude("/todo-refresh", label="sync")
 
 
 class SyncStatusHandler(tornado.web.RequestHandler):
@@ -88,3 +45,13 @@ class SyncStatusHandler(tornado.web.RequestHandler):
         if not result["ok"] and "already running" not in result["message"].lower():
             self.set_status(500)
         self.write(json.dumps(result))
+
+
+class RunnerStatusHandler(tornado.web.RequestHandler):
+    """GET /api/runner-status — status of all tracked claude subprocesses."""
+
+    def set_default_headers(self):
+        self.set_header("Content-Type", "application/json")
+
+    def get(self):
+        self.write(json.dumps(get_status()))

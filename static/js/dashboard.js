@@ -8,6 +8,8 @@ var reconnectTimer = null;
 var openDropdownId = null;
 var searchQuery = '';
 var lastSyncTime = null;
+var _skillPollTimer = null;
+var _runningSkills = {};
 
 // ── Init ───────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
@@ -91,6 +93,14 @@ function handleWsMessage(msg) {
         if (selectedTaskId === msg.task_id) {
             selectedTaskId = null;
             clearDetailPane();
+        }
+    } else if (msg.type === 'skill_running') {
+        var skillKey = msg.task_id + ':' + msg.skill;
+        _runningSkills[skillKey] = true;
+        startSkillPoller();
+        if (selectedTaskId === msg.task_id) {
+            var runTask = tasks.find(function(t) { return t.id === msg.task_id; });
+            if (runTask) renderDetailPane(runTask);
         }
     }
 }
@@ -295,6 +305,8 @@ function renderSection(sectionId, sectionTasks) {
             + priorityDot(task.priority)
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
+            + '<span class="task-id-badge">#' + task.id + '</span>'
+            + '<span class="task-source-icon">' + sourceTypeIcon(task.source_type) + '</span>'
             + '<span class="task-title">' + escapeHtml(task.title) + '</span>'
             + dueHtml
             + '</div>'
@@ -391,6 +403,8 @@ function renderDetailPane(task) {
         + escapeHtml(task.user_notes || '')
         + '</textarea>'
         + '</div>';
+
+    html += renderSkillButtons(task);
 
     // Skill Output (between coaching and source)
     if (task.skill_output) {
@@ -675,7 +689,7 @@ function getHeaderActions(task) {
 
 // ── Priority Selector ──────────────────────────────────────────────────
 function prioritySelector(task) {
-    var labels = { 1: 'P1 Urgent', 2: 'P2 High', 3: 'P3 Normal', 4: 'P4 Low', 5: 'P5 Backlog' };
+    var labels = { 1: 'P1 Urgent', 2: 'P2 High', 3: 'P3 Normal', 4: 'P4 Low', 5: 'P5 Information' };
     var html = '<span class="priority-field">'
         + '<span class="priority-dot-indicator p' + task.priority + '"></span>'
         + '<select class="priority-select" onchange="updatePriority(' + task.id + ', this.value)">';
@@ -1109,13 +1123,14 @@ function parseStatusBadge(parseStatus, taskId) {
 
 function sourceMetaLink(task) {
     var icon = sourceTypeIcon(task.source_type);
-    var label = '';
-    // Build a rich one-line preview from source_snippet
-    if (task.source_snippet) {
-        label = truncate(task.source_snippet, 50);
-    } else {
-        label = task.source_type || 'manual';
+    // Extract the original subject from source_id (format: type::email::subject)
+    var subject = '';
+    if (task.source_id) {
+        var parts = task.source_id.split('::');
+        if (parts.length >= 3) subject = parts.slice(2).join('::');
     }
+    // Use subject as link text, fall back to source_snippet, then source_type
+    var label = subject || (task.source_snippet ? truncate(task.source_snippet, 50) : (task.source_type || 'manual'));
     if (task.source_url) {
         return icon + ' <a href="' + escapeHtml(task.source_url) + '" target="_blank" '
             + 'class="source-meta-link" title="Open in Outlook/Teams">'
@@ -1320,4 +1335,137 @@ function requestSync() {
         btn.title = 'Sync with M365';
         console.error('Sync request failed:', err);
     });
+}
+
+// ── Skill Buttons ──────────────────────────────────────────────────────
+function renderSkillButtons(task) {
+    var actionType = task.action_type || 'general';
+    if (actionType === 'general') return '';
+
+    var skillMap = {
+        'respond-email': { label: 'Draft Reply', skill: 'respond-email', icon: '\u2709' },
+        'schedule-meeting': { label: 'Find Times', skill: 'schedule-meeting', icon: '\uD83D\uDCC5' },
+        'follow-up': { label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' },
+        'prepare': { label: 'Prep Notes', skill: 'prepare', icon: '\uD83D\uDCCB' },
+        'teams-message': { label: 'Draft Message', skill: 'teams-message', icon: '\uD83D\uDCAC' }
+    };
+
+    var buttons = [];
+    var primary = skillMap[actionType];
+
+    // Add primary button if mapped (teams-message only for chat source)
+    if (primary) {
+        if (actionType === 'teams-message' && task.source_type !== 'chat') {
+            // Skip teams-message if not from chat source
+        } else {
+            buttons.push(primary);
+        }
+    }
+
+    // Add "Draft Follow-up" as secondary if not already primary
+    if (actionType !== 'follow-up') {
+        buttons.push({ label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' });
+    }
+
+    if (!buttons.length) return '';
+
+    var html = '<div class="skill-buttons-card"><div class="detail-label">Actions</div><div class="skill-buttons-row">';
+    buttons.forEach(function(btn) {
+        var skillKey = task.id + ':' + btn.skill;
+        var isRunning = _runningSkills[skillKey];
+        var runningClass = isRunning ? ' running' : '';
+        var iconHtml = isRunning
+            ? '<span class="skill-spinner"></span>'
+            : '<span class="skill-btn-icon">' + btn.icon + '</span>';
+        html += '<button class="btn-skill' + runningClass + '" data-skill="' + btn.skill + '" data-task-id="' + task.id + '" onclick="runSkill(' + task.id + ', \'' + btn.skill + '\')">'
+            + iconHtml + ' ' + escapeHtml(btn.label)
+            + '</button>';
+    });
+    html += '</div></div>';
+    return html;
+}
+
+function runSkill(taskId, skillName) {
+    var skillKey = taskId + ':' + skillName;
+    if (_runningSkills[skillKey]) return;
+
+    fetch('/api/tasks/' + taskId + '/skill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skill: skillName })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        _runningSkills[skillKey] = true;
+        startSkillPoller();
+        if (selectedTaskId === taskId) {
+            var task = tasks.find(function(t) { return t.id === taskId; });
+            if (task) renderDetailPane(task);
+        }
+    })
+    .catch(function(err) { console.error('Failed to run skill:', err); });
+}
+
+// ── Skill Runner Status Poller ─────────────────────────────────────────
+function startSkillPoller() {
+    if (_skillPollTimer) return;
+    _skillPollTimer = setInterval(pollSkillStatus, 5000);
+}
+
+function stopSkillPoller() {
+    if (_skillPollTimer) {
+        clearInterval(_skillPollTimer);
+        _skillPollTimer = null;
+    }
+}
+
+function pollSkillStatus() {
+    fetch('/api/runner-status')
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            // data is {label: true, ...} — build a set of running skill labels
+            var activeSet = {};
+            Object.keys(data).forEach(function(label) {
+                if (label.indexOf('skill:') === 0) {
+                    activeSet[label] = true;
+                }
+            });
+
+            // Check each running skill to see if it finished
+            // _runningSkills key: "taskId:skill", runner label: "skill:skill:taskId"
+            var keys = Object.keys(_runningSkills);
+            var changed = false;
+            keys.forEach(function(key) {
+                var parts = key.split(':');
+                var taskId = parts[0];
+                var skillName = parts[1];
+                var runnerLabel = 'skill:' + skillName + ':' + taskId;
+                if (!activeSet[runnerLabel]) {
+                    // Skill finished — remove from tracker and re-fetch task
+                    delete _runningSkills[key];
+                    changed = true;
+                    var taskId = parseInt(key.split(':')[0]);
+                    // Re-fetch the task to get updated skill_output
+                    fetch('/api/tasks/' + taskId)
+                        .then(function(res) { return res.json(); })
+                        .then(function(taskData) {
+                            if (taskData.task) {
+                                var idx = tasks.findIndex(function(t) { return t.id === taskData.task.id; });
+                                if (idx >= 0) tasks[idx] = taskData.task;
+                                renderTaskList();
+                                if (selectedTaskId === taskData.task.id) {
+                                    renderDetailPane(taskData.task);
+                                }
+                            }
+                        })
+                        .catch(function() {});
+                }
+            });
+
+            // Stop polling if nothing is running
+            if (Object.keys(_runningSkills).length === 0) {
+                stopSkillPoller();
+            }
+        })
+        .catch(function() {}); // Silent fail on poll
 }

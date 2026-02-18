@@ -10,9 +10,10 @@ from pathlib import Path
 from .db import init_db, get_connection
 from .handlers.dashboard import DashboardHandler
 from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
-from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler
+from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler
-from .handlers.sync_api import SyncStatusHandler, run_sync
+from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
+from .services.claude_runner import run_claude
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
 
 def _periodic_sync():
     """Called every 30 minutes to launch `claude -p /todo-refresh`."""
-    result = run_sync()
+    result = run_claude("/todo-refresh", label="sync")
     logger.info(f"Periodic sync: {result['message']}")
 
 
@@ -40,8 +41,10 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)", TaskDetailHandler),
             (r"/api/tasks/(\d+)/action", TaskActionHandler),
             (r"/api/tasks/(\d+)/refresh", TaskRefreshHandler),
+            (r"/api/tasks/(\d+)/skill", TaskSkillHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
+            (r"/api/runner-status", RunnerStatusHandler),
             # WebSocket
             (r"/ws", TaskWebSocketHandler),
         ],

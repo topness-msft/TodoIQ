@@ -40,39 +40,60 @@ else:
 
 Report the sync window: "Scanning the last {days_since} day(s)..."
 
-## Step 2: Single WorkIQ scan
+## Step 2: WorkIQ scan (two passes)
 
-Call `ask_work_iq` with ONE comprehensive query (covers all 5 source categories in a single call):
+Call `ask_work_iq` **twice** — once for email, once for Teams + meetings. This avoids context limits that caused emails to drop when combined into one query. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
+
+### Pass 2a: Email scan
 
 ```
-What items across my Inbox emails, Teams messages, and meetings need my attention or action? For ALL email searches, only look in my Inbox folder (not Sent, Archive, or other folders). Include: (1) ALL emails currently flagged in my Inbox (no time limit — include every flagged email), (2) any emails in my Inbox categorized as 'TodoNess' (no time limit), (3) emails in my Inbox from the last {days_since} days asking for my response that I haven't replied to, (4) Teams messages from the last 3 days directed at me or @mentioning me that I haven't responded to, (5) action items from meetings in the last 3 days assigned to me or that I committed to, (6) emails or Teams messages I SENT in the last {days_since} days that contain a question or request where the recipient hasn't responded yet. For each item, give me: source type (email/teams/meeting), subject or topic, person name and email, date, and a brief summary of what's needed.
+What emails in my Inbox need my attention or action? ONLY search my Inbox folder (not Sent, Archive, or other folders). Include: (1) ALL emails currently flagged in my Inbox (no time limit — include every flagged email), (2) emails in my Inbox from the last {days_since} days where I am on the To line (not just CC or BCC) that ask me specifically for a response or action and I haven't replied yet. Exclude emails sent to distribution lists or broad groups unless I am specifically called out by name in the body. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Reply to Sarah's budget proposal"). Not the email subject — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: email. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, general. Format each item as a numbered task with clear field labels.
 ```
 
-## Step 3: Parse results and create tasks
+### Pass 2b: Teams + Meetings scan
 
-For **each item** WorkIQ returns, reason about the following fields:
+```
+What Teams messages and meeting action items need my attention or action? Include: (1) Teams messages from the last 3 days directed at me by name or @mentioning me that I haven't responded to, (2) action items from meetings in the last 3 days assigned to me or that I committed to, (3) Teams messages I SENT in the last {days_since} days that contain a question or request where the recipient hasn't responded yet. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Schedule workshop walkthrough with Steve"). Not the message topic — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: teams or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
+```
 
-- **title**: Clean imperative task title (e.g. "Reply to Sarah's budget proposal", "Follow up with Mehdi on deployment timeline")
-- **source_type**: `email`, `chat`, or `meeting` — based on WorkIQ's categorization (Teams messages → `chat`)
-- **action_type**: Infer from content:
-  - `respond-email` — for emails needing a reply
-  - `follow-up` — for items I sent that need a response, or items I need to chase
-  - `schedule-meeting` — if a meeting needs scheduling
-  - `prepare` — if meeting prep is needed
-  - `general` — fallback
-- **source_snippet**: WorkIQ's summary of what's needed
-- **source_url**: Link from WorkIQ response if available, otherwise null
-- **key_people**: JSON array with person name and email from the item. Format: `[{"name": "Full Name", "email": "email@domain.com"}]`
-- **priority**: Infer from urgency cues:
-  - P1: explicit deadline today, escalation language, executive asks
-  - P2: time-sensitive, important sender, approaching deadline
-  - P3: normal (default)
-  - P4: FYI items, low-stakes follow-ups
-- **source_id**: Generate a composite dedup key: `{source_type}::{sender_email_lower}::{subject_first_50_lower}::{date_YYYY-MM-DD}`
+Combine results from both passes before proceeding to Step 3.
 
-### Dedup check
+## Step 3: Validate and extract fields
 
-For each item, before creating a task, check for duplicates:
+### Step 3a: Relevance validation (Claude)
+
+For **each item** WorkIQ returned, assess whether it's genuinely actionable by me (Phil Topness):
+
+1. **"Is the action mine?"** — Am I the person being asked to do something, decide, respond, or follow up? Or am I merely mentioned as context, CC'd, or is the action for someone else?
+2. **"Is this stale or concluded?"** — Does the conversation appear finished (I already replied, the thread moved on, the message was deleted)? If so, skip entirely.
+3. **"Is this automated noise?"** — Is this a confirmation, receipt, notification, or noreply email with no genuine action required? If so, skip entirely.
+
+Outcomes:
+- **Genuinely mine + actionable** → keep the priority WorkIQ assigned
+- **Not clearly mine / just mentioned** → downgrade to **P5** (Information)
+- **Stale / concluded / automated noise** → **skip** (do not create task)
+
+### Step 3b: Extract fields from WorkIQ's structured response
+
+WorkIQ returns task suggestions with most fields already populated. For **each item**, extract directly from WorkIQ's response:
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| **title** | WorkIQ `Task title` | Use as-is — already imperative form |
+| **description** | WorkIQ `Description` | Use as task description (context + next steps) |
+| **source_type** | WorkIQ `Source type` | Map: `email` → `email`, `teams` → `chat`, `meeting` → `meeting` |
+| **key_people** | WorkIQ `Key people` | Convert to JSON: `[{"name": "Full Name", "email": "addr@domain.com"}]`. Exclude yourself from the list. |
+| **priority** | WorkIQ `Priority` | Map: P1→1, P2→2, P3→3, P4→4. Override to **4** if validation found item is not clearly actionable by me. |
+| **action_type** | WorkIQ `Action type` | Use as-is |
+| **source_snippet** | WorkIQ `Description` | Same as description — the contextual summary |
+| **source_url** | WorkIQ link references | Extract from markdown links in WorkIQ response if available, otherwise null |
+
+**Claude generates** (not from WorkIQ):
+- **source_id**: Composite dedup key from the original subject + first key person's email: `{source_type}::{first_person_email_lower}::{root_subject_first_50_lower}` (strip Re:/Fwd: prefixes; do NOT include date)
+
+### Dedup check (two-pass: exact then semantic)
+
+**Pass 1 — Exact match** on source_id or title prefix:
 
 ```python
 import sqlite3
@@ -80,20 +101,56 @@ import sqlite3
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.row_factory = sqlite3.Row
 existing = conn.execute(
-    "SELECT id, status, source_id, title FROM tasks WHERE source_id = ? OR LOWER(SUBSTR(title, 1, 40)) = LOWER(SUBSTR(?, 1, 40))",
+    "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id = ? OR LOWER(SUBSTR(title, 1, 40)) = LOWER(SUBSTR(?, 1, 40))",
     (source_id, title)
 ).fetchall()
 conn.close()
 ```
 
-**Skip** the item if:
-- A task with the same `source_id` already exists (any status)
-- A task with the same title prefix (first 40 chars, case-insensitive) already exists
-- A dismissed task matches — never re-suggest dismissed items
+**Pass 2 — Semantic match** (if no exact match found):
 
-**Note on flagged/categorized emails:** WorkIQ always returns these regardless of age. Normal dedup applies — if already in the DB, skip. But any *newly* flagged email that isn't already in the DB is always created as a suggestion.
+Query existing tasks from the same key person to check for semantic duplicates:
 
-If no duplicate found, create the task:
+```python
+conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn.row_factory = sqlite3.Row
+# Normalize sender: match both alias forms (e.g. saurabh.pant@ and spant@)
+sender_lower = first_person_email.strip().lower()
+sender_prefix = sender_lower.split('@')[0]
+same_sender_tasks = conn.execute(
+    "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id LIKE ?",
+    ('%::' + sender_prefix + '%',)
+).fetchall()
+conn.close()
+```
+
+For each `same_sender_task`, compare its title and description against the new item. **If they describe the same underlying ask or action** (even with different wording), treat it as a match.
+
+Be aggressive about dedup — it's better to augment an existing task than to create a near-duplicate. When in doubt, it's a match.
+
+**If a match is found**, decide based on status:
+- **dismissed** → skip entirely, never re-suggest dismissed items
+- **active / in_progress / completed** → **augment**: update `source_snippet` with latest context if meaningfully new (e.g. new deadline, escalation). Update `updated_at`. Increment `updated_count`.
+- **suggested** → update `source_snippet` and `priority` if the new item shows increased urgency. Increment `updated_count`.
+
+```python
+# Augment existing task with newer context
+import sqlite3
+from datetime import datetime, timezone
+
+conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+conn.execute(
+    "UPDATE tasks SET source_snippet = ?, priority = MIN(priority, ?), updated_at = ? WHERE id = ?",
+    (new_source_snippet, new_priority, now, existing_task_id)
+)
+conn.commit()
+conn.close()
+```
+
+**Note on flagged/categorized emails:** WorkIQ always returns these regardless of age. Normal dedup applies — if already in the DB, augment. But any *newly* flagged email that isn't already in the DB is always created as a suggestion.
+
+If no match found, create the task:
 
 ```python
 import sqlite3
@@ -106,7 +163,7 @@ conn.execute(
        source_type, source_id, source_snippet, source_url, key_people,
        action_type, coaching_text, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-    (title, '', 'suggested', 'parsed', priority,
+    (title, description, 'suggested', 'parsed', priority,
      source_type, source_id, source_snippet, source_url, key_people,
      action_type, None, now, now)
 )
@@ -114,7 +171,7 @@ conn.commit()
 conn.close()
 ```
 
-Track counts: `created`, `skipped_dedup`, and counts by source type (`email`, `chat`, `meeting`).
+Track counts: `created`, `updated` (augmented existing), `skipped` (dismissed), and counts by source type (`email`, `chat`, `meeting`).
 
 ## Step 4: Parse any unparsed tasks
 
@@ -132,13 +189,14 @@ summary = json.dumps({
     "chat": chat_count,
     "meeting": meeting_count,
     "created": created_count,
-    "skipped_dedup": skipped_count
+    "updated": updated_count,
+    "skipped": skipped_count
 })
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.execute(
     "INSERT INTO sync_log (sync_type, result_summary, tasks_created, tasks_updated, synced_at) VALUES (?,?,?,?,?)",
-    ('full_scan', summary, created_count, 0,
+    ('full_scan', summary, created_count, updated_count,
      datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
 )
 conn.commit()
@@ -151,14 +209,14 @@ Display a summary table:
 
 ```
 TodoNess Refresh Complete
-─────────────────────────
-Source       | Found | Created | Skipped
-─────────────────────────────────────────
-Email        |   X   |    X    |    X
-Teams/Chat   |   X   |    X    |    X
-Meeting      |   X   |    X    |    X
-─────────────────────────────────────────
-Total        |   X   |    X    |    X
+──────────────────────────────────────────────────
+Source       | Found | Created | Updated | Skipped
+──────────────────────────────────────────────────
+Email        |   X   |    X    |    X    |    X
+Teams/Chat   |   X   |    X    |    X    |    X
+Meeting      |   X   |    X    |    X    |    X
+──────────────────────────────────────────────────
+Total        |   X   |    X    |    X    |    X
 
 Review suggestions in the dashboard and promote tasks you want to work on.
 Dashboard: http://localhost:8766

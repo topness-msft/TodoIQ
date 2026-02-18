@@ -1,17 +1,29 @@
 """Parse WorkIQ responses into task suggestions with deduplication."""
 
+import re
+
 from ..models import list_tasks
 
+_THREAD_PREFIX_RE = re.compile(r'^(re:\s*|fwd?:\s*)+', re.IGNORECASE)
 
-def generate_source_id(source_type: str, sender: str, subject: str, date: str) -> str:
+
+def _normalize_subject(subject: str) -> str:
+    """Strip Re:/Fwd:/Fw: prefixes and normalize whitespace."""
+    s = (subject or "").strip()
+    s = _THREAD_PREFIX_RE.sub('', s)
+    return s.strip().lower()
+
+
+def generate_source_id(source_type: str, sender: str, subject: str, date: str = "") -> str:
     """Build a stable composite key for deduplication.
 
-    Format: {source_type}::{sender_lower}::{subject_first_50_lower}::{date}
+    Format: {source_type}::{sender_lower}::{normalized_subject_first_50}
+    Date is intentionally excluded so that replies in the same email thread
+    (same sender + same root subject) match existing tasks.
     """
     sender_part = (sender or "").strip().lower()
-    subject_part = (subject or "").strip().lower()[:50]
-    date_part = (date or "").strip()[:10]  # YYYY-MM-DD
-    return f"{source_type}::{sender_part}::{subject_part}::{date_part}"
+    subject_part = _normalize_subject(subject)[:50]
+    return f"{source_type}::{sender_part}::{subject_part}"
 
 
 def find_duplicate(title: str, source_id: str | None = None,
@@ -33,16 +45,27 @@ def find_duplicate(title: str, source_id: str | None = None,
         if source_id and task.get("source_id") and task["source_id"] == source_id:
             return task
 
-    # Secondary: source_type + sender + subject-prefix
+    # Secondary: source_type + sender + normalized subject-prefix
+    # Handles email alias variations (saurabh.pant@ vs spant@) by
+    # matching on the short alias (part before dots/hyphens) as well
     if source_type and sender and subject:
         sender_lower = sender.strip().lower()
-        subject_prefix = subject.strip().lower()[:30]
+        sender_local = sender_lower.split("@")[0] if "@" in sender_lower else sender_lower
+        subject_norm = _normalize_subject(subject)[:30]
         for task in all_tasks:
             task_sid = task.get("source_id") or ""
             if task_sid.startswith(f"{source_type}::"):
                 parts = task_sid.split("::")
                 if len(parts) >= 3:
-                    if parts[1] == sender_lower and parts[2].startswith(subject_prefix):
+                    task_sender = parts[1]
+                    task_sender_local = task_sender.split("@")[0] if "@" in task_sender else task_sender
+                    # Match if sender is exact OR one local part contains the other
+                    sender_match = (
+                        task_sender == sender_lower
+                        or sender_local in task_sender_local
+                        or task_sender_local in sender_local
+                    )
+                    if sender_match and parts[2].startswith(subject_norm):
                         return task
 
     # Tertiary: title-prefix fallback

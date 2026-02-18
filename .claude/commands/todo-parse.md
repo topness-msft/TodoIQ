@@ -45,7 +45,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   - 2 = important/soon/time-sensitive
   - 3 = normal (default)
   - 4 = low importance
-  - 5 = backlog/whenever/no rush
+  - 5 = information/FYI/not directly actionable by me
 - **due_date**: ISO date (YYYY-MM-DD) resolved from any time references. "Next Wednesday" → calculate from today. "End of week" → Friday. "Tomorrow" → tomorrow. null if none implied.
 - **key_people**: A JSON array of resolved people. For each name mentioned, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Pick the best match and store alternatives. Format:
   ```json
@@ -86,27 +86,13 @@ Tailor coaching by action type:
 
 **Important:** Always use full resolved names (e.g. "Pratap Ladhani" not "Pratap") in the coaching text so inline people pills render correctly in the dashboard. If `user_notes` contain context (agenda, constraints, preferences), weave that context into the coaching.
 
-## Step 3c: Auto-invoke action-specific enrichment
+## Step 3c: Skill enrichment (SKIPPED during parse)
 
-After generating coaching_text, auto-generate `skill_output` based on `action_type`. This runs the same logic as the standalone skill but inline during parsing. If `key_people` is empty, skip enrichment and set `skill_output` to null.
+**Do NOT generate `skill_output` during parsing.** Set `skill_output` to null.
 
-Build a name list from `key_people` JSON for all queries below.
+Skill enrichment (draft replies, calendar lookups, follow-up drafts, prep notes) runs as a **separate on-demand step** when the user clicks a skill button on the dashboard. This avoids overloading the parse WorkIQ context and keeps parsing fast and reliable.
 
-| action_type | WorkIQ query | skill_output format |
-|---|---|---|
-| `schedule-meeting` | "Shared calendar availability for [names] [this week / by due_date]. Treat tentative as available. Only show slots during each person's Outlook working hours. Show free slots >= 30 min." | `Suggested meeting slots:\n1. [Day], [Time]-[Time] ([dur])\n...\nDuration: [from user_notes or 30 min]\nAttendees: [names]` |
-| `respond-email` | "Recent email thread about [topic] with [names]. Show last 2-3 messages." | `To: [name] <[email]>\nSubject: Re: [topic]\n\n[Draft body]\n---\nTone: [inferred]\nKey points: [bullets]` |
-| `follow-up` | "Most recent emails and Teams messages with [names] about [topic]. When was the last interaction?" | `Channel: [Email/Teams based on source_type]\nTo: [name]\n\n[Draft follow-up]\n---\nLast interaction: [date]\nUrgency: [from due_date]` |
-| `prepare` | "Agenda and attendees for [related_meeting]. Recent docs related to [topic]." | `Prep Notes: [event]\nBefore:\n[ ] [item]\nTalking points:\n- [point]\nMaterials:\n- [doc]\nTime estimate: [X min]` |
-| `general`, `review-document` | No auto-enrichment | `skill_output` = null |
-
-**Guidelines:**
-- Check `user_notes` for constraints, tone, specific asks — weave into the output
-- For `follow-up` with `source_type = 'chat'`: draft as a Teams message (casual tone)
-- For `follow-up` with `source_type = 'email'` or `'meeting'`: draft as email
-- Store result in `skill_output` (NOT coaching_text)
-
-If the action_type doesn't qualify or key_people is empty, set `skill_output` to null (don't carry over stale data on re-parse).
+The standalone skill commands (`/respond-email`, `/schedule-meeting`, `/follow-up`, `/prepare`) handle enrichment with their own dedicated WorkIQ calls.
 
 ## Step 4: Write the structured fields back
 
