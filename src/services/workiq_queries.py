@@ -19,7 +19,7 @@ _TASK_OUTPUT_FORMAT = (
     "5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). "
     "6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). "
     "7. **Date**: When the item was sent/occurred. "
-    "8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. "
+    "8. **Action type**: One of: respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general. "
     "Format each item as a numbered task with clear field labels."
 )
 
@@ -33,11 +33,17 @@ SCAN_EMAIL = None
 SCAN_TEAMS_MEETINGS = (
     "What Teams messages and meeting action items need my attention or action? "
     "Include: "
-    "(1) Teams messages from the last 3 days directed at me by name or @mentioning me "
+    "(1) Teams messages from the last {days} days directed at me by name or @mentioning me "
     "that I haven't responded to, "
-    "(2) action items from meetings in the last 3 days assigned to me or that I committed to, "
-    "(3) Teams messages I SENT in the last {days} days that contain a question or request "
-    "where the recipient hasn't responded yet. "
+    "(2) action items from meetings in the last {days} days assigned to me or that I committed to. "
+    + _TASK_OUTPUT_FORMAT
+)
+
+SCAN_AWAITING_RESPONSE = (
+    "What messages or emails have I SENT in the last {days} days that contain a question, "
+    "request, or ask where the recipient hasn't responded yet? Only include items where "
+    "I am clearly waiting for a response — not messages I sent that were purely informational. "
+    "For each item, use action_type 'awaiting-response'. "
     + _TASK_OUTPUT_FORMAT
 )
 

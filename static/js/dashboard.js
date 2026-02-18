@@ -776,6 +776,7 @@ function actionTypeLabel(actionType) {
         'respond-email': 'Respond to Email',
         'review-document': 'Review Document',
         'follow-up': 'Follow Up',
+        'awaiting-response': 'Awaiting Response',
         'prepare': 'Prepare',
         'general': 'General'
     };
@@ -788,6 +789,7 @@ function actionTypeIcon(actionType) {
         'respond-email': '\u2709',
         'review-document': '\uD83D\uDCC4',
         'follow-up': '\uD83D\uDD04',
+        'awaiting-response': '\u231B',
         'prepare': '\uD83D\uDCCB',
         'general': '\u2699'
     };
@@ -801,6 +803,7 @@ function actionTypeSelector(task) {
         { value: 'respond-email', label: 'Respond to Email', icon: '\u2709' },
         { value: 'review-document', label: 'Review Document', icon: '\uD83D\uDCC4' },
         { value: 'follow-up', label: 'Follow Up', icon: '\uD83D\uDD04' },
+        { value: 'awaiting-response', label: 'Awaiting Response', icon: '\u231B' },
         { value: 'prepare', label: 'Prepare', icon: '\uD83D\uDCCB' }
     ];
     var current = task.action_type || 'general';
@@ -1346,6 +1349,7 @@ function renderSkillButtons(task) {
         'respond-email': { label: 'Draft Reply', skill: 'respond-email', icon: '\u2709' },
         'schedule-meeting': { label: 'Find Times', skill: 'schedule-meeting', icon: '\uD83D\uDCC5' },
         'follow-up': { label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' },
+        'awaiting-response': { label: 'Draft Follow-up', skill: 'follow-up', icon: '\u231B' },
         'prepare': { label: 'Prep Notes', skill: 'prepare', icon: '\uD83D\uDCCB' },
         'teams-message': { label: 'Draft Message', skill: 'teams-message', icon: '\uD83D\uDCAC' }
     };
@@ -1363,7 +1367,8 @@ function renderSkillButtons(task) {
     }
 
     // Add "Draft Follow-up" as secondary if not already primary
-    if (actionType !== 'follow-up') {
+    // (awaiting-response already uses follow-up as primary, so skip secondary)
+    if (actionType !== 'follow-up' && actionType !== 'awaiting-response') {
         buttons.push({ label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' });
     }
 

@@ -110,7 +110,7 @@ class TaskDetailHandler(tornado.web.RequestHandler):
         # Validate action_type if provided
         valid_action_types = {
             "schedule-meeting", "respond-email", "review-document",
-            "follow-up", "prepare", "general",
+            "follow-up", "awaiting-response", "prepare", "general",
         }
         if "action_type" in updates and updates["action_type"] not in valid_action_types:
             self.set_status(400)

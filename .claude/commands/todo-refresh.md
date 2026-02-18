@@ -40,29 +40,45 @@ else:
 
 Report the sync window: "Scanning the last {days_since} day(s)..."
 
-## Step 2: WorkIQ scan (Teams + Meetings)
+## Step 2a: WorkIQ scan (Teams + Meetings)
 
 Call `ask_work_iq` with ONE query for Teams messages and meeting action items. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
 
 > **Note:** Email scan is disabled. WorkIQ enterprise search cannot reliably scope to Inbox folder, detect flagged status, or filter by folder location. Re-enable when Graph MCP or improved email access is available.
 
 ```
-What Teams messages and meeting action items need my attention or action? Include: (1) Teams messages from the last 3 days directed at me by name or @mentioning me that I haven't responded to, (2) action items from meetings in the last 3 days assigned to me or that I committed to, (3) Teams messages I SENT in the last {days_since} days that contain a question or request where the recipient hasn't responded yet. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Schedule workshop walkthrough with Steve"). Not the message topic — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: teams or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
+What Teams messages and meeting action items need my attention or action? Include: (1) Teams messages from the last {days_since} days directed at me by name or @mentioning me that I haven't responded to, (2) action items from meetings in the last {days_since} days assigned to me or that I committed to. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Schedule workshop walkthrough with Steve"). Not the message topic — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: teams or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
+```
+
+## Step 2b: WorkIQ scan (Awaiting Response)
+
+Call `ask_work_iq` with a separate query focused on outbound messages where I'm waiting for a reply. Use `awaiting-response` as the action_type.
+
+```
+What messages or emails have I SENT in the last {days_since} days that contain a question, request, or ask where the recipient hasn't responded yet? Only include items where I am clearly waiting for a response — not messages I sent that were purely informational. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action (e.g. "Follow up with Sarah on budget approval"). 2. **Description**: 2-3 sentences: what I asked, who I'm waiting on, when I sent it. 3. **Source type**: email, teams, or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address. 5. **Priority**: P3 (normal) or P4 (low) — these are lower urgency since I'm waiting, not being asked. 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When I sent the message. 8. **Action type**: awaiting-response. Format each item as a numbered task with clear field labels.
 ```
 
 ## Step 3: Validate and extract fields
 
-### Step 3a: Relevance validation (Claude)
+### Step 3a: Relevance validation — 3-tier priority (Claude)
 
-For **each item** WorkIQ returned, assess whether it's genuinely actionable by me (Phil Topness):
+For **each item** WorkIQ returned, classify into one of three tiers:
 
-1. **"Is the action mine?"** — Am I the person being asked to do something, decide, respond, or follow up? Or am I merely mentioned as context, CC'd, or is the action for someone else?
-2. **"Is this stale or concluded?"** — Does the conversation appear finished (I already replied, the thread moved on, the message was deleted)? If so, skip entirely.
-3. **"Is this automated noise?"** — Is this a confirmation, receipt, notification, or noreply email with no genuine action required? If so, skip entirely.
+| Tier | Description | Priority treatment |
+|------|-------------|-------------------|
+| **Direct** | Someone is asking ME (Phil Topness) specifically to do something | Keep WorkIQ's priority as-is |
+| **Group** | Assigned to a group/role I belong to (e.g. "Coaches", "AI team") | Downgrade by 1 level (P1→P2, P2→P3, etc., max P4) |
+| **Tangential** | I'm mentioned as context, CC'd, or action is for someone else | Set to P5 (Information) |
+
+Then apply these additional filters:
+
+1. **"Is this stale or concluded?"** — Does the conversation appear finished (I already replied, the thread moved on, the message was deleted)? If so, skip entirely.
+2. **"Is this automated noise?"** — Is this a confirmation, receipt, notification, or noreply email with no genuine action required? If so, skip entirely.
 
 Outcomes:
-- **Genuinely mine + actionable** → keep the priority WorkIQ assigned
-- **Not clearly mine / just mentioned** → downgrade to **P5** (Information)
+- **Direct + actionable** → keep WorkIQ's priority
+- **Group + actionable** → downgrade priority by 1 level (min P4)
+- **Tangential / not clearly mine** → set to **P5** (Information)
 - **Stale / concluded / automated noise** → **skip** (do not create task)
 
 ### Step 3b: Extract fields from WorkIQ's structured response
@@ -76,7 +92,7 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 | **source_type** | WorkIQ `Source type` | Map: `email` → `email`, `teams` → `chat`, `meeting` → `meeting` |
 | **key_people** | WorkIQ `Key people` | Convert to JSON: `[{"name": "Full Name", "email": "addr@domain.com"}]`. Exclude yourself from the list. |
 | **priority** | WorkIQ `Priority` | Map: P1→1, P2→2, P3→3, P4→4. Override to **4** if validation found item is not clearly actionable by me. |
-| **action_type** | WorkIQ `Action type` | Use as-is |
+| **action_type** | WorkIQ `Action type` | Use as-is (respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general) |
 | **source_snippet** | WorkIQ `Description` | Same as description — the contextual summary |
 | **source_url** | WorkIQ link references | Extract from markdown links in WorkIQ response if available, otherwise null |
 

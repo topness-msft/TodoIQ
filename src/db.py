@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     source_snippet  TEXT,
     coaching_text   TEXT,
     action_type     TEXT DEFAULT 'general'
-                        CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','prepare','general')),
+                        CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
     skill_output    TEXT,
     key_people      TEXT,
     related_meeting TEXT,
