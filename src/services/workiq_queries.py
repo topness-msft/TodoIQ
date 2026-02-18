@@ -23,17 +23,12 @@ _TASK_OUTPUT_FORMAT = (
     "Format each item as a numbered task with clear field labels."
 )
 
-SCAN_EMAIL = (
-    "What emails in my Inbox need my attention or action? "
-    "ONLY search my Inbox folder (not Sent, Archive, or other folders). "
-    "Include: "
-    "(1) ALL emails currently flagged in my Inbox (no time limit — include every flagged email), "
-    "(2) emails in my Inbox from the last {days} days where I am on the To line (not just CC or BCC) "
-    "that ask me specifically for a response or action and I haven't replied yet. "
-    "Exclude emails sent to distribution lists or broad groups unless I am specifically called out by name in the body. "
-    "Exclude automated/noreply emails (confirmations, receipts, notifications, alerts) unless they contain a genuine action I must take. "
-    + _TASK_OUTPUT_FORMAT
-)
+# SCAN_EMAIL disabled — WorkIQ enterprise search cannot reliably:
+# - scope to Inbox folder (returns Archive/Deleted items)
+# - detect flagged status (not exposed in search metadata)
+# - filter by folder location (not a returned field)
+# Re-enable when Graph MCP or improved WorkIQ email access is available.
+SCAN_EMAIL = None
 
 SCAN_TEAMS_MEETINGS = (
     "What Teams messages and meeting action items need my attention or action? "

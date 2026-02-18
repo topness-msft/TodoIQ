@@ -40,23 +40,15 @@ else:
 
 Report the sync window: "Scanning the last {days_since} day(s)..."
 
-## Step 2: WorkIQ scan (two passes)
+## Step 2: WorkIQ scan (Teams + Meetings)
 
-Call `ask_work_iq` **twice** — once for email, once for Teams + meetings. This avoids context limits that caused emails to drop when combined into one query. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
+Call `ask_work_iq` with ONE query for Teams messages and meeting action items. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
 
-### Pass 2a: Email scan
-
-```
-What emails in my Inbox need my attention or action? ONLY search my Inbox folder (not Sent, Archive, or other folders). Include: (1) ALL emails currently flagged in my Inbox (no time limit — include every flagged email), (2) emails in my Inbox from the last {days_since} days where I am on the To line (not just CC or BCC) that ask me specifically for a response or action and I haven't replied yet. Exclude emails sent to distribution lists or broad groups unless I am specifically called out by name in the body. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Reply to Sarah's budget proposal"). Not the email subject — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: email. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, general. Format each item as a numbered task with clear field labels.
-```
-
-### Pass 2b: Teams + Meetings scan
+> **Note:** Email scan is disabled. WorkIQ enterprise search cannot reliably scope to Inbox folder, detect flagged status, or filter by folder location. Re-enable when Graph MCP or improved email access is available.
 
 ```
 What Teams messages and meeting action items need my attention or action? Include: (1) Teams messages from the last 3 days directed at me by name or @mentioning me that I haven't responded to, (2) action items from meetings in the last 3 days assigned to me or that I committed to, (3) Teams messages I SENT in the last {days_since} days that contain a question or request where the recipient hasn't responded yet. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Schedule workshop walkthrough with Steve"). Not the message topic — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: teams or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Phil Topness, phil.topness@microsoft.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
 ```
-
-Combine results from both passes before proceeding to Step 3.
 
 ## Step 3: Validate and extract fields
 
