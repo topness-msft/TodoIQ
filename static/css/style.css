@@ -767,6 +767,7 @@ html, body {
 .status-badge.waiting { background: #fff3e0; color: #e65100; }
 .status-badge.completed { background: #e6f4ea; color: #0d7d3b; }
 .status-badge.dismissed { background: #fdf3f4; color: #bc2f32; }
+.status-badge.snoozed { background: #fef3cd; color: #795b00; }
 .status-badge.deleted { background: #f0f0f0; color: #9e9e9e; }
 
 /* ── Source Type Icons ──────────────────────────────────────────────── */
@@ -1099,7 +1100,6 @@ html, body {
     font-size: 12px;
     margin-top: 4px;
     color: #0d7d3b;
-    title: "Skill enriched";
 }
 
 /* ── Description ────────────────────────────────────────────────────── */
@@ -1393,9 +1393,14 @@ html, body {
     box-shadow: 0 -1px 4px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.1);
     position: sticky;
     bottom: 0;
+    overflow: visible;
 }
 
 .detail-actions-bar .btn {
+    flex: 0 0 auto;
+}
+
+.detail-actions-bar .snooze-btn-wrapper {
     flex: 0 0 auto;
 }
 
@@ -1532,6 +1537,113 @@ html, body {
 .section-body.drop-target {
     border-color: #0f6cbd;
     background: #ebf3fc;
+}
+
+/* ── Snooze ─────────────────────────────────────────────────────────── */
+.snooze-info {
+    font-size: 11px;
+    color: #795b00;
+    font-weight: 500;
+    margin-right: 6px;
+}
+
+.snooze-detail-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3cd;
+    color: #795b00;
+}
+
+.btn-snooze {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #d1d1d1;
+    border-radius: 4px;
+    padding: 5px 16px;
+    font-size: 13px;
+    font-weight: 400;
+    font-family: inherit;
+    cursor: pointer;
+    background: #fff;
+    color: #795b00;
+    transition: background 0.1s, border-color 0.1s;
+}
+
+.btn-snooze:hover {
+    background: #fef3cd;
+    border-color: #795b00;
+}
+
+.snooze-dropdown {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 4px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.14), 0 1px 4px rgba(0,0,0,0.08);
+    z-index: 200;
+    min-width: 180px;
+    overflow: hidden;
+}
+
+.snooze-dropdown.open {
+    display: block;
+}
+
+.snooze-option {
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.1s;
+    color: #242424;
+}
+
+.snooze-option:hover {
+    background: #fef3cd;
+    color: #795b00;
+}
+
+.snooze-custom {
+    border-top: 1px solid #f0f0f0;
+}
+
+.snooze-datetime-input {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 4px 6px;
+    border: 1px solid #d1d1d1;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+}
+
+/* ── Overdue ────────────────────────────────────────────────────────── */
+.task-row.overdue {
+    border-left-color: #dc2626;
+}
+
+.task-row.overdue.selected {
+    border-left-color: #dc2626;
+}
+
+.overdue-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    background: #fef2f2;
+    color: #dc2626;
+    margin-left: 4px;
+    white-space: nowrap;
+    vertical-align: middle;
 }
 
 /* ── Responsive ─────────────────────────────────────────────────────── */

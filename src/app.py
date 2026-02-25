@@ -11,8 +11,9 @@ from .db import init_db, get_connection
 from .handlers.dashboard import DashboardHandler
 from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
-from .handlers.ws import TaskWebSocketHandler
+from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
+from .models import get_expired_snoozed, unsnooze_task, get_task
 from .services.claude_runner import run_claude
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,23 @@ TEMPLATE_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR.parent / "static"
 
 SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
+UNSNOOZE_INTERVAL_MS = 60 * 1000  # 60 seconds
 
 
 def _periodic_sync():
     """Called every 30 minutes to launch `claude -p /todo-refresh`."""
     result = run_claude("/todo-refresh", label="sync")
     logger.info(f"Periodic sync: {result['message']}")
+
+
+def _check_snoozed():
+    """Called every 60 seconds to unsnooze expired tasks."""
+    expired = get_expired_snoozed()
+    for tid in expired:
+        task = unsnooze_task(tid)
+        if task:
+            logger.info(f"Auto-unsnoozed task #{tid}")
+            broadcast({"type": "task_updated", "task": task})
 
 
 def make_app() -> tornado.web.Application:
@@ -50,7 +62,7 @@ def make_app() -> tornado.web.Application:
         ],
         template_path=str(TEMPLATE_DIR),
         static_path=str(STATIC_DIR),
-        debug=True,
+        debug=False,
     )
     app.auto_sync_enabled = True
     app.sync_callback = None
@@ -65,7 +77,7 @@ def main():
 
     app = make_app()
     app.listen(port)
-    print(f"TodoNess running at http://localhost:{port}")
+    logger.info(f"TodoNess running at http://localhost:{port}")
 
     # Auto-sync every 30 minutes
     sync_callback = tornado.ioloop.PeriodicCallback(_periodic_sync, SYNC_INTERVAL_MS)
@@ -73,6 +85,11 @@ def main():
     app.sync_callback = sync_callback
     app.auto_sync_enabled = True
     logger.info("Periodic sync enabled (every 30 min)")
+
+    # Auto-unsnooze check every 60 seconds
+    unsnooze_callback = tornado.ioloop.PeriodicCallback(_check_snoozed, UNSNOOZE_INTERVAL_MS)
+    unsnooze_callback.start()
+    logger.info("Snooze watcher enabled (every 60s)")
 
     tornado.ioloop.IOLoop.current().start()
 

@@ -13,10 +13,11 @@ var _runningSkills = {};
 
 // ── Valid Transitions (mirrors src/models.py VALID_TRANSITIONS) ────────
 var VALID_TRANSITIONS = {
-    suggested: ['active', 'waiting', 'dismissed', 'deleted'],
-    active: ['in_progress', 'waiting', 'completed', 'dismissed', 'deleted'],
-    in_progress: ['active', 'waiting', 'completed', 'deleted'],
-    waiting: ['active', 'in_progress', 'completed', 'deleted'],
+    suggested: ['active', 'waiting', 'snoozed', 'dismissed', 'deleted'],
+    active: ['in_progress', 'waiting', 'snoozed', 'completed', 'dismissed', 'deleted'],
+    in_progress: ['active', 'waiting', 'snoozed', 'completed', 'deleted'],
+    waiting: ['active', 'in_progress', 'snoozed', 'completed', 'deleted'],
+    snoozed: ['active', 'completed', 'dismissed', 'deleted'],
     completed: ['active', 'deleted'],
     dismissed: ['active', 'suggested', 'deleted'],
     deleted: ['active']
@@ -252,6 +253,7 @@ function renderTaskList() {
     var inProgress = [];
     var active = [];
     var waiting = [];
+    var snoozed = [];
     var suggested = [];
     var completed = [];
     var dismissed = [];
@@ -265,6 +267,8 @@ function renderTaskList() {
             active.push(t);
         } else if (t.status === 'waiting') {
             waiting.push(t);
+        } else if (t.status === 'snoozed') {
+            snoozed.push(t);
         } else if (t.status === 'suggested') {
             suggested.push(t);
         } else if (t.status === 'completed') {
@@ -279,6 +283,7 @@ function renderTaskList() {
     renderSection('in_progress', inProgress);
     renderSection('active', active);
     renderSection('waiting', waiting);
+    renderSection('snoozed', snoozed);
     renderSection('suggested', suggested);
     renderSection('completed', completed);
     renderSection('dismissed', dismissed);
@@ -295,8 +300,12 @@ function renderSection(sectionId, sectionTasks) {
         var selected = task.id === selectedTaskId ? ' selected' : '';
         var dueHtml = '';
         if (task.due_date) {
-            var overdue = new Date(task.due_date) < new Date() ? ' overdue' : '';
+            var isOverdueDate = new Date(task.due_date + 'T23:59:59') < new Date() && ['active','in_progress','waiting','snoozed'].indexOf(task.status) !== -1;
+            var overdue = isOverdueDate ? ' overdue' : '';
             dueHtml = '<span class="task-due' + overdue + '">' + formatDate(task.due_date) + '</span>';
+            if (isOverdueDate) {
+                dueHtml += '<span class="overdue-badge">Overdue</span>';
+            }
         }
         var parseHtml = parseStatusIcon(task.parse_status);
         var enrichedHtml = task.skill_output ? '<span class="enriched-icon" title="Skill enriched">\u26A1</span>' : '';
@@ -313,11 +322,25 @@ function renderSection(sectionId, sectionTasks) {
             actionBadgeHtml = '<span class="action-badge">' + actionTypeIcon(task.action_type) + ' ' + escapeHtml(actionTypeLabel(task.action_type)) + '</span>';
         }
 
-        var previewHtml = preview
-            ? '<div class="task-row-preview">' + escapeHtml(truncate(preview, 80)) + actionBadgeHtml + '</div>'
-            : (actionBadgeHtml ? '<div class="task-row-preview">' + actionBadgeHtml + '</div>' : '');
+        // Snooze info line
+        var snoozeHtml = '';
+        if (task.status === 'snoozed' && task.snoozed_until) {
+            snoozeHtml = '<span class="snooze-info">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span>';
+        }
 
-        html += '<div class="task-row' + selected + '" data-id="' + task.id + '" data-status="' + escapeHtml(task.status) + '" draggable="true" onclick="selectTask(' + task.id + ')">'
+        var previewHtml = preview
+            ? '<div class="task-row-preview">' + (snoozeHtml || '') + escapeHtml(truncate(preview, 80)) + actionBadgeHtml + '</div>'
+            : (snoozeHtml ? '<div class="task-row-preview">' + snoozeHtml + '</div>'
+                : (actionBadgeHtml ? '<div class="task-row-preview">' + actionBadgeHtml + '</div>' : ''));
+
+        // Overdue check for active statuses
+        var overdueClass = '';
+        if (task.due_date && ['active','in_progress','waiting','snoozed'].indexOf(task.status) !== -1) {
+            var dueD = new Date(task.due_date + 'T23:59:59');
+            if (dueD < new Date()) overdueClass = ' overdue';
+        }
+
+        html += '<div class="task-row' + selected + overdueClass + '" data-id="' + task.id + '" data-status="' + escapeHtml(task.status) + '" draggable="true" onclick="selectTask(' + task.id + ')">'
             + priorityDot(task.priority)
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
@@ -379,6 +402,9 @@ function renderDetailPane(task) {
         + '<span class="meta-item">' + dueDateField(task) + '</span>'
         + '<span class="meta-item">' + actionTypeSelector(task) + '</span>'
         + '<span class="meta-item">' + parseStatusBadge(task.parse_status, task.id) + '</span>'
+        + (task.status === 'snoozed' && task.snoozed_until
+            ? '<span class="meta-item"><span class="snooze-detail-badge">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span></span>'
+            : '')
         + '<span class="meta-item" style="margin-left:auto">' + sourceMetaLink(task) + '</span>'
         + '</div>';
 
@@ -954,30 +980,31 @@ function getActionButtons(task) {
     var html = '';
 
     if (task.status === 'suggested') {
-        // Primary: accept the suggestion. Secondary: dismiss it.
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'promote\')">Accept Task</button>';
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'active') {
-        // Primary: start working. Secondary: mark done (skip in_progress). Tertiary: dismiss.
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'start\')">Start Working</button>';
+        html += renderSnoozeButton(task.id);
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
         html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'in_progress') {
-        // Primary: done. Secondary: pause (back to active).
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
+        html += renderSnoozeButton(task.id);
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Pause</button>';
     } else if (task.status === 'waiting') {
-        // Primary: move back to active. Secondary: complete.
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Move to Active</button>';
+        html += renderSnoozeButton(task.id);
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
+    } else if (task.status === 'snoozed') {
+        html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Wake Up</button>';
+        html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
+        html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'completed') {
-        // Only action: reopen
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Reopen</button>';
     } else if (task.status === 'dismissed') {
-        // Restore
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Restore</button>';
     }
 
@@ -1084,7 +1111,7 @@ function toggleSection(sectionId) {
 }
 
 // ── Drag and Drop ─────────────────────────────────────────────────────
-var ALL_SECTIONS = ['in_progress', 'active', 'waiting', 'suggested', 'completed', 'dismissed', 'deleted'];
+var ALL_SECTIONS = ['in_progress', 'active', 'waiting', 'snoozed', 'suggested', 'completed', 'dismissed', 'deleted'];
 
 function setupDropZones() {
     ALL_SECTIONS.forEach(function(sectionId) {
@@ -1185,6 +1212,8 @@ function executeDrop(taskId, sourceStatus, targetStatus) {
     // Use named actions for special transitions that trigger server-side behavior
     if (sourceStatus === 'suggested' && targetStatus === 'active') {
         doAction(taskId, 'promote');
+    } else if (targetStatus === 'snoozed') {
+        doSnooze(taskId, { duration_minutes: 60 });
     } else if (targetStatus === 'in_progress') {
         doAction(taskId, 'start');
     } else if (targetStatus === 'completed') {
@@ -1195,6 +1224,118 @@ function executeDrop(taskId, sourceStatus, targetStatus) {
         doAction(taskId, 'transition', targetStatus);
     }
 }
+
+// ── Snooze ─────────────────────────────────────────────────────────────
+function renderSnoozeButton(taskId) {
+    return '<div class="snooze-btn-wrapper" style="display:inline-block;position:relative">'
+        + '<button class="btn btn-snooze" onclick="event.stopPropagation(); toggleSnoozeDropdown(' + taskId + ')">Snooze</button>'
+        + '<div class="snooze-dropdown" id="snooze-dropdown-' + taskId + '">'
+        + '<div class="snooze-option" onclick="event.stopPropagation(); doSnooze(' + taskId + ',{duration_minutes:60})">1 hour</div>'
+        + '<div class="snooze-option" onclick="event.stopPropagation(); doSnooze(' + taskId + ',{duration_minutes:240})">4 hours</div>'
+        + '<div class="snooze-option" onclick="event.stopPropagation(); snoozeTomorrow(' + taskId + ')">Tomorrow 9 AM</div>'
+        + '<div class="snooze-option" onclick="event.stopPropagation(); snoozeNextMonday(' + taskId + ')">Next Monday 9 AM</div>'
+        + '<div class="snooze-option snooze-custom" onclick="event.stopPropagation(); showCustomSnooze(' + taskId + ')">'
+        + 'Pick date...'
+        + '<input type="datetime-local" class="snooze-datetime-input" id="snooze-custom-' + taskId + '" '
+        + 'onchange="event.stopPropagation(); doSnoozeCustom(' + taskId + ', this.value)" style="display:none">'
+        + '</div>'
+        + '</div>'
+        + '</div>';
+}
+
+function toggleSnoozeDropdown(taskId) {
+    // Close any other open snooze dropdowns
+    document.querySelectorAll('.snooze-dropdown.open').forEach(function(d) {
+        d.classList.remove('open');
+    });
+    var dd = document.getElementById('snooze-dropdown-' + taskId);
+    if (dd) dd.classList.toggle('open');
+}
+
+function doSnooze(taskId, opts) {
+    var body = { action: 'snooze' };
+    if (opts.duration_minutes) body.duration_minutes = opts.duration_minutes;
+    if (opts.snoozed_until) body.snoozed_until = opts.snoozed_until;
+
+    fetch('/api/tasks/' + taskId + '/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(function(res) {
+        if (!res.ok) return res.json().then(function(d) { throw new Error(d.error || 'Snooze failed'); });
+        return res.json();
+    })
+    .then(function(data) {
+        if (data.task) {
+            var idx = tasks.findIndex(function(t) { return t.id === data.task.id; });
+            if (idx >= 0) tasks[idx] = data.task;
+            renderTaskList();
+            if (selectedTaskId === data.task.id) renderDetailPane(data.task);
+        }
+    })
+    .catch(function(err) { console.error('Snooze failed:', err.message); });
+
+    // Close dropdown
+    document.querySelectorAll('.snooze-dropdown.open').forEach(function(d) {
+        d.classList.remove('open');
+    });
+}
+
+function snoozeTomorrow(taskId) {
+    var d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function snoozeNextMonday(taskId) {
+    var d = new Date();
+    var day = d.getDay(); // 0=Sun, 1=Mon, ...
+    var daysUntilMon = day === 0 ? 1 : (8 - day);
+    d.setDate(d.getDate() + daysUntilMon);
+    d.setHours(9, 0, 0, 0);
+    doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function showCustomSnooze(taskId) {
+    var input = document.getElementById('snooze-custom-' + taskId);
+    if (input) {
+        input.style.display = 'block';
+        input.focus();
+        try { input.showPicker(); } catch(e) {}
+    }
+}
+
+function doSnoozeCustom(taskId, value) {
+    if (!value) return;
+    var d = new Date(value);
+    doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function formatSnoozeTime(isoString) {
+    if (!isoString) return '';
+    var d = new Date(isoString);
+    var now = new Date();
+    var diffMs = d - now;
+
+    // If less than 24 hours away, show time only
+    if (diffMs > 0 && diffMs < 24 * 60 * 60 * 1000) {
+        return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    // Otherwise show day + time
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return days[d.getDay()] + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+// Close snooze dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.snooze-btn-wrapper')) {
+        document.querySelectorAll('.snooze-dropdown.open').forEach(function(d) {
+            d.classList.remove('open');
+        });
+    }
+});
 
 // ── Utilities ──────────────────────────────────────────────────────────
 function timeAgo(isoString) {

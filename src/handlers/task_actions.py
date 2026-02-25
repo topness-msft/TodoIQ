@@ -5,7 +5,7 @@ import tornado.web
 
 from ..models import (
     promote_task, dismiss_task, complete_task, start_task,
-    transition_task, get_task, update_task,
+    snooze_task, transition_task, get_task, update_task,
 )
 from ..services.claude_runner import run_claude
 from .ws import broadcast
@@ -42,6 +42,15 @@ class TaskActionHandler(tornado.web.RequestHandler):
         if action in action_map:
             try:
                 task = action_map[action](tid)
+            except ValueError as e:
+                self.set_status(400)
+                self.write(json.dumps({"error": str(e)}))
+                return
+        elif action == "snooze":
+            duration = body.get("duration_minutes")
+            until = body.get("snoozed_until")
+            try:
+                task = snooze_task(tid, minutes=duration, until=until)
             except ValueError as e:
                 self.set_status(400)
                 self.write(json.dumps({"error": str(e)}))

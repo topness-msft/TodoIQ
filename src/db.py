@@ -1,6 +1,5 @@
 """SQLite database initialization and connection management for TodoNess."""
 
-import os
 import sqlite3
 from pathlib import Path
 
@@ -27,6 +26,65 @@ def _migrate(conn: sqlite3.Connection):
     if "skill_output" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN skill_output TEXT")
         conn.commit()
+    if "snoozed_until" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN snoozed_until TEXT")
+        conn.commit()
+
+    # Migrate tasks table to support 'snoozed' status
+    task_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if task_sql and "'snoozed'" not in (task_sql[0] or ""):
+        conn.executescript("""
+            CREATE TABLE tasks_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT NOT NULL,
+                description     TEXT DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'active'
+                                    CHECK (status IN ('suggested','active','in_progress','waiting','snoozed','completed','dismissed','deleted')),
+                snoozed_until   TEXT,
+                parse_status    TEXT NOT NULL DEFAULT 'parsed'
+                                    CHECK (parse_status IN ('unparsed','queued','parsing','parsed')),
+                raw_input       TEXT,
+                priority        INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
+                due_date        TEXT,
+                committed_date  TEXT,
+                source_type     TEXT DEFAULT 'manual'
+                                    CHECK (source_type IN ('email','meeting','chat','manual')),
+                source_id       TEXT,
+                source_url      TEXT,
+                source_snippet  TEXT,
+                coaching_text   TEXT,
+                action_type     TEXT DEFAULT 'general'
+                                    CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
+                skill_output    TEXT,
+                key_people      TEXT,
+                related_meeting TEXT,
+                user_notes      TEXT DEFAULT '',
+                suggestion_refreshed_at TEXT,
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            INSERT INTO tasks_new (id, title, description, status, snoozed_until, parse_status,
+                raw_input, priority, due_date, committed_date, source_type, source_id,
+                source_url, source_snippet, coaching_text, action_type, skill_output,
+                key_people, related_meeting, user_notes, suggestion_refreshed_at,
+                created_at, updated_at)
+            SELECT id, title, description, status, snoozed_until, parse_status,
+                raw_input, priority, due_date, committed_date, source_type, source_id,
+                source_url, source_snippet, coaching_text, action_type, skill_output,
+                key_people, related_meeting, user_notes, suggestion_refreshed_at,
+                created_at, updated_at
+            FROM tasks;
+            DROP TABLE tasks;
+            ALTER TABLE tasks_new RENAME TO tasks;
+        """)
+        # Recreate indexes after table swap
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+        """)
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -71,7 +129,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     title           TEXT NOT NULL,
     description     TEXT DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'active'
-                        CHECK (status IN ('suggested','active','in_progress','waiting','completed','dismissed','deleted')),
+                        CHECK (status IN ('suggested','active','in_progress','waiting','snoozed','completed','dismissed','deleted')),
+    snoozed_until   TEXT,
     parse_status    TEXT NOT NULL DEFAULT 'parsed'
                         CHECK (parse_status IN ('unparsed','queued','parsing','parsed')),
     raw_input       TEXT,
