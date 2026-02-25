@@ -32,7 +32,19 @@ conn.close()
 
 A task needs **coaching-only** re-parse if it already has `title`, `description`, and `key_people` populated (i.e. it was previously fully parsed). This happens when the user changes the `action_type` or edits the description from the dashboard.
 
-For coaching-only tasks, **skip Step 3** entirely. Jump straight to **Step 3b** to re-generate only `coaching_text`.
+For coaching-only tasks, **skip Step 3** but first do **Step 2c** (incremental name resolution), then jump to **Step 3b** to re-generate `coaching_text`.
+
+## Step 2c: Incremental name resolution for coaching-only re-parse
+
+Before regenerating coaching, scan the current `description` and `user_notes` for person names that are NOT already in `key_people`. To detect new names:
+
+1. Parse existing `key_people` JSON to get a set of already-resolved names (including alternatives).
+2. Scan `description` and `user_notes` for capitalized multi-word tokens that look like person names (e.g. "Sameer Bhangar", "Alice") that aren't in the resolved set.
+3. For each new name found, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role."
+4. Append newly resolved people to the existing `key_people` array (don't replace existing entries).
+5. Update the `key_people` column before proceeding to Step 3b.
+
+This is additive — existing resolved people are preserved, and new names get resolved so coaching text can reference them properly with inline pills.
 
 ## Step 3: Full parse — reason about the raw_input
 

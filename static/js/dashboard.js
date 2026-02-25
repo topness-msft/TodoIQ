@@ -11,6 +11,17 @@ var lastSyncTime = null;
 var _skillPollTimer = null;
 var _runningSkills = {};
 
+// ── Valid Transitions (mirrors src/models.py VALID_TRANSITIONS) ────────
+var VALID_TRANSITIONS = {
+    suggested: ['active', 'waiting', 'dismissed', 'deleted'],
+    active: ['in_progress', 'waiting', 'completed', 'dismissed', 'deleted'],
+    in_progress: ['active', 'waiting', 'completed', 'deleted'],
+    waiting: ['active', 'in_progress', 'completed', 'deleted'],
+    completed: ['active', 'deleted'],
+    dismissed: ['active', 'suggested', 'deleted'],
+    deleted: ['active']
+};
+
 // ── Init ───────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
 
@@ -18,6 +29,7 @@ function init() {
     fetchTasks();
     connectWebSocket();
     setupInputBar();
+    setupDropZones();
     startParsePoller();
     fetchSyncStatus();
 
@@ -239,6 +251,7 @@ function taskMatchesSearch(task) {
 function renderTaskList() {
     var inProgress = [];
     var active = [];
+    var waiting = [];
     var suggested = [];
     var completed = [];
     var dismissed = [];
@@ -250,6 +263,8 @@ function renderTaskList() {
             inProgress.push(t);
         } else if (t.status === 'active') {
             active.push(t);
+        } else if (t.status === 'waiting') {
+            waiting.push(t);
         } else if (t.status === 'suggested') {
             suggested.push(t);
         } else if (t.status === 'completed') {
@@ -263,6 +278,7 @@ function renderTaskList() {
 
     renderSection('in_progress', inProgress);
     renderSection('active', active);
+    renderSection('waiting', waiting);
     renderSection('suggested', suggested);
     renderSection('completed', completed);
     renderSection('dismissed', dismissed);
@@ -301,7 +317,7 @@ function renderSection(sectionId, sectionTasks) {
             ? '<div class="task-row-preview">' + escapeHtml(truncate(preview, 80)) + actionBadgeHtml + '</div>'
             : (actionBadgeHtml ? '<div class="task-row-preview">' + actionBadgeHtml + '</div>' : '');
 
-        html += '<div class="task-row' + selected + '" data-id="' + task.id + '" onclick="selectTask(' + task.id + ')">'
+        html += '<div class="task-row' + selected + '" data-id="' + task.id + '" data-status="' + escapeHtml(task.status) + '" draggable="true" onclick="selectTask(' + task.id + ')">'
             + priorityDot(task.priority)
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
@@ -940,16 +956,23 @@ function getActionButtons(task) {
     if (task.status === 'suggested') {
         // Primary: accept the suggestion. Secondary: dismiss it.
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'promote\')">Accept Task</button>';
-        html += '<button class="btn" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
+        html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
+        html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'active') {
         // Primary: start working. Secondary: mark done (skip in_progress). Tertiary: dismiss.
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'start\')">Start Working</button>';
+        html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
         html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'in_progress') {
         // Primary: done. Secondary: pause (back to active).
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
+        html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Pause</button>';
+    } else if (task.status === 'waiting') {
+        // Primary: move back to active. Secondary: complete.
+        html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Move to Active</button>';
+        html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
     } else if (task.status === 'completed') {
         // Only action: reopen
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Reopen</button>';
@@ -1057,6 +1080,119 @@ function toggleSection(sectionId) {
     } else {
         body.classList.add('collapsed');
         toggle.innerHTML = '&#9656;'; // ▸
+    }
+}
+
+// ── Drag and Drop ─────────────────────────────────────────────────────
+var ALL_SECTIONS = ['in_progress', 'active', 'waiting', 'suggested', 'completed', 'dismissed', 'deleted'];
+
+function setupDropZones() {
+    ALL_SECTIONS.forEach(function(sectionId) {
+        var body = document.getElementById('body-' + sectionId);
+        if (!body) return;
+
+        body.addEventListener('dragover', function(e) {
+            var sourceStatus = e.dataTransfer.types.indexOf('text/x-status') !== -1
+                ? _dragSourceStatus : null;
+            if (sourceStatus && isValidDrop(sourceStatus, sectionId)) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+            }
+        });
+
+        body.addEventListener('dragenter', function(e) {
+            e.preventDefault();
+            var sourceStatus = _dragSourceStatus;
+            if (sourceStatus && isValidDrop(sourceStatus, sectionId)) {
+                body.classList.add('drop-target');
+            }
+        });
+
+        body.addEventListener('dragleave', function(e) {
+            // Only remove if leaving the body element itself (not entering a child)
+            if (!body.contains(e.relatedTarget)) {
+                body.classList.remove('drop-target');
+            }
+        });
+
+        body.addEventListener('drop', function(e) {
+            e.preventDefault();
+            body.classList.remove('drop-target');
+            var taskId = parseInt(e.dataTransfer.getData('text/x-task-id'));
+            var sourceStatus = e.dataTransfer.getData('text/x-status');
+            if (!taskId || !sourceStatus) return;
+            executeDrop(taskId, sourceStatus, sectionId);
+        });
+    });
+
+    // Attach dragstart/dragend at the task-list level (delegated)
+    var taskList = document.querySelector('.task-list');
+    if (taskList) {
+        taskList.addEventListener('dragstart', function(e) {
+            var row = e.target.closest('.task-row');
+            if (!row) return;
+            var taskId = row.getAttribute('data-id');
+            var status = row.getAttribute('data-status');
+            e.dataTransfer.setData('text/x-task-id', taskId);
+            e.dataTransfer.setData('text/x-status', status);
+            e.dataTransfer.effectAllowed = 'move';
+            _dragSourceStatus = status;
+            row.classList.add('dragging');
+            // Highlight eligible drop zones
+            requestAnimationFrame(function() {
+                highlightEligibleZones(status);
+            });
+        });
+
+        taskList.addEventListener('dragend', function(e) {
+            var row = e.target.closest('.task-row');
+            if (row) row.classList.remove('dragging');
+            _dragSourceStatus = null;
+            clearDropHighlights();
+        });
+    }
+}
+
+var _dragSourceStatus = null;
+
+function isValidDrop(sourceStatus, targetSectionId) {
+    if (sourceStatus === targetSectionId) return false;
+    var allowed = VALID_TRANSITIONS[sourceStatus];
+    if (!allowed) return false;
+    return allowed.indexOf(targetSectionId) !== -1;
+}
+
+function highlightEligibleZones(sourceStatus) {
+    ALL_SECTIONS.forEach(function(sectionId) {
+        var body = document.getElementById('body-' + sectionId);
+        if (!body) return;
+        if (isValidDrop(sourceStatus, sectionId)) {
+            body.classList.add('drop-eligible');
+        }
+    });
+}
+
+function clearDropHighlights() {
+    ALL_SECTIONS.forEach(function(sectionId) {
+        var body = document.getElementById('body-' + sectionId);
+        if (!body) return;
+        body.classList.remove('drop-eligible');
+        body.classList.remove('drop-target');
+    });
+}
+
+function executeDrop(taskId, sourceStatus, targetStatus) {
+    // Use named actions for special transitions that trigger server-side behavior
+    if (sourceStatus === 'suggested' && targetStatus === 'active') {
+        doAction(taskId, 'promote');
+    } else if (targetStatus === 'in_progress') {
+        doAction(taskId, 'start');
+    } else if (targetStatus === 'completed') {
+        doAction(taskId, 'complete');
+    } else if (targetStatus === 'dismissed') {
+        doAction(taskId, 'dismiss');
+    } else {
+        doAction(taskId, 'transition', targetStatus);
     }
 }
 

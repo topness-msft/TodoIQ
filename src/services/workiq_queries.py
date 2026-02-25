@@ -10,7 +10,7 @@ _TASK_OUTPUT_FORMAT = (
     "For each item, return it as a structured task suggestion with ALL of these fields: "
     "1. **Task title**: A clean imperative action describing WHAT I NEED TO DO "
     "(e.g. 'Reply to Sarah's budget proposal', 'Schedule workshop walkthrough with Steve'). "
-    "Not the email subject — describe the action. "
+    "Not the message subject — describe the action. "
     "2. **Description**: 2-3 sentences of context: what was the original ask, current state, "
     "what specifically needs to happen next. "
     "3. **Source type**: email, teams, or meeting. "
@@ -39,13 +39,17 @@ SCAN_TEAMS_MEETINGS = (
     + _TASK_OUTPUT_FORMAT
 )
 
-SCAN_AWAITING_RESPONSE = (
-    "What messages or emails have I SENT in the last {days} days that contain a question, "
-    "request, or ask where the recipient hasn't responded yet? Only include items where "
-    "I am clearly waiting for a response — not messages I sent that were purely informational. "
-    "For each item, use action_type 'awaiting-response'. "
-    + _TASK_OUTPUT_FORMAT
-)
+# SCAN_AWAITING_RESPONSE disabled — results are mostly already-handled items.
+# WorkIQ can't reliably distinguish "still waiting" from "already resolved informally".
+# Re-evaluate if WorkIQ gains thread-state awareness.
+SCAN_AWAITING_RESPONSE = None
+# SCAN_AWAITING_RESPONSE = (
+#     "What messages or emails have I SENT in the last {days} days that contain a question, "
+#     "request, or ask where the recipient hasn't responded yet? Only include items where "
+#     "I am clearly waiting for a response — not messages I sent that were purely informational. "
+#     "For each item, use action_type 'awaiting-response'. "
+#     + _TASK_OUTPUT_FORMAT
+# )
 
 # Legacy single-call query (kept for reference, no longer used)
 FULL_SCAN = SCAN_TEAMS_MEETINGS

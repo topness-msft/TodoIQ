@@ -28,6 +28,10 @@ class TaskActionHandler(tornado.web.RequestHandler):
         action = body.get("action", "")
         tid = int(task_id)
 
+        # Capture pre-transition status for coaching trigger
+        pre_task = get_task(tid)
+        pre_status = pre_task["status"] if pre_task else None
+
         action_map = {
             "promote": promote_task,
             "dismiss": dismiss_task,
@@ -66,6 +70,12 @@ class TaskActionHandler(tornado.web.RequestHandler):
             self.set_status(404)
             self.write(json.dumps({"error": "Task not found"}))
             return
+
+        # Auto-trigger coaching parse when accepting a suggested task
+        # (promote to active, or any transition out of suggested)
+        if pre_status == "suggested" and task["status"] != "dismissed" and not task.get("coaching_text"):
+            task = update_task(tid, parse_status="queued")
+            run_claude("/todo-parse", label="parse")
 
         self.write(json.dumps({"task": task}))
         broadcast({"type": "task_updated", "task": task})

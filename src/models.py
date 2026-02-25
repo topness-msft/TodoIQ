@@ -6,9 +6,10 @@ from .db import get_connection, init_db
 
 # Valid status transitions
 VALID_TRANSITIONS = {
-    "suggested": {"active", "dismissed", "deleted"},
-    "active": {"in_progress", "completed", "dismissed", "deleted"},
-    "in_progress": {"active", "completed", "deleted"},
+    "suggested": {"active", "waiting", "dismissed", "deleted"},
+    "active": {"in_progress", "waiting", "completed", "dismissed", "deleted"},
+    "in_progress": {"active", "waiting", "completed", "deleted"},
+    "waiting": {"active", "in_progress", "completed", "deleted"},
     "completed": {"active", "deleted"},
     "dismissed": {"active", "suggested", "deleted"},
     "deleted": {"active"},
@@ -169,7 +170,7 @@ def complete_task(task_id: int) -> dict | None:
     task = get_task(task_id)
     if task is None:
         return None
-    if task["status"] in ("active", "in_progress"):
+    if task["status"] in ("active", "in_progress", "waiting"):
         return update_task(task_id, status="completed")
     raise ValueError(f"Cannot complete task in status '{task['status']}'")
 

@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title           TEXT NOT NULL,
     description     TEXT DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'active'
-                        CHECK (status IN ('suggested','active','in_progress','completed','dismissed','deleted')),
+                        CHECK (status IN ('suggested','active','in_progress','waiting','completed','dismissed','deleted')),
     parse_status    TEXT NOT NULL DEFAULT 'parsed'
                         CHECK (parse_status IN ('unparsed','queued','parsing','parsed')),
     raw_input       TEXT,
