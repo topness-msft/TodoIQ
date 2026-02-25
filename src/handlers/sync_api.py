@@ -38,9 +38,35 @@ class SyncStatusHandler(tornado.web.RequestHandler):
         self.write(json.dumps({
             "last_sync": dict(last_sync) if last_sync else None,
             "sync_running": is_sync_running(),
+            "auto_sync_enabled": getattr(self.application, "auto_sync_enabled", True),
         }))
 
     def post(self):
+        try:
+            body = json.loads(self.request.body) if self.request.body else {}
+        except (json.JSONDecodeError, TypeError):
+            body = {}
+
+        # Toggle auto-sync if requested
+        if "auto_sync" in body:
+            enabled = bool(body["auto_sync"])
+            self.application.auto_sync_enabled = enabled
+            cb = getattr(self.application, "sync_callback", None)
+            if cb:
+                if enabled:
+                    if not cb.is_running():
+                        cb.start()
+                    logger.info("Auto-sync enabled")
+                else:
+                    cb.stop()
+                    logger.info("Auto-sync disabled")
+            self.write(json.dumps({
+                "ok": True,
+                "auto_sync_enabled": enabled,
+            }))
+            return
+
+        # Manual sync trigger (existing behavior)
         result = run_sync()
         if not result["ok"] and "already running" not in result["message"].lower():
             self.set_status(500)

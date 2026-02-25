@@ -65,9 +65,11 @@ Key points addressed:
 - Use the person's first name in the greeting (e.g. "Hi Mehdi,")
 - Do NOT include agenda items or coaching — those stay in coaching_text
 
-## Step 4: Write to skill_output
+## Step 4: Write to skill_output — MANDATORY, DO NOT SKIP
 
-Capture the **full draft from Step 3** (everything from the "To:" line through the notes) into a Python variable called `skill_output`, then write it to the database:
+**You MUST execute this step immediately after drafting. Do NOT ask for confirmation. Do NOT present options. Just run the code.**
+
+This runs in a non-interactive `claude -p` session — there is no user to respond. Execute the Bash tool with this Python code now:
 
 ```python
 import sqlite3
@@ -89,13 +91,17 @@ conn.execute(
 )
 conn.commit()
 conn.close()
+print(f"skill_output written to task #{task_id}")
 ```
 
-**Important:** Write to `skill_output`, NOT `coaching_text`. The `skill_output` variable MUST contain the draft text — do not leave it empty or undefined.
+**Critical rules:**
+- Execute this code via Bash immediately — do NOT ask "Would you like me to save this?"
+- Write to `skill_output`, NOT `coaching_text`
+- The `skill_output` variable MUST contain the draft text — do not leave it empty or undefined
+- If you do not execute this code, the dashboard will show no output
 
 ## Step 5: Display results
 
-Show the draft email and note:
+Show the draft email and confirm the DB write succeeded:
 > "Email draft saved to task #[id]. You can copy this into Outlook to send."
 > "Edit the draft in your notes or re-run `/respond-email [id]` after updating user_notes to adjust."
-> "View in dashboard: http://localhost:8766"

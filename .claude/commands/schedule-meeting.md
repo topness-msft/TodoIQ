@@ -65,9 +65,11 @@ Attendees: [full names from key_people]
 
 Pick the 3 best slots. Filter to each person's Outlook working hours only — never suggest slots outside configured work schedules. Prefer morning slots and avoid lunch hour (12-1pm). If no overlapping working-hours slots exist in the window, report that clearly and suggest extending the date range.
 
-## Step 5: Write to skill_output
+## Step 5: Write to skill_output — MANDATORY, DO NOT SKIP
 
-Capture the **full scheduling output from Step 4** into a Python variable called `skill_output`, then write it to the database:
+**You MUST execute this step immediately after drafting. Do NOT ask for confirmation. Do NOT present options. Just run the code.**
+
+This runs in a non-interactive `claude -p` session — there is no user to respond. Execute the Bash tool with this Python code now:
 
 ```python
 import sqlite3
@@ -89,12 +91,17 @@ conn.execute(
 )
 conn.commit()
 conn.close()
+print(f"skill_output written to task #{task_id}")
 ```
 
-**Important:** Write to `skill_output`, NOT `coaching_text`. The `skill_output` variable MUST contain the scheduling text — do not leave it empty or undefined. Agenda and coaching advice stay in coaching_text.
+**Critical rules:**
+- Execute this code via Bash immediately — do NOT ask "Would you like me to save this?"
+- Write to `skill_output`, NOT `coaching_text`
+- The `skill_output` variable MUST contain the scheduling text — do not leave it empty or undefined
+- Agenda and coaching advice stay in coaching_text
+- If you do not execute this code, the dashboard will show no output
 
 ## Step 6: Display results
 
-Show the scheduling summary and note:
+Show the scheduling summary and confirm the DB write succeeded:
 > "Scheduling suggestions saved to task #[id]. You can send the invite from Outlook."
-> "View in dashboard: http://localhost:8766"

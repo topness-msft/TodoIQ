@@ -79,9 +79,11 @@ Time estimate: [X minutes of prep needed]
 - If the meeting is recurring, note what changed since last time
 - Order prep items by priority — most important first
 
-## Step 4: Write to skill_output
+## Step 4: Write to skill_output — MANDATORY, DO NOT SKIP
 
-Capture the **full output from Step 3** into a Python variable called `skill_output`, then write it to the database:
+**You MUST execute this step immediately after drafting. Do NOT ask for confirmation. Do NOT present options. Just run the code.**
+
+This runs in a non-interactive `claude -p` session — there is no user to respond. Execute the Bash tool with this Python code now:
 
 ```python
 import sqlite3
@@ -103,12 +105,16 @@ conn.execute(
 )
 conn.commit()
 conn.close()
+print(f"skill_output written to task #{task_id}")
 ```
 
-**Important:** Write to `skill_output`, NOT `coaching_text`. The `skill_output` variable MUST contain the prep notes — do not leave it empty or undefined.
+**Critical rules:**
+- Execute this code via Bash immediately — do NOT ask "Would you like me to save this?"
+- Write to `skill_output`, NOT `coaching_text`
+- The `skill_output` variable MUST contain the prep notes — do not leave it empty or undefined
+- If you do not execute this code, the dashboard will show no output
 
 ## Step 5: Display results
 
-Show the preparation notes and note:
+Show the preparation notes and confirm the DB write succeeded:
 > "Prep notes saved to task #[id]. Check off items as you go."
-> "View in dashboard: http://localhost:8766"

@@ -32,7 +32,7 @@ def _periodic_sync():
 
 def make_app() -> tornado.web.Application:
     """Create and return the Tornado application."""
-    return tornado.web.Application(
+    app = tornado.web.Application(
         [
             # Dashboard
             (r"/", DashboardHandler),
@@ -52,6 +52,9 @@ def make_app() -> tornado.web.Application:
         static_path=str(STATIC_DIR),
         debug=True,
     )
+    app.auto_sync_enabled = True
+    app.sync_callback = None
+    return app
 
 
 def main():
@@ -67,6 +70,8 @@ def main():
     # Auto-sync every 30 minutes
     sync_callback = tornado.ioloop.PeriodicCallback(_periodic_sync, SYNC_INTERVAL_MS)
     sync_callback.start()
+    app.sync_callback = sync_callback
+    app.auto_sync_enabled = True
     logger.info("Periodic sync enabled (every 30 min)")
 
     tornado.ioloop.IOLoop.current().start()

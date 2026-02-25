@@ -8,6 +8,11 @@
             <h1 class="app-title">TodoNess</h1>
         </div>
         <div class="top-bar-right">
+            <label class="auto-sync-toggle" title="Auto-sync every 30 min">
+                <input type="checkbox" id="auto-sync-checkbox" checked onchange="toggleAutoSync(this.checked)">
+                <span class="toggle-slider"></span>
+                <span class="auto-sync-label">Auto sync</span>
+            </label>
             <span id="connection-status" class="connection-indicator disconnected">
                 <span class="connection-dot"></span>
                 <span class="connection-label">Connecting</span>

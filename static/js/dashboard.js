@@ -1407,6 +1407,12 @@ function fetchSyncStatus() {
 function updateSyncUI(data) {
     var btn = document.getElementById('sync-btn');
     var statusText = document.getElementById('sync-status-text');
+    var autoSyncCheckbox = document.getElementById('auto-sync-checkbox');
+
+    // Update auto-sync toggle state
+    if (autoSyncCheckbox && data.auto_sync_enabled !== undefined) {
+        autoSyncCheckbox.checked = data.auto_sync_enabled;
+    }
 
     if (data.sync_running) {
         btn.classList.add('syncing');
@@ -1447,6 +1453,22 @@ function _stopFastPoll() {
         clearInterval(_syncPollTimer);
         _syncPollTimer = null;
     }
+}
+
+function toggleAutoSync(enabled) {
+    fetch('/api/sync-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_sync: enabled })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        var checkbox = document.getElementById('auto-sync-checkbox');
+        if (checkbox && data.auto_sync_enabled !== undefined) {
+            checkbox.checked = data.auto_sync_enabled;
+        }
+    })
+    .catch(function(err) { console.error('Failed to toggle auto-sync:', err); });
 }
 
 function requestSync() {
