@@ -67,9 +67,17 @@ Pick the 3 best slots. Filter to each person's Outlook working hours only — ne
 
 ## Step 5: Write to skill_output
 
+Capture the **full scheduling output from Step 4** into a Python variable called `skill_output`, then write it to the database:
+
 ```python
 import sqlite3
 from datetime import datetime, timezone
+
+# skill_output must contain the complete scheduling suggestions you composed in Step 4.
+# Assign it as a triple-quoted string with the EXACT text you drafted above.
+skill_output = """<PASTE YOUR FULL SCHEDULING OUTPUT HERE>"""
+
+task_id = $ARGUMENTS
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -83,7 +91,7 @@ conn.commit()
 conn.close()
 ```
 
-**Important:** Write to `skill_output`, NOT `coaching_text`. Agenda and coaching advice stay in coaching_text.
+**Important:** Write to `skill_output`, NOT `coaching_text`. The `skill_output` variable MUST contain the scheduling text — do not leave it empty or undefined. Agenda and coaching advice stay in coaching_text.
 
 ## Step 6: Display results
 

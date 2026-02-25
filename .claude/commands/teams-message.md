@@ -65,9 +65,17 @@ Purpose: [what this message aims to accomplish]
 
 ## Step 4: Write to skill_output
 
+Capture the **full draft from Step 3** into a Python variable called `skill_output`, then write it to the database:
+
 ```python
 import sqlite3
 from datetime import datetime, timezone
+
+# skill_output must contain the complete draft you composed in Step 3.
+# Assign it as a triple-quoted string with the EXACT text you drafted above.
+skill_output = """<PASTE YOUR FULL DRAFT HERE>"""
+
+task_id = $ARGUMENTS
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -81,7 +89,7 @@ conn.commit()
 conn.close()
 ```
 
-**Important:** Write to `skill_output`, NOT `coaching_text`.
+**Important:** Write to `skill_output`, NOT `coaching_text`. The `skill_output` variable MUST contain the draft text — do not leave it empty or undefined.
 
 ## Step 5: Display results
 
