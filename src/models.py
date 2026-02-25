@@ -193,7 +193,12 @@ def snooze_task(
 ) -> dict | None:
     """Snooze a task. Provide either minutes or an ISO timestamp for until."""
     if until:
-        snoozed_until = until
+        # Normalize to consistent ISO format for reliable SQLite comparison
+        try:
+            dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+            snoozed_until = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, AttributeError):
+            snoozed_until = until
     else:
         mins = minutes or 60
         wake_time = datetime.now(timezone.utc) + timedelta(minutes=mins)
@@ -217,10 +222,12 @@ def unsnooze_task(task_id: int) -> dict | None:
 
 def get_expired_snoozed() -> list[int]:
     """Return IDs of snoozed tasks whose snoozed_until has passed."""
+    now_iso = _now()
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id FROM tasks WHERE status='snoozed' AND snoozed_until <= datetime('now')"
+            "SELECT id FROM tasks WHERE status='snoozed' AND replace(replace(snoozed_until,'.000Z','Z'),'.000+00:00','Z') <= ?",
+            (now_iso,),
         ).fetchall()
         return [r["id"] for r in rows]
     finally:
