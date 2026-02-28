@@ -68,7 +68,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
     ]}]
   ```
   Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": []}]`.
-- **source_type**: One of 'email', 'meeting', 'chat', 'manual'. For dashboard-entered tasks, infer from what the user described (e.g. "reply to John's email" → 'email', "schedule a meeting" → 'meeting', otherwise 'manual'). Note: tasks created by /todo-refresh already have the correct source_type set from WorkIQ — don't overwrite those.
+- **source_type**: Do NOT change this field. Tasks entered via the dashboard are always 'manual'. Tasks created by /todo-refresh already have the correct source_type set from WorkIQ. Leave the existing value as-is.
 - **related_meeting**: If a meeting is mentioned, describe it. Use WorkIQ if helpful: call `ask_work_iq` with "What meetings do I have related to [topic]?" **Important:** After resolving people in the key_people step, always use their full resolved names (e.g. "Pratap Ladhani" not "Pratap") in all subsequent WorkIQ queries for more precise results.
 - **action_type**: Classify the task into one of these action types based on intent:
 
@@ -116,11 +116,11 @@ now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute(
     """UPDATE tasks
        SET title=?, description=?, priority=?, due_date=?,
-           key_people=?, source_type=?, related_meeting=?,
+           key_people=?, related_meeting=?,
            coaching_text=?, action_type=?, skill_output=?,
            suggestion_refreshed_at=?, parse_status='parsed', updated_at=?
        WHERE id=?""",
-    (title, description, priority, due_date, key_people, source_type,
+    (title, description, priority, due_date, key_people,
      related_meeting, coaching_text, action_type, skill_output, now, now, task_id)
 )
 conn.commit()
