@@ -145,22 +145,26 @@ def server_thread():
 
 
 def _create_icon_image() -> "Image.Image":
-    """Draw a 64x64 blue circle with a white checkmark."""
+    """Load the TodoNess logo from static/img/icon.png, cropped to a circle."""
+    logo_path = PROJECT_ROOT / "static" / "img" / "icon.png"
+    if logo_path.exists():
+        try:
+            size = 64
+            img = Image.open(str(logo_path)).resize((size, size), Image.LANCZOS).convert("RGBA")
+            # Apply circular mask — keep only the circle, transparent corners
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, size - 1, size - 1], fill=255)
+            img.putalpha(mask)
+            return img
+        except Exception:
+            pass
+
+    # Fallback: draw a simple blue circle with white checkmark
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    # Blue circle
     draw.ellipse([2, 2, size - 3, size - 3], fill="#3B82F6")
-
-    # White checkmark (simple polyline)
-    check_points = [
-        (16, 34),  # start of short stroke
-        (26, 46),  # bottom of check
-        (48, 20),  # end of long stroke
-    ]
-    draw.line(check_points, fill="white", width=5)
-
+    draw.line([(16, 34), (26, 46), (48, 20)], fill="white", width=5)
     return img
 
 
