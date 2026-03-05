@@ -68,6 +68,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
     ]}]
   ```
   Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": []}]`.
+- **OOO check** (full parse only, not coaching-only re-parse): After resolving key_people, check if any key person is currently out of office. For the **first** (primary) person in key_people, call `ask_work_iq` with: "Check [full name]'s current presence and availability status. Are they showing as Out of Office in Teams or Outlook? Do they have an OOO status, automatic reply, or Out of Office presence set? Also check if I've received any recent automatic reply or OOO email from them. If they are OOO, when are they returning?" If they ARE out of office, set `waiting_activity` to: `{"status": "out_of_office", "return_date": "YYYY-MM-DD", "summary": "[OOO details]", "checked_at": "[now]"}` (use null for return_date if unknown). If they are NOT out of office, leave `waiting_activity` as null. This ensures the OOO badge shows immediately on the dashboard.
 - **source_type**: Do NOT change this field. Tasks entered via the dashboard are always 'manual'. Tasks created by /todo-refresh already have the correct source_type set from WorkIQ. Leave the existing value as-is.
 - **related_meeting**: If a meeting is mentioned, describe it. Use WorkIQ if helpful: call `ask_work_iq` with "What meetings do I have related to [topic]?" **Important:** After resolving people in the key_people step, always use their full resolved names (e.g. "Pratap Ladhani" not "Pratap") in all subsequent WorkIQ queries for more precise results.
 - **action_type**: Classify the task into one of these action types based on intent:
@@ -118,14 +119,18 @@ conn.execute(
        SET title=?, description=?, priority=?, due_date=?,
            key_people=?, related_meeting=?,
            coaching_text=?, action_type=?, skill_output=?,
+           waiting_activity=?,
            suggestion_refreshed_at=?, parse_status='parsed', updated_at=?
        WHERE id=?""",
     (title, description, priority, due_date, key_people,
-     related_meeting, coaching_text, action_type, skill_output, now, now, task_id)
+     related_meeting, coaching_text, action_type, skill_output,
+     waiting_activity, now, now, task_id)
 )
 conn.commit()
 conn.close()
 ```
+
+Note: `waiting_activity` is the JSON string from the OOO check (or null if person is not OOO).
 
 **For coaching-only re-parse:**
 

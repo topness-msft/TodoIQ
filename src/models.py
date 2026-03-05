@@ -95,6 +95,7 @@ def get_task(task_id: int, conn: sqlite3.Connection | None = None) -> dict | Non
 def list_tasks(
     status: str | None = None,
     parse_status: str | None = None,
+    exclude_statuses: list[str] | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict]:
@@ -108,6 +109,10 @@ def list_tasks(
         if parse_status:
             clauses.append("parse_status = ?")
             params.append(parse_status)
+        if exclude_statuses:
+            placeholders = ",".join("?" for _ in exclude_statuses)
+            clauses.append(f"status NOT IN ({placeholders})")
+            params.extend(exclude_statuses)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"SELECT * FROM tasks {where} ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?",

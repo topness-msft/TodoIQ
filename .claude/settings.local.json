@@ -32,7 +32,8 @@
       "Bash(xargs kill:*)",
       "Bash(while curl -s http://localhost:8766/api/runner-status)",
       "Bash(do sleep 10)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(requested\" → chat\\), overriding the correct value. Now source_type is\nleft untouched during parsing.\n\nCo-Authored-By: Claude Opus 4.6 \\(1M context\\) <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }

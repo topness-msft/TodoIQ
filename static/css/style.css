@@ -1768,6 +1768,42 @@ html, body {
     margin-top: 4px;
 }
 
+/* ── OOO Badge (task list rows) ─────────────────────────────────────── */
+.ooo-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    background: #fef2f2;
+    color: #dc2626;
+    margin-left: 4px;
+    cursor: default;
+}
+
+/* ── OOF Snooze Indicators ─────────────────────────────────────────── */
+.snooze-option-oof {
+    background: #fef2f2;
+    color: #dc2626;
+    font-weight: 500;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.snooze-option-oof:hover {
+    background: #fde8e8;
+    color: #b91c1c;
+}
+
+.snooze-info-oof { color: #dc2626; }
+.snooze-oof-badge { background: #fef2f2; color: #dc2626; }
+
+/* ── Weekday Snooze Buttons ────────────────────────────────────────── */
+.snooze-weekday-row { display: flex; align-items: center; gap: 4px; padding: 8px 14px; }
+.snooze-weekday-label { font-size: 12px; color: #707070; margin-right: 4px; white-space: nowrap; }
+.snooze-weekday-btn { padding: 4px 10px; border: 1px solid #d1d1d1; border-radius: 4px; font-size: 12px; cursor: pointer; background: #fff; color: #242424; font-family: inherit; }
+.snooze-weekday-btn:hover { background: #fef3cd; border-color: #795b00; color: #795b00; }
+.snooze-weekday-tomorrow { font-weight: 600; }
+
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     .main-content {

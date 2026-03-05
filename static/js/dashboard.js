@@ -10,6 +10,8 @@ var searchQuery = '';
 var lastSyncTime = null;
 var _skillPollTimer = null;
 var _runningSkills = {};
+var _loadedSections = {};
+var TERMINAL_SECTIONS = ['completed', 'dismissed', 'deleted'];
 
 // ── Valid Transitions (mirrors src/models.py VALID_TRANSITIONS) ────────
 var VALID_TRANSITIONS = {
@@ -121,10 +123,20 @@ function handleWsMessage(msg) {
 
 // ── Fetch Tasks ────────────────────────────────────────────────────────
 function fetchTasks() {
-    fetch('/api/tasks')
+    fetch('/api/tasks?exclude_status=dismissed,completed,deleted')
         .then(function(res) { return res.json(); })
         .then(function(data) {
-            tasks = data.tasks || [];
+            // Merge: keep any previously-loaded terminal tasks, replace active-lifecycle
+            var terminalTasks = tasks.filter(function(t) {
+                return TERMINAL_SECTIONS.indexOf(t.status) !== -1;
+            });
+            var freshTasks = data.tasks || [];
+            // Build map of fresh task IDs for dedup
+            var freshIds = {};
+            freshTasks.forEach(function(t) { freshIds[t.id] = true; });
+            // Keep terminal tasks that aren't in the fresh set (avoid duplicates from status changes)
+            terminalTasks = terminalTasks.filter(function(t) { return !freshIds[t.id]; });
+            tasks = freshTasks.concat(terminalTasks);
             renderTaskList();
             if (selectedTaskId) {
                 var t = tasks.find(function(t) { return t.id === selectedTaskId; });
@@ -133,6 +145,20 @@ function fetchTasks() {
             }
         })
         .catch(function(err) { console.error('Failed to fetch tasks:', err); });
+}
+
+function fetchSectionTasks(sectionId) {
+    return fetch('/api/tasks?status=' + sectionId)
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            var newTasks = data.tasks || [];
+            // Merge into global tasks array, replacing any stale entries
+            var newIds = {};
+            newTasks.forEach(function(t) { newIds[t.id] = true; });
+            tasks = tasks.filter(function(t) { return !newIds[t.id]; }).concat(newTasks);
+            _loadedSections[sectionId] = true;
+            renderTaskList();
+        });
 }
 
 
@@ -325,7 +351,14 @@ function renderSection(sectionId, sectionTasks) {
         // Snooze info line
         var snoozeHtml = '';
         if (task.status === 'snoozed' && task.snoozed_until) {
-            snoozeHtml = '<span class="snooze-info">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span>';
+            var snoozeActivity = parseWaitingActivity(task);
+            if (snoozeActivity && snoozeActivity.status === 'out_of_office') {
+                var oofName = getOofPersonFirstName(task);
+                var oofDateStr = snoozeActivity.return_date ? ' (OOO until ' + formatOofDate(snoozeActivity.return_date) + ')' : ' (OOO)';
+                snoozeHtml = '<span class="snooze-info snooze-info-oof">Waiting for ' + escapeHtml(oofName) + oofDateStr + '</span>';
+            } else {
+                snoozeHtml = '<span class="snooze-info">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span>';
+            }
         }
 
         var previewHtml = preview
@@ -409,9 +442,17 @@ function renderDetailPane(task) {
         + '<span class="meta-item">' + dueDateField(task) + '</span>'
         + '<span class="meta-item">' + actionTypeSelector(task) + '</span>'
         + '<span class="meta-item">' + parseStatusBadge(task.parse_status, task.id) + '</span>'
-        + (task.status === 'snoozed' && task.snoozed_until
-            ? '<span class="meta-item"><span class="snooze-detail-badge">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span></span>'
-            : '')
+        + (function() {
+            if (task.status === 'snoozed' && task.snoozed_until) {
+                var sa = parseWaitingActivity(task);
+                if (sa && sa.status === 'out_of_office') {
+                    var dateStr = sa.return_date ? formatOofDate(sa.return_date) : 'unknown';
+                    return '<span class="meta-item"><span class="snooze-detail-badge snooze-oof-badge">Waiting for OOO return \u2014 ' + escapeHtml(dateStr) + '</span></span>';
+                }
+                return '<span class="meta-item"><span class="snooze-detail-badge">Snoozed until ' + formatSnoozeTime(task.snoozed_until) + '</span></span>';
+            }
+            return '';
+        })()
         + '<span class="meta-item" style="margin-left:auto">' + sourceMetaLink(task) + '</span>'
         + '</div>';
 
@@ -445,7 +486,7 @@ function renderDetailPane(task) {
     }
 
     // Waiting Activity Check (between Key People and Notes)
-    if (task.status === 'waiting') {
+    if (task.status === 'waiting' || (task.status === 'snoozed' && parseWaitingActivity(task) && parseWaitingActivity(task).status === 'out_of_office')) {
         html += renderWaitingActivityCard(task);
     }
 
@@ -1088,12 +1129,12 @@ function getActionButtons(task) {
         html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'active' || task.status === 'in_progress') {
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
-        html += renderSnoozeButton(task.id);
+        html += renderSnoozeButton(task);
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'transition\',\'waiting\')">Waiting</button>';
         html += '<button class="btn btn-subtle" onclick="doAction(' + task.id + ',\'dismiss\')">Dismiss</button>';
     } else if (task.status === 'waiting') {
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Move to Active</button>';
-        html += renderSnoozeButton(task.id);
+        html += renderSnoozeButton(task);
         html += '<button class="btn" onclick="doAction(' + task.id + ',\'complete\')">Mark Complete</button>';
     } else if (task.status === 'snoozed') {
         html += '<button class="btn btn-primary" onclick="doAction(' + task.id + ',\'transition\',\'active\')">Wake Up</button>';
@@ -1199,6 +1240,14 @@ function toggleSection(sectionId) {
     var toggle = document.getElementById('toggle-' + sectionId);
 
     if (body.classList.contains('collapsed')) {
+        // Lazy-load terminal sections on first expand
+        if (TERMINAL_SECTIONS.indexOf(sectionId) !== -1 && !_loadedSections[sectionId]) {
+            fetchSectionTasks(sectionId).then(function() {
+                body.classList.remove('collapsed');
+                toggle.innerHTML = '&#9662;'; // ▾
+            });
+            return;
+        }
         body.classList.remove('collapsed');
         toggle.innerHTML = '&#9662;'; // ▾
     } else {
@@ -1323,14 +1372,27 @@ function executeDrop(taskId, sourceStatus, targetStatus) {
 }
 
 // ── Snooze ─────────────────────────────────────────────────────────────
-function renderSnoozeButton(taskId) {
+function renderSnoozeButton(task) {
+    var taskId = task.id;
+    var oofOption = '';
+    var activity = parseWaitingActivity(task);
+    if (activity && activity.status === 'out_of_office' && activity.return_date) {
+        var returnDate = new Date(activity.return_date + 'T09:00:00');
+        if (returnDate > new Date()) {
+            var firstName = getOofPersonFirstName(task);
+            var dateLabel = formatOofDate(activity.return_date);
+            oofOption = '<div class="snooze-option snooze-option-oof" onclick="event.stopPropagation(); snoozeUntilReturn(' + taskId + ', \'' + escapeHtml(activity.return_date) + '\')">'
+                + 'Until ' + escapeHtml(firstName) + ' returns (' + escapeHtml(dateLabel) + ')'
+                + '</div>';
+        }
+    }
     return '<div class="snooze-btn-wrapper" style="display:inline-block;position:relative">'
         + '<button class="btn btn-snooze" onclick="event.stopPropagation(); toggleSnoozeDropdown(' + taskId + ')">Snooze</button>'
         + '<div class="snooze-dropdown" id="snooze-dropdown-' + taskId + '">'
+        + oofOption
         + '<div class="snooze-option" onclick="event.stopPropagation(); doSnooze(' + taskId + ',{duration_minutes:60})">1 hour</div>'
         + '<div class="snooze-option" onclick="event.stopPropagation(); doSnooze(' + taskId + ',{duration_minutes:240})">4 hours</div>'
-        + '<div class="snooze-option" onclick="event.stopPropagation(); snoozeTomorrow(' + taskId + ')">Tomorrow 9 AM</div>'
-        + '<div class="snooze-option" onclick="event.stopPropagation(); snoozeNextMonday(' + taskId + ')">Next Monday 9 AM</div>'
+        + renderWeekdaySnoozeRow(taskId)
         + '<div class="snooze-option snooze-custom">'
         + '<label class="snooze-date-label">Pick date &amp; time:</label>'
         + '<div class="snooze-custom-row">'
@@ -1382,22 +1444,6 @@ function doSnooze(taskId, opts) {
     });
 }
 
-function snoozeTomorrow(taskId) {
-    var d = new Date();
-    d.setDate(d.getDate() + 1);
-    d.setHours(9, 0, 0, 0);
-    doSnooze(taskId, { snoozed_until: d.toISOString() });
-}
-
-function snoozeNextMonday(taskId) {
-    var d = new Date();
-    var day = d.getDay(); // 0=Sun, 1=Mon, ...
-    var daysUntilMon = day === 0 ? 1 : (8 - day);
-    d.setDate(d.getDate() + daysUntilMon);
-    d.setHours(9, 0, 0, 0);
-    doSnooze(taskId, { snoozed_until: d.toISOString() });
-}
-
 function doSnoozeCustom(taskId) {
     var dateInput = document.getElementById('snooze-date-' + taskId);
     var timeInput = document.getElementById('snooze-time-' + taskId);
@@ -1409,6 +1455,63 @@ function doSnoozeCustom(taskId) {
         parseInt(timeParts[0]), parseInt(timeParts[1]), 0
     );
     doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function renderWeekdaySnoozeRow(taskId) {
+    var now = new Date();
+    var day = now.getDay(); // 0=Sun..6=Sat
+    var buttons = '';
+    var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+    if (day >= 1 && day <= 4) {
+        // Mon-Thu: show buttons for tomorrow through Friday
+        for (var offset = 1; offset <= (5 - day); offset++) {
+            var target = new Date(now);
+            target.setDate(target.getDate() + offset);
+            var label = dayNames[target.getDay()];
+            var tomorrowClass = offset === 1 ? ' snooze-weekday-tomorrow' : '';
+            buttons += '<button class="snooze-weekday-btn' + tomorrowClass + '" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + offset + ')">' + label + '</button>';
+        }
+    } else {
+        // Fri/Sat/Sun: show Mon button
+        var daysToMon = day === 0 ? 1 : (8 - day);
+        buttons += '<button class="snooze-weekday-btn snooze-weekday-tomorrow" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + daysToMon + ')">Mon</button>';
+    }
+
+    return '<div class="snooze-weekday-row">'
+        + '<span class="snooze-weekday-label">9 AM:</span>'
+        + buttons
+        + '</div>';
+}
+
+function snoozeToDay(taskId, daysOffset) {
+    var d = new Date();
+    d.setDate(d.getDate() + daysOffset);
+    d.setHours(9, 0, 0, 0);
+    doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function getOofPersonFirstName(task) {
+    var people = parsePeople(task.key_people);
+    if (people.length > 0 && people[0].name) {
+        return people[0].name.split(' ')[0];
+    }
+    return 'them';
+}
+
+function snoozeUntilReturn(taskId, returnDate) {
+    var parts = returnDate.split('-');
+    var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 9, 0, 0, 0);
+    doSnooze(taskId, { snoozed_until: d.toISOString() });
+}
+
+function formatOofDate(dateStr) {
+    if (!dateStr) return '';
+    var parts = dateStr.split('-');
+    var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return days[d.getDay()] + ', ' + months[d.getMonth()] + ' ' + d.getDate();
 }
 
 function formatSnoozeTime(isoString) {
@@ -1442,9 +1545,19 @@ function parseWaitingActivity(task) {
 }
 
 function waitingActivityIcon(task) {
-    if (task.status !== 'waiting') return '';
+    if (task.status !== 'waiting' && task.status !== 'snoozed') return '';
     var activity = parseWaitingActivity(task);
     if (!activity) return '';
+
+    // OOO badge — shown for both waiting and snoozed tasks
+    if (activity.status === 'out_of_office') {
+        var returnInfo = activity.return_date ? 'OOO until ' + formatOofDate(activity.return_date) : 'Out of office';
+        return '<span class="ooo-badge" title="' + escapeHtml(returnInfo) + '">OOO</span>';
+    }
+
+    // For snoozed tasks, only show OOO badge (not other waiting icons)
+    if (task.status === 'snoozed') return '';
+
     var icons = {
         no_activity: '\uD83D\uDCA4',       // sleeping face
         activity_detected: '\uD83D\uDCAC',  // speech bubble
@@ -1475,10 +1588,16 @@ function renderWaitingActivityCard(task) {
         }
         return '';
     }
-    var icons = { no_activity: '\uD83D\uDCA4', activity_detected: '\uD83D\uDCAC', may_be_resolved: '\u2705' };
-    var labels = { no_activity: 'No activity', activity_detected: 'Activity detected', may_be_resolved: 'May be resolved' };
+    var icons = { no_activity: '\uD83D\uDCA4', activity_detected: '\uD83D\uDCAC', may_be_resolved: '\u2705', out_of_office: '' };
+    var labels = { no_activity: 'No activity', activity_detected: 'Activity detected', may_be_resolved: 'May be resolved', out_of_office: 'Out of office' };
     var icon = icons[activity.status] || '';
     var label = labels[activity.status] || activity.status;
+    if (activity.status === 'out_of_office') {
+        icon = '<span class="ooo-badge">OOO</span>';
+        if (activity.return_date) {
+            label += ' until ' + formatOofDate(activity.return_date);
+        }
+    }
 
     return '<div class="waiting-activity-card">'
         + '<div class="detail-label">Activity Check</div>'
@@ -1602,17 +1721,7 @@ function _startWaitingCheckPoll() {
                         btn.title = 'Check for activity from key people';
                     }
                     // Re-fetch tasks and refresh detail pane
-                    fetch('/api/tasks')
-                        .then(function(res) { return res.json(); })
-                        .then(function(taskData) {
-                            tasks = taskData.tasks || [];
-                            renderTaskList();
-                            if (selectedTaskId) {
-                                var sel = tasks.find(function(t) { return t.id === selectedTaskId; });
-                                if (sel) renderDetailPane(sel);
-                            }
-                        })
-                        .catch(function() { fetchTasks(); });
+                    fetchTasks();
                 }
             })
             .catch(function() {});

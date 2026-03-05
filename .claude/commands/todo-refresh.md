@@ -126,15 +126,26 @@ conn.row_factory = sqlite3.Row
 sender_lower = first_person_email.strip().lower()
 sender_prefix = sender_lower.split('@')[0]
 same_sender_tasks = conn.execute(
-    "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id LIKE ?",
+    "SELECT id, status, source_id, title, source_snippet, action_type FROM tasks WHERE source_id LIKE ?",
     ('%::' + sender_prefix + '%',)
 ).fetchall()
 conn.close()
 ```
 
-For each `same_sender_task`, compare its title and description against the new item. **If they describe the same underlying ask or action** (even with different wording), treat it as a match.
+For each `same_sender_task`, decide if it's a semantic duplicate of the new item. Two tasks are duplicates if they involve **the same person AND the same underlying conversation, project, or topic** — even if:
+- The titles use different wording (e.g. "Advise X on Y" vs. "Follow up with X about Y")
+- The action types differ (e.g. one is `follow-up` and the other is `awaiting-response`)
+- One came from Step 2a and the other from Step 2b
+- The source_id subjects are paraphrased differently
 
-Be aggressive about dedup — it's better to augment an existing task than to create a near-duplicate. When in doubt, it's a match.
+**Match criteria** — a match if ANY of these are true (same sender assumed):
+1. Both titles reference the same project, initiative, or topic keywords
+2. The descriptions discuss the same conversation thread or meeting
+3. One task is the natural follow-up or continuation of the other
+
+**NOT a match** only if the tasks involve genuinely different asks from the same person (e.g. person A asked about budget AND separately about a hiring decision).
+
+Be aggressive about dedup — it's better to augment an existing task than to create a near-duplicate. **When in doubt, it's a match.**
 
 **If a match is found**, decide based on status:
 - **dismissed** → skip entirely, never re-suggest dismissed items

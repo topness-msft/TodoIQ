@@ -31,7 +31,6 @@ WorkIQ queries happen inside Claude Code commands only. The Tornado server never
 - `src/handlers/ws.py` — WebSocket at /ws for live updates
 - `src/handlers/dashboard.py` — GET / renders dashboard
 - `src/services/workiq_queries.py` — M365 query templates (Teams/meetings scan + awaiting-response)
-- `src/services/suggestion_engine.py` — Deduplication logic (source_id composite keys)
 - `src/services/claude_runner.py` — Shared `claude -p` subprocess manager (label-based dedup)
 - `src/services/refresh_scheduler.py` — Adaptive refresh intervals
 - `scripts/todoness_tray.pyw` — System tray launcher (runs server in background thread)
