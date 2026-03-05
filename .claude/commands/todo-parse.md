@@ -99,13 +99,117 @@ Tailor coaching by action type:
 
 **Important:** Always use full resolved names (e.g. "Pratap Ladhani" not "Pratap") in the coaching text so inline people pills render correctly in the dashboard. If `user_notes` contain context (agenda, constraints, preferences), weave that context into the coaching.
 
-## Step 3c: Skill enrichment (SKIPPED during parse)
+## Step 3c: Auto-generate skill output
 
-**Do NOT generate `skill_output` during parsing.** Set `skill_output` to null.
+Generate `skill_output` for the task's primary `action_type` during parsing. By this point you already have title, description, key_people (resolved), action_type, user_notes, coaching_text, and WorkIQ context from earlier steps.
 
-Skill enrichment (draft replies, calendar lookups, follow-up drafts, prep notes) runs as a **separate on-demand step** when the user clicks a skill button on the dashboard. This avoids overloading the parse WorkIQ context and keeps parsing fast and reliable.
+**Skip** if `action_type` is `general` or `review-document` — set `skill_output` to null and move to Step 4.
 
-The standalone skill commands (`/respond-email`, `/schedule-meeting`, `/follow-up`, `/prepare`) handle enrichment with their own dedicated WorkIQ calls.
+For all other action types, make **1 focused WorkIQ call** and generate the skill output in the same format as the standalone skill commands. The standalone commands (`/respond-email`, `/schedule-meeting`, `/follow-up`, `/prepare`, `/teams-message`) remain available for re-running with fresh context.
+
+### respond-email
+**WorkIQ query:** "Show me the recent email thread about [topic from title/description] with [key_people names]. Include the last 2-3 messages so I can see what was said."
+
+**Output format:**
+```
+To: [name] <[email]>
+Subject: Re: [inferred or from source]
+
+[Draft body — 3-5 sentences, concise, mirror thread tone]
+
+---
+Tone: [professional/casual/urgent — inferred from context]
+Key points addressed:
+- [point 1]
+- [point 2]
+```
+
+### follow-up / awaiting-response
+**WorkIQ query:** "What are my most recent emails and Teams messages with [key_people names] about [topic from title/description]? When was the last interaction?"
+
+**Output format (choose Email or Teams based on source_type):**
+```
+Channel: [Email / Teams]
+To: [name] <[email]>
+Subject: [if email — e.g. "Following up: [topic]"]
+
+[Draft message — reference last interaction, be specific about what you need]
+
+---
+Last interaction: [date/summary if found]
+Days since last contact: [N days]
+Urgency: [based on due_date proximity]
+```
+
+### schedule-meeting
+**WorkIQ query:** If `due_date` is set: "What is the shared calendar availability for [all key_people names] between now and [due_date]? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least 30 minutes long." If no `due_date`: same query but "this week" instead.
+
+**Output format:**
+```
+Suggested meeting slots:
+1. [Day], [Time] - [Time] ([duration]) — all attendees free
+2. [Day], [Time] - [Time] ([duration]) — all attendees free
+3. [Day], [Time] - [Time] ([duration]) — all attendees free
+
+Duration: [from user_notes hint or 30 min default]
+Attendees: [full names from key_people]
+```
+
+Pick the 3 best slots. Filter to working hours only, prefer mornings, avoid lunch (12-1pm).
+
+### prepare
+**WorkIQ queries (1-2 calls):**
+1. If `related_meeting` is set: "What is the agenda and attendee list for [related_meeting]? What was discussed in previous instances?"
+2. "What recent documents, presentations, or files have I worked on related to [topic from title/description]?"
+
+**Output format:**
+```
+Preparation Notes: [meeting/event name]
+Date: [due_date or meeting date if known]
+Attendees: [key_people names and roles]
+
+Before the meeting:
+[ ] [Concrete prep item 1]
+[ ] [Concrete prep item 2]
+[ ] [Concrete prep item 3]
+
+Key talking points:
+- [Point 1 — informed by recent context]
+- [Point 2]
+- [Point 3]
+
+Materials to bring/share:
+- [Document/link 1]
+- [Document/link 2]
+
+Questions to ask:
+- [Question informed by recent discussions]
+- [Question about open items]
+
+Time estimate: [X minutes of prep needed]
+```
+
+### teams-message
+**WorkIQ query:** "What are my recent Teams chats with [key_people names] about [topic from title/description]? Show the most recent messages."
+
+**Output format:**
+```
+To: [name] (via Teams)
+
+[Draft message — shorter and more conversational than email, lead with key point]
+
+---
+Tone: [casual/direct/detailed — inferred from context]
+Purpose: [what this message aims to accomplish]
+```
+
+### Guidelines (all action types)
+- Use resolved full names from `key_people` (e.g. "Pratap Ladhani" not "Pratap")
+- If `user_notes` specify points, tone, or constraints, incorporate them
+- Do NOT include the `<<<SKILL_OUTPUT>>>` / `<<<END_SKILL_OUTPUT>>>` markers — those are only needed in standalone skill commands. Here the output goes directly into the `skill_output` variable for Step 4's DB write.
+- If the WorkIQ query returns no useful context (e.g. no email thread found), still generate a reasonable draft based on the task description and key_people — note that context was limited.
+
+**Note:** Coaching-only re-parse (Step 2b) continues to set `skill_output` to null — it only refreshes coaching text, not skill output.
 
 ## Step 4: Write the structured fields back
 
