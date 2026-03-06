@@ -43,3 +43,16 @@ SCAN_TEAMS_MEETINGS = (
 # WorkIQ can't reliably distinguish "still waiting" from "already resolved informally".
 # Re-evaluate if WorkIQ gains thread-state awareness.
 SCAN_AWAITING_RESPONSE = None
+
+# ── Context Queries (email as read-only context, not task source) ─────────
+
+WAITING_CHECK_COMMS = (
+    "What are my most recent emails, Teams messages, and chats with {person} "
+    "since {start_date}? List all interactions found."
+)
+
+COACHING_CONTEXT_REFRESH = (
+    "What are my recent emails, Teams messages, and meeting interactions with "
+    "{person} related to {topic} since {start_date}? "
+    "Include any relevant context, updates, or responses."
+)

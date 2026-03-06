@@ -22,6 +22,24 @@ Tornado Web Server (localhost:8766)
 
 WorkIQ queries happen inside Claude Code commands only. The Tornado server never calls WorkIQ directly.
 
+## Email Integration Policy
+
+**Email is context for existing tasks, never a source of new task suggestions.**
+
+### Why email scanning is disabled for task creation
+WorkIQ enterprise search cannot reliably scope email queries to the Inbox folder. Queries return items from Archive, Deleted Items, and other folders indiscriminately. It also cannot detect flagged status or filter by folder location. This makes email a noisy, unreliable source for surfacing new tasks — too many false positives from old or discarded messages.
+
+### Where email IS used
+Email serves as **read-only context** to enrich tasks that already exist:
+- `/waiting-check` — cross-channel queries include email to detect if a key person replied via email even when the task originated from Teams or meetings
+- `/todo-review` — coaching context refresh includes email to build a fuller picture of task history and communication
+
+### Why person-scoped email queries work
+These queries succeed where broad scanning fails because they ask a narrower question: "did [specific person] email about [known topic] in [recent window]?" They don't need folder awareness or flag detection. Even archived replies are valid signal — a response is a response regardless of where Outlook filed it.
+
+### Re-evaluation
+Re-evaluate this policy when Graph MCP or improved WorkIQ email folder/flag access becomes available.
+
 ## Key Files
 - `src/db.py` — SQLite schema, connection management
 - `src/models.py` — Task CRUD, lifecycle (promote/dismiss/complete/start), context, sync log

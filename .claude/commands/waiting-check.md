@@ -49,16 +49,11 @@ Determine the **query start date**:
 
 **Note:** WorkIQ sometimes misses OOO status with simple queries. The explicit mention of "presence", "Teams", and "Outlook" helps it check the right signals.
 
-**Then**, build the communication query using the **source channel** to focus the search:
+**Then**, query for ALL recent communication with the person across every channel:
 
-- `source_type = 'chat'` → "What are my most recent Teams chats and messages with [person] since [start date]?"
-- `source_type = 'email'` → "What are my most recent emails with [person] since [start date]?"
-- `source_type = 'meeting'` → "What are my most recent meetings and meeting chats with [person] since [start date]?"
-- `source_type = 'manual'` or unknown → "What are my most recent emails, Teams messages, and chats with [person] since [start date]?"
+> "What are my most recent emails, Teams messages, and chats with [person] since [start date]? List all interactions found."
 
-Append to all queries: "List all interactions found."
-
-**IMPORTANT:** Query broadly about ALL communication with the person on that channel — do NOT limit to the specific task topic. WorkIQ may miss relevant responses if the query is too narrow. You will classify relevance yourself in Step 3.
+**IMPORTANT:** Always query all channels regardless of `source_type` — responses can come on any channel (e.g. a meeting action item resolved via email, an email task answered in Teams). Do NOT limit to the specific task topic. WorkIQ may miss relevant responses if the query is too narrow. You will classify relevance yourself in Step 3.
 
 ## Step 3: Classify responses
 
