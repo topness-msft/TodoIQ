@@ -82,6 +82,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   | `prepare` | preparing for a meeting, presentation, demo |
   | `general` | default fallback |
 
+- **is_quick_hit**: 1 if this is **definitely** a quick task (under ~15 minutes), 0 otherwise. Only tag as quick hit when you're confident. Strong signals: simple email reply, confirmation/approval, brief follow-up ping, forwarding info, short Teams message. NOT quick hit: anything requiring research, preparation, multi-step coordination, document review, meeting scheduling, or deep thought. When in doubt, default to 0.
 - **coaching_text**: Generate coaching tailored to the `action_type` and `user_notes` (see Step 3b).
 
 ## Step 3b: Generate coaching_text (used by both full parse and coaching-only re-parse)
@@ -223,12 +224,12 @@ conn.execute(
        SET title=?, description=?, priority=?, due_date=?,
            key_people=?, related_meeting=?,
            coaching_text=?, action_type=?, skill_output=?,
-           waiting_activity=?,
+           waiting_activity=?, is_quick_hit=?,
            suggestion_refreshed_at=?, parse_status='parsed', updated_at=?
        WHERE id=?""",
     (title, description, priority, due_date, key_people,
      related_meeting, coaching_text, action_type, skill_output,
-     waiting_activity, now, now, task_id)
+     waiting_activity, is_quick_hit, now, now, task_id)
 )
 conn.commit()
 conn.close()

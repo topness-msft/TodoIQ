@@ -105,7 +105,7 @@ class TaskDetailHandler(tornado.web.RequestHandler):
             "title", "description", "priority", "due_date", "committed_date",
             "user_notes", "coaching_text", "skill_output", "key_people",
             "related_meeting", "source_type", "source_url", "source_snippet",
-            "action_type",
+            "action_type", "is_quick_hit",
         }
         updates = {k: v for k, v in body.items() if k in allowed}
 

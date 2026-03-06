@@ -428,6 +428,7 @@ function renderSection(sectionId, sectionTasks) {
             + priorityDot(task.priority, task.id)
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
+            + (task.is_quick_hit ? '<span class="quick-hit-icon" title="Quick hit">&#9201;</span>' : '')
             + '<span class="task-source-icon">' + sourceTypeIcon(task.source_type) + '</span>'
             + '<span class="task-title">' + escapeHtml(task.title) + '</span>'
             + waitingIconHtml
@@ -504,6 +505,7 @@ function renderDetailPane(task) {
             }
             return '';
         })()
+        + '<span class="meta-item">' + quickHitToggle(task) + '</span>'
         + '<span class="meta-item" style="margin-left:auto">' + sourceMetaLink(task) + '</span>'
         + '</div>';
 
@@ -1859,6 +1861,33 @@ function parseStatusBadge(parseStatus, taskId) {
         + '<span class="parse-indicator ' + status + '"><span class="parse-ring"></span></span>'
         + escapeHtml(label)
         + '</span>';
+}
+
+function quickHitToggle(task) {
+    var active = task.is_quick_hit ? ' active' : '';
+    return '<button class="quick-hit-toggle' + active + '" '
+        + 'onclick="toggleQuickHit(' + task.id + ')" '
+        + 'title="' + (task.is_quick_hit ? 'Remove quick hit' : 'Mark as quick hit') + '">'
+        + '&#9201;</button>';
+}
+
+function toggleQuickHit(taskId) {
+    var task = tasks.find(function(t) { return t.id === taskId; });
+    if (!task) return;
+    var newVal = task.is_quick_hit ? 0 : 1;
+    fetch('/api/tasks/' + taskId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_quick_hit: newVal })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.task) {
+            Object.assign(task, data.task);
+            renderTaskList();
+            renderDetailPane(task);
+        }
+    });
 }
 
 function sourceMetaLink(task) {

@@ -155,6 +155,12 @@ def _migrate(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE tasks ADD COLUMN error_message TEXT")
             conn.commit()
 
+    # Add is_quick_hit column if missing
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "is_quick_hit" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN is_quick_hit INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
         r[0] for r in conn.execute(
@@ -204,6 +210,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                         CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error')),
     raw_input       TEXT,
     error_message   TEXT,
+    is_quick_hit    INTEGER NOT NULL DEFAULT 0,
     priority        INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
     due_date        TEXT,
     committed_date  TEXT,
