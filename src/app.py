@@ -25,6 +25,7 @@ STATIC_DIR = BASE_DIR.parent / "static"
 
 SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
 UNSNOOZE_INTERVAL_MS = 60 * 1000  # 60 seconds
+PARSE_CHECK_INTERVAL_MS = 30 * 1000  # 30 seconds
 WAITING_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000  # 4 hours
 
 
@@ -38,6 +39,30 @@ def _check_waiting():
     """Called every 4 hours to check activity on waiting tasks."""
     result = run_claude("/waiting-check", label="waiting-check")
     logger.info(f"Waiting check: {result['message']}")
+
+
+def _check_unparsed():
+    """Called every 30 seconds to catch orphaned unparsed/queued tasks.
+
+    If a parse subprocess was already running when a new task arrived,
+    run_claude silently skipped it. This callback retriggers the parse
+    once the previous one finishes, so no task stays stuck.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM tasks "
+            "WHERE parse_status IN ('unparsed', 'queued') "
+            "AND status NOT IN ('deleted', 'completed')"
+        ).fetchone()
+        count = row[0] if row else 0
+    finally:
+        conn.close()
+
+    if count:
+        result = run_claude("/todo-parse", label="parse")
+        if result["ok"]:
+            logger.info(f"Parse check: triggered parse for {count} task(s)")
 
 
 def _check_snoozed():
@@ -93,6 +118,25 @@ def setup_logging(log_file=None):
     )
 
 
+def _recover_stuck_parses():
+    """Reset tasks stuck in 'queued' or 'parsing' back to 'unparsed'.
+
+    On restart, any subprocess that was mid-parse is gone — these tasks
+    would be stuck forever without this recovery step.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE tasks SET parse_status = 'unparsed' "
+            "WHERE parse_status IN ('queued', 'parsing')"
+        )
+        conn.commit()
+        if cursor.rowcount:
+            logger.info(f"Startup recovery: reset {cursor.rowcount} stuck task(s) to unparsed")
+    finally:
+        conn.close()
+
+
 def start_server(port=8766):
     """Initialize DB, create app, register periodic callbacks, and start listening.
 
@@ -102,6 +146,8 @@ def start_server(port=8766):
     conn = get_connection()
     init_db(conn)
     conn.close()
+
+    _recover_stuck_parses()
 
     app = make_app()
     app.listen(port)
@@ -118,6 +164,11 @@ def start_server(port=8766):
     unsnooze_callback = tornado.ioloop.PeriodicCallback(_check_snoozed, UNSNOOZE_INTERVAL_MS)
     unsnooze_callback.start()
     logger.info("Snooze watcher enabled (every 60s)")
+
+    # Parse orphan check every 30 seconds
+    parse_callback = tornado.ioloop.PeriodicCallback(_check_unparsed, PARSE_CHECK_INTERVAL_MS)
+    parse_callback.start()
+    logger.info("Parse watcher enabled (every 30s)")
 
     # Waiting activity check every 4 hours
     waiting_callback = tornado.ioloop.PeriodicCallback(_check_waiting, WAITING_CHECK_INTERVAL_MS)
