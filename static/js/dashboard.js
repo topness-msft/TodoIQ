@@ -25,6 +25,33 @@ var VALID_TRANSITIONS = {
     deleted: ['active']
 };
 
+// ── Theme ─────────────────────────────────────────────────────────────
+(function() {
+    // Apply theme immediately (before DOMContentLoaded) to prevent flash
+    var saved = localStorage.getItem('todoness-theme');
+    if (saved) {
+        document.documentElement.setAttribute('data-theme', saved);
+    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+    }
+})();
+
+function toggleTheme() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('todoness-theme', next);
+    updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+    var icon = document.getElementById('theme-icon');
+    if (icon) {
+        // Moon for light mode (click to go dark), Sun for dark mode (click to go light)
+        icon.innerHTML = theme === 'dark' ? '&#9788;' : '&#9790;';
+    }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
 
@@ -36,6 +63,11 @@ function init() {
     startParsePoller();
     fetchSyncStatus();
     startSyncWatcher();
+    setupKeyboardShortcuts();
+
+    // Sync theme icon with current state
+    var theme = document.documentElement.getAttribute('data-theme') || 'light';
+    updateThemeIcon(theme);
 
     // Close people dropdown when clicking outside
     document.addEventListener('click', function(e) {
@@ -109,6 +141,16 @@ function handleWsMessage(msg) {
         if (selectedTaskId === msg.task_id) {
             selectedTaskId = null;
             clearDetailPane();
+        }
+    } else if (msg.type === 'parse_error') {
+        var errTask = tasks.find(function(t) { return t.id === msg.task_id; });
+        if (errTask) {
+            errTask.parse_status = 'error';
+            errTask.error_message = msg.error_message;
+            renderTaskList();
+            if (selectedTaskId === msg.task_id) {
+                renderDetailPane(errTask);
+            }
         }
     } else if (msg.type === 'skill_running') {
         var skillKey = msg.task_id + ':' + msg.skill;
@@ -383,10 +425,9 @@ function renderSection(sectionId, sectionTasks) {
         }
 
         html += '<div class="task-row' + selected + overdueClass + '" data-id="' + task.id + '" data-status="' + escapeHtml(task.status) + '" draggable="true" onclick="selectTask(' + task.id + ')">'
-            + priorityDot(task.priority)
+            + priorityDot(task.priority, task.id)
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
-            + '<span class="task-id-badge">#' + task.id + '</span>'
             + '<span class="task-source-icon">' + sourceTypeIcon(task.source_type) + '</span>'
             + '<span class="task-title">' + escapeHtml(task.title) + '</span>'
             + waitingIconHtml
@@ -510,6 +551,18 @@ function renderDetailPane(task) {
         + '</div>';
 
     html += renderSkillButtons(task);
+
+    // Error message box
+    if (task.error_message && task.parse_status === 'error') {
+        html += '<div class="parse-error-box">'
+            + '<div class="parse-error-header">'
+            + '<span class="parse-error-icon">&#9888;</span>'
+            + '<span class="parse-error-title">Parse Error</span>'
+            + '</div>'
+            + '<div class="parse-error-message">' + escapeHtml(task.error_message) + '</div>'
+            + '<button class="parse-error-retry" onclick="refreshTask(' + task.id + ')">&#8635; Retry</button>'
+            + '</div>';
+    }
 
     // Skill Output — prefer context entries over the summary field
     var skillContexts = task._contexts || [];
@@ -1772,16 +1825,14 @@ function formatDate(dateStr) {
     return days[d.getDay()] + ', ' + months[d.getMonth()] + ' ' + d.getDate();
 }
 
-function priorityDot(priority) {
+function priorityDot(priority, taskId) {
     var p = priority || 3;
-    return '<span class="priority-dot p' + p + '"></span>';
+    var titleAttr = taskId ? ' title="Task #' + taskId + '"' : '';
+    return '<span class="priority-dot p' + p + '"' + titleAttr + '></span>';
 }
 
 function parseStatusIcon(parseStatus) {
     var status = parseStatus || 'parsed';
-    if (status === 'parsed') {
-        // Show briefly then fade — or always show as subtle indicator
-    }
     return '<span class="parse-icon"><span class="parse-indicator ' + status + '"><span class="parse-ring"></span></span></span>';
 }
 
@@ -1791,14 +1842,15 @@ function parseStatusBadge(parseStatus, taskId) {
         unparsed: 'Awaiting parse',
         queued: 'Queued',
         parsing: 'Parsing\u2026',
-        parsed: 'Parsed'
+        parsed: 'Parsed',
+        error: 'Error'
     };
     var label = labels[status] || status;
-    // Make unparsed/queued clickable to trigger refresh
-    if (taskId && (status === 'unparsed' || status === 'queued' || status === 'parsed')) {
+    // Make unparsed/queued/parsed/error clickable to trigger refresh
+    if (taskId && (status === 'unparsed' || status === 'queued' || status === 'parsed' || status === 'error')) {
         return '<span class="parse-status-badge ' + status + ' clickable" '
             + 'onclick="event.stopPropagation(); refreshTask(' + taskId + ')" '
-            + 'title="Click to refresh with AI">'
+            + 'title="Click to ' + (status === 'error' ? 'retry' : 'refresh with AI') + '">'
             + '<span class="parse-indicator ' + status + '"><span class="parse-ring"></span></span>'
             + escapeHtml(label)
             + '</span>';
@@ -2215,4 +2267,190 @@ function pollSkillStatus() {
             }
         })
         .catch(function() {}); // Silent fail on poll
+}
+
+// ── Keyboard Shortcuts ────────────────────────────────────────────────
+var _kbSelectedIdx = -1;
+var _kbSectionIdx = 0;
+var _VISIBLE_SECTIONS = ['active', 'suggested', 'waiting', 'snoozed', 'completed', 'dismissed', 'deleted'];
+
+function setupKeyboardShortcuts() {
+    document.addEventListener('keydown', handleKeyboardShortcut);
+}
+
+function handleKeyboardShortcut(e) {
+    // Skip when typing in input/textarea/select
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        if (e.key === 'Escape') {
+            document.activeElement.blur();
+            e.preventDefault();
+        }
+        return;
+    }
+
+    // Skip if modifier keys are held (allow browser shortcuts)
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    var key = e.key;
+
+    // Shortcuts overlay
+    if (key === '?') {
+        e.preventDefault();
+        openShortcuts();
+        return;
+    }
+
+    // Close shortcuts overlay or detail pane
+    if (key === 'Escape') {
+        var overlay = document.getElementById('shortcuts-overlay');
+        if (overlay && overlay.classList.contains('open')) {
+            closeShortcuts();
+            e.preventDefault();
+            return;
+        }
+        if (selectedTaskId) {
+            clearDetailPane();
+            _clearKeyboardSelection();
+            e.preventDefault();
+            return;
+        }
+    }
+
+    // Focus quick-add
+    if (key === '/' || key === 'n') {
+        e.preventDefault();
+        var input = document.getElementById('task-input');
+        if (input) input.focus();
+        return;
+    }
+
+    // Navigation: j/k or arrows
+    if (key === 'j' || key === 'ArrowDown') {
+        e.preventDefault();
+        _kbNavigate(1);
+        return;
+    }
+    if (key === 'k' || key === 'ArrowUp') {
+        e.preventDefault();
+        _kbNavigate(-1);
+        return;
+    }
+
+    // Tab to cycle sections
+    if (key === 'Tab') {
+        e.preventDefault();
+        _kbCycleSection(e.shiftKey ? -1 : 1);
+        return;
+    }
+
+    // Enter to select/open task
+    if (key === 'Enter') {
+        e.preventDefault();
+        var rows = _getVisibleRows();
+        if (_kbSelectedIdx >= 0 && _kbSelectedIdx < rows.length) {
+            var taskId = parseInt(rows[_kbSelectedIdx].getAttribute('data-id'));
+            if (taskId) selectTask(taskId);
+        }
+        return;
+    }
+
+    // Action shortcuts on selected task
+    if (!selectedTaskId) return;
+    var task = tasks.find(function(t) { return t.id === selectedTaskId; });
+    if (!task) return;
+
+    if (key === 'c') {
+        var allowedC = VALID_TRANSITIONS[task.status];
+        if (allowedC && allowedC.indexOf('completed') !== -1) {
+            doAction(task.id, 'complete');
+        }
+    } else if (key === 'd') {
+        var allowedD = VALID_TRANSITIONS[task.status];
+        if (allowedD && allowedD.indexOf('dismissed') !== -1) {
+            doAction(task.id, 'dismiss');
+        }
+    } else if (key === 's') {
+        if (task.status === 'suggested') {
+            doAction(task.id, 'promote');
+        } else {
+            var allowedS = VALID_TRANSITIONS[task.status];
+            if (allowedS && allowedS.indexOf('in_progress') !== -1) {
+                doAction(task.id, 'start');
+            }
+        }
+    } else if (key === 'p') {
+        if (task.status === 'suggested') {
+            doAction(task.id, 'promote');
+        }
+    } else if (key === 'r') {
+        refreshTask(task.id);
+    }
+}
+
+function _getVisibleRows() {
+    return Array.prototype.slice.call(document.querySelectorAll('.task-row'));
+}
+
+function _kbNavigate(direction) {
+    var rows = _getVisibleRows();
+    if (!rows.length) return;
+
+    _kbSelectedIdx += direction;
+    if (_kbSelectedIdx < 0) _kbSelectedIdx = 0;
+    if (_kbSelectedIdx >= rows.length) _kbSelectedIdx = rows.length - 1;
+
+    _applyKeyboardSelection(rows);
+}
+
+function _kbCycleSection(direction) {
+    var sections = _VISIBLE_SECTIONS.filter(function(s) {
+        var body = document.getElementById('body-' + s);
+        return body && body.children.length > 0 && !body.classList.contains('collapsed');
+    });
+    if (!sections.length) return;
+
+    _kbSectionIdx += direction;
+    if (_kbSectionIdx < 0) _kbSectionIdx = sections.length - 1;
+    if (_kbSectionIdx >= sections.length) _kbSectionIdx = 0;
+
+    var targetSection = sections[_kbSectionIdx];
+    var body = document.getElementById('body-' + targetSection);
+    if (!body || !body.children.length) return;
+
+    var firstRow = body.querySelector('.task-row');
+    if (!firstRow) return;
+
+    var rows = _getVisibleRows();
+    for (var i = 0; i < rows.length; i++) {
+        if (rows[i] === firstRow) {
+            _kbSelectedIdx = i;
+            _applyKeyboardSelection(rows);
+            return;
+        }
+    }
+}
+
+function _applyKeyboardSelection(rows) {
+    rows.forEach(function(r) { r.classList.remove('keyboard-selected'); });
+    if (_kbSelectedIdx >= 0 && _kbSelectedIdx < rows.length) {
+        rows[_kbSelectedIdx].classList.add('keyboard-selected');
+        rows[_kbSelectedIdx].scrollIntoView({ block: 'nearest' });
+    }
+}
+
+function _clearKeyboardSelection() {
+    _kbSelectedIdx = -1;
+    var rows = document.querySelectorAll('.task-row.keyboard-selected');
+    rows.forEach(function(r) { r.classList.remove('keyboard-selected'); });
+}
+
+function openShortcuts() {
+    var overlay = document.getElementById('shortcuts-overlay');
+    if (overlay) overlay.classList.add('open');
+}
+
+function closeShortcuts() {
+    var overlay = document.getElementById('shortcuts-overlay');
+    if (overlay) overlay.classList.remove('open');
 }

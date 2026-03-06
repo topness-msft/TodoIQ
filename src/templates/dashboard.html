@@ -8,6 +8,10 @@
             <h1 class="app-title">TodoNess</h1>
         </div>
         <div class="top-bar-right">
+            <span class="shortcuts-hint">Shortcuts: ?</span>
+            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">
+                <span id="theme-icon">&#9790;</span>
+            </button>
             <label class="auto-sync-toggle" title="Auto-sync every 30 min">
                 <input type="checkbox" id="auto-sync-checkbox" checked onchange="toggleAutoSync(this.checked)">
                 <span class="toggle-slider"></span>
@@ -124,6 +128,29 @@
                 <div class="empty-state">Select a task to view details</div>
             </div>
         </div>
+    </div>
+</div>
+<!-- Keyboard Shortcuts Overlay -->
+<div class="shortcuts-overlay" id="shortcuts-overlay" onclick="if(event.target===this)closeShortcuts()">
+    <div class="shortcuts-modal">
+        <h3>Keyboard Shortcuts</h3>
+        <table>
+            <tr><th colspan="2">Navigation</th></tr>
+            <tr><td><kbd>j</kbd> / <kbd>&#8595;</kbd></td><td>Next task</td></tr>
+            <tr><td><kbd>k</kbd> / <kbd>&#8593;</kbd></td><td>Previous task</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>Open task detail</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Close detail / modal</td></tr>
+            <tr><td><kbd>Tab</kbd></td><td>Next section</td></tr>
+            <tr><th colspan="2" style="padding-top:12px">Actions (selected task)</th></tr>
+            <tr><td><kbd>c</kbd></td><td>Complete task</td></tr>
+            <tr><td><kbd>d</kbd></td><td>Dismiss task</td></tr>
+            <tr><td><kbd>s</kbd></td><td>Start / promote task</td></tr>
+            <tr><td><kbd>p</kbd></td><td>Promote suggestion</td></tr>
+            <tr><td><kbd>r</kbd></td><td>Refresh task</td></tr>
+            <tr><th colspan="2" style="padding-top:12px">Global</th></tr>
+            <tr><td><kbd>n</kbd> / <kbd>/</kbd></td><td>Focus quick-add input</td></tr>
+            <tr><td><kbd>?</kbd></td><td>Show this help</td></tr>
+        </table>
     </div>
 </div>
 {% end %}
