@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
 
-SUBPROCESS_TIMEOUT = 300  # 5 minutes
+SUBPROCESS_TIMEOUT = 300  # 5 minutes (default)
 
 # label -> subprocess.Popen
 _processes: dict[str, subprocess.Popen] = {}
@@ -27,6 +27,8 @@ _processes: dict[str, subprocess.Popen] = {}
 _log_files: dict[str, object] = {}
 # label -> monotonic start time
 _start_times: dict[str, float] = {}
+# label -> per-label timeout override (seconds)
+_timeouts: dict[str, float] = {}
 # Recently finished process info: label -> {"exit_code": int, "error": str|None}
 _exit_info: collections.OrderedDict[str, dict] = collections.OrderedDict()
 _EXIT_INFO_MAX = 20
@@ -35,6 +37,7 @@ _EXIT_INFO_MAX = 20
 def _cleanup(label: str) -> None:
     """Close log file handle for a finished process."""
     _start_times.pop(label, None)
+    _timeouts.pop(label, None)
     fh = _log_files.pop(label, None)
     if fh:
         try:
@@ -72,10 +75,10 @@ def _set_task_error(label: str, error_message: str) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         if label == "parse":
-            # Mark all currently-parsing tasks as error
+            # Mark all currently-parsing or queued tasks as error
             conn.execute(
                 "UPDATE tasks SET parse_status = 'error', error_message = ?, updated_at = ? "
-                "WHERE parse_status = 'parsing'",
+                "WHERE parse_status IN ('parsing', 'queued')",
                 (error_message, now),
             )
             conn.commit()
@@ -207,12 +210,13 @@ def is_running(label: str) -> bool:
 
     # Check for timeout while still running
     start = _start_times.get(label)
+    timeout = _timeouts.get(label, SUBPROCESS_TIMEOUT)
     if proc.poll() is None:
-        if start and (time.monotonic() - start) > SUBPROCESS_TIMEOUT:
-            logger.warning(f"[{label}] timed out after {SUBPROCESS_TIMEOUT}s, killing")
+        if start and (time.monotonic() - start) > timeout:
+            logger.warning(f"[{label}] timed out after {timeout}s, killing")
             proc.kill()
             proc.wait()
-            error_msg = f"Process timed out after {SUBPROCESS_TIMEOUT // 60} minutes"
+            error_msg = f"Process timed out after {timeout // 60:.0f} minutes"
             _set_task_error(label, error_msg)
             _record_exit(label, -1, error_msg)
             _cleanup(label)
@@ -238,8 +242,11 @@ def is_running(label: str) -> bool:
     return False
 
 
-def run_claude(command: str, label: str) -> dict:
+def run_claude(command: str, label: str, timeout: float | None = None) -> dict:
     """Launch `claude -p "<command>"` if *label* is not already running.
+
+    Args:
+        timeout: Per-process timeout in seconds. Defaults to SUBPROCESS_TIMEOUT (300s).
 
     Returns {"ok": True/False, "message": ...}.
     """
@@ -271,7 +278,9 @@ def run_claude(command: str, label: str) -> dict:
         _processes[label] = proc
         _log_files[label] = fh
         _start_times[label] = time.monotonic()
-        logger.info(f"[{label}] started: PID {proc.pid}")
+        if timeout is not None:
+            _timeouts[label] = timeout
+        logger.info(f"[{label}] started: PID {proc.pid} (timeout={timeout or SUBPROCESS_TIMEOUT}s)")
         return {"ok": True, "message": f"'{label}' started (PID {proc.pid})."}
     except FileNotFoundError:
         logger.warning("claude CLI not found on PATH")

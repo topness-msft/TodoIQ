@@ -3,12 +3,31 @@
 import json
 import tornado.web
 
+from ..db import get_connection
 from ..models import (
     promote_task, dismiss_task, complete_task, start_task,
     snooze_task, transition_task, get_task, update_task,
 )
 from ..services.claude_runner import run_claude
 from .ws import broadcast
+
+PARSE_BASE_TIMEOUT = 300  # 5 min base
+PARSE_PER_TASK_TIMEOUT = 180  # +3 min per task
+
+
+def _parse_timeout() -> float:
+    """Calculate parse timeout based on number of queued/unparsed tasks."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM tasks "
+            "WHERE parse_status IN ('unparsed', 'queued') "
+            "AND status NOT IN ('deleted', 'completed')"
+        ).fetchone()
+        count = row[0] if row else 1
+    finally:
+        conn.close()
+    return PARSE_BASE_TIMEOUT + (max(count, 1) * PARSE_PER_TASK_TIMEOUT)
 
 
 class TaskActionHandler(tornado.web.RequestHandler):
@@ -84,7 +103,7 @@ class TaskActionHandler(tornado.web.RequestHandler):
         # (promote to active, or any transition out of suggested)
         if pre_status == "suggested" and task["status"] != "dismissed" and not task.get("coaching_text"):
             task = update_task(tid, parse_status="queued")
-            run_claude("/todo-parse", label="parse")
+            run_claude("/todo-parse", label="parse", timeout=_parse_timeout())
 
         self.write(json.dumps({"task": task}))
         broadcast({"type": "task_updated", "task": task})
@@ -110,7 +129,7 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"task": updated}))
         broadcast({"type": "task_updated", "task": updated})
         # Auto-trigger parsing
-        run_claude("/todo-parse", label="parse")
+        run_claude("/todo-parse", label="parse", timeout=_parse_timeout())
 
 
 _VALID_SKILLS = {"respond-email", "schedule-meeting", "follow-up", "prepare", "teams-message"}

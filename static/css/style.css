@@ -575,6 +575,30 @@ html, body {
     background: var(--accent-bg, rgba(0, 120, 212, 0.08));
 }
 
+/* Quick-hit filter pill in section header */
+.quick-filter-pill {
+    background: none;
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--text-secondary, #666);
+    margin-left: auto;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.quick-filter-pill:hover {
+    background: var(--bg-tertiary, #f0f0f0);
+    color: var(--text-primary);
+}
+.quick-filter-pill.active {
+    color: var(--accent, #0f6cbd);
+    border-color: var(--accent, #0f6cbd);
+    background: var(--accent-bg, rgba(0, 120, 212, 0.08));
+    font-weight: 600;
+}
+
 .task-source-icon {
     flex-shrink: 0;
     font-size: 12px;

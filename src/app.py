@@ -41,12 +41,18 @@ def _check_waiting():
     logger.info(f"Waiting check: {result['message']}")
 
 
+PARSE_BASE_TIMEOUT = 300  # 5 min base
+PARSE_PER_TASK_TIMEOUT = 180  # +3 min per task
+
+
 def _check_unparsed():
     """Called every 30 seconds to catch orphaned unparsed/queued tasks.
 
     If a parse subprocess was already running when a new task arrived,
     run_claude silently skipped it. This callback retriggers the parse
     once the previous one finishes, so no task stays stuck.
+
+    Timeout scales with batch size: 5 min base + 3 min per task.
     """
     conn = get_connection()
     try:
@@ -60,9 +66,10 @@ def _check_unparsed():
         conn.close()
 
     if count:
-        result = run_claude("/todo-parse", label="parse")
+        timeout = PARSE_BASE_TIMEOUT + (count * PARSE_PER_TASK_TIMEOUT)
+        result = run_claude("/todo-parse", label="parse", timeout=timeout)
         if result["ok"]:
-            logger.info(f"Parse check: triggered parse for {count} task(s)")
+            logger.info(f"Parse check: triggered parse for {count} task(s) (timeout={timeout}s)")
 
 
 def _check_snoozed():

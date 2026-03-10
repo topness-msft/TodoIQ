@@ -7,6 +7,7 @@ var ws = null;
 var reconnectTimer = null;
 var openDropdownId = null;
 var searchQuery = '';
+var _quickFilterActive = false;
 var lastSyncTime = null;
 var _skillPollTimer = null;
 var _runningSkills = {};
@@ -296,6 +297,14 @@ function applySearchFilter() {
     renderTaskList();
 }
 
+// ── Quick-Hit Filter ──────────────────────────────────────────────────
+function toggleQuickFilter() {
+    _quickFilterActive = !_quickFilterActive;
+    var pill = document.getElementById('quick-filter-active');
+    if (pill) pill.classList.toggle('active', _quickFilterActive);
+    renderTaskList();
+}
+
 function taskMatchesSearch(task) {
     if (!searchQuery) return true;
     var fields = [
@@ -360,7 +369,15 @@ function renderTaskList() {
 function renderSection(sectionId, sectionTasks) {
     var body = document.getElementById('body-' + sectionId);
     var count = document.getElementById('count-' + sectionId);
-    count.textContent = sectionTasks.length;
+
+    // Quick-hit filter for active section
+    if (sectionId === 'active' && _quickFilterActive) {
+        var totalCount = sectionTasks.length;
+        sectionTasks = sectionTasks.filter(function(t) { return t.is_quick_hit; });
+        count.textContent = sectionTasks.length + '/' + totalCount;
+    } else {
+        count.textContent = sectionTasks.length;
+    }
 
     // Sort: priority ASC, then created_at DESC (matches API ORDER BY)
     sectionTasks.sort(function(a, b) {
