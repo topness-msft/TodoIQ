@@ -490,6 +490,26 @@ function selectTask(taskId) {
 function renderDetailPane(task) {
     var pane = document.getElementById('detail-pane');
 
+    // Skip re-render if user is typing in notes or editing title — avoids focus loss
+    var activeEl = document.activeElement;
+    if (activeEl && pane && pane.contains(activeEl) &&
+        (activeEl.id === 'notes-textarea' || activeEl.id === 'notes-add-input' || activeEl.classList.contains('title-edit-input') || activeEl.classList.contains('coaching-edit'))) {
+        // Stash the task for a deferred re-render after blur
+        pane._pendingTask = task;
+        if (!pane._deferredRender) {
+            pane._deferredRender = true;
+            activeEl.addEventListener('blur', function onBlur() {
+                activeEl.removeEventListener('blur', onBlur);
+                pane._deferredRender = false;
+                if (pane._pendingTask) {
+                    renderDetailPane(pane._pendingTask);
+                    pane._pendingTask = null;
+                }
+            });
+        }
+        return;
+    }
+
     var sourceIcon = sourceTypeIcon(task.source_type);
     var statusClass = (task.status || '').replace(/\s/g, '_');
 
@@ -563,6 +583,11 @@ function renderDetailPane(task) {
     // User Notes
     html += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
+        + '<div class="notes-add-row">'
+        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note... (use @WorkIQ to ask a question)" '
+        + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTimestampedNote(' + task.id + ')}">'
+        + '<button class="btn btn-sm notes-add-btn" onclick="addTimestampedNote(' + task.id + ')">+</button>'
+        + '</div>'
         + '<textarea class="notes-textarea" id="notes-textarea" '
         + 'onblur="saveNotes(' + task.id + ')" placeholder="Add your notes...">'
         + escapeHtml(task.user_notes || '')
@@ -1296,6 +1321,39 @@ function permanentDeleteTask(taskId) {
         .catch(function(err) { console.error('Delete failed:', err); });
 }
 
+// ── Timestamped Notes ──────────────────────────────────────────────────
+function addTimestampedNote(taskId) {
+    var input = document.getElementById('notes-add-input');
+    if (!input || !input.value.trim()) return;
+    var now = new Date();
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var h = now.getHours(), m = now.getMinutes();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    var stamp = '[' + months[now.getMonth()] + ' ' + now.getDate() + ', '
+        + h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm + '] ';
+    var entry = stamp + input.value.trim();
+    var textarea = document.getElementById('notes-textarea');
+    var existing = textarea ? textarea.value.trim() : '';
+    var newNotes = existing ? entry + '\n' + existing : entry;
+    if (textarea) textarea.value = newNotes;
+    input.value = '';
+    // Save immediately
+    fetch('/api/tasks/' + taskId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_notes: newNotes })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.task) {
+            var idx = tasks.findIndex(function(t) { return t.id === data.task.id; });
+            if (idx >= 0) tasks[idx] = data.task;
+        }
+    })
+    .catch(function(err) { console.error('Failed to save timestamped note:', err); });
+}
+
 // ── Save Notes ─────────────────────────────────────────────────────────
 function saveNotes(taskId) {
     var textarea = document.getElementById('notes-textarea');
@@ -1468,6 +1526,24 @@ function renderSnoozeButton(task) {
                 + '</div>';
         }
     }
+    // Pre-fill date picker with day-before-due if task has a future due date
+    var defaultDate = '';
+    var dateHint = '';
+    if (task.due_date) {
+        var dueParts = task.due_date.split('-');
+        var dueDate = new Date(parseInt(dueParts[0]), parseInt(dueParts[1]) - 1, parseInt(dueParts[2]));
+        var dayBefore = new Date(dueDate);
+        dayBefore.setDate(dayBefore.getDate() - 1);
+        dayBefore.setHours(9, 0, 0, 0);
+        if (dayBefore > new Date()) {
+            var yy = dayBefore.getFullYear();
+            var mm = ('0' + (dayBefore.getMonth() + 1)).slice(-2);
+            var dd = ('0' + dayBefore.getDate()).slice(-2);
+            defaultDate = yy + '-' + mm + '-' + dd;
+            dateHint = '<div class="snooze-date-hint">Day before due (' + escapeHtml(formatDate(task.due_date)) + ')</div>';
+        }
+    }
+
     return '<div class="snooze-btn-wrapper" style="display:inline-block;position:relative">'
         + '<button class="btn btn-snooze" onclick="event.stopPropagation(); toggleSnoozeDropdown(' + taskId + ')">Snooze</button>'
         + '<div class="snooze-dropdown" id="snooze-dropdown-' + taskId + '">'
@@ -1477,8 +1553,11 @@ function renderSnoozeButton(task) {
         + renderWeekdaySnoozeRow(taskId)
         + '<div class="snooze-option snooze-custom">'
         + '<label class="snooze-date-label">Pick date &amp; time:</label>'
+        + dateHint
         + '<div class="snooze-custom-row">'
-        + '<input type="date" class="snooze-date-input" id="snooze-date-' + taskId + '" onclick="event.stopPropagation()">'
+        + '<input type="date" class="snooze-date-input" id="snooze-date-' + taskId + '"'
+        + (defaultDate ? ' value="' + defaultDate + '"' : '')
+        + ' onclick="event.stopPropagation()">'
         + '<input type="time" class="snooze-time-input" id="snooze-time-' + taskId + '" value="09:00" onclick="event.stopPropagation()">'
         + '<button class="snooze-go-btn" onclick="event.stopPropagation(); doSnoozeCustom(' + taskId + ')">Go</button>'
         + '</div>'
@@ -1586,6 +1665,7 @@ function snoozeUntilReturn(taskId, returnDate) {
     var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 9, 0, 0, 0);
     doSnooze(taskId, { snoozed_until: d.toISOString() });
 }
+
 
 function formatOofDate(dateStr) {
     if (!dateStr) return '';

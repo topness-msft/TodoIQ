@@ -1142,6 +1142,32 @@ html, body {
 }
 
 /* ── User Notes ─────────────────────────────────────────────────────── */
+.notes-add-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.notes-add-input {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+    font-size: 13px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.notes-add-input:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+.notes-add-btn {
+    padding: 4px 10px;
+    font-size: 16px;
+    line-height: 1;
+    min-width: 32px;
+}
+
 .notes-textarea {
     width: 100%;
     min-height: 80px;
@@ -1797,6 +1823,12 @@ html, body {
     display: block;
     font-size: 11px;
     color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.snooze-date-hint {
+    font-size: 11px;
+    color: var(--accent);
     margin-bottom: 4px;
 }
 

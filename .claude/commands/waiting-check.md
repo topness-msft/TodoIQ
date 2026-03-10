@@ -16,7 +16,7 @@ import sqlite3, json
 conn = sqlite3.connect('data/claudetodo.db')
 conn.row_factory = sqlite3.Row
 rows = conn.execute(\"\"\"
-    SELECT id, title, description, key_people, source_type, source_id, created_at, status, waiting_activity
+    SELECT id, title, description, key_people, source_type, source_id, created_at, status, waiting_activity, user_notes
     FROM tasks
     WHERE status = 'waiting'
        OR (status = 'snoozed'
@@ -25,7 +25,7 @@ rows = conn.execute(\"\"\"
                 OR json_extract(waiting_activity, '$.checked_at') < datetime('now', '-20 hours')))
 \"\"\").fetchall()
 for r in rows:
-    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or ''}))
+    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
 conn.close()
 "
 ```
@@ -54,6 +54,16 @@ Determine the **query start date**:
 > "What are my most recent emails, Teams messages, and chats with [person] since [start date]? List all interactions found."
 
 **IMPORTANT:** Always query all channels regardless of `source_type` — responses can come on any channel (e.g. a meeting action item resolved via email, an email task answered in Teams). Do NOT limit to the specific task topic. WorkIQ may miss relevant responses if the query is too narrow. You will classify relevance yourself in Step 3.
+
+### @WorkIQ inline questions
+
+For each task, check its `user_notes` for unanswered `@WorkIQ` questions. A line contains an `@WorkIQ` question if it includes `@WorkIQ` (case-insensitive). A question is **unanswered** if the line immediately following it does NOT start with `  →` (two spaces then →).
+
+If there are unanswered questions, append them to the WorkIQ activity query for that task:
+
+> "Additionally, answer these questions from the user's notes: 1) [question text without the @WorkIQ prefix] 2) [next question] ..."
+
+Keep the answers separate from the activity classification — save the answers for writing back to `user_notes` in Step 4.
 
 ## Step 3: Classify responses
 
@@ -104,6 +114,46 @@ print('Updated ' + str(len(results)) + ' tasks')
 ```
 
 Replace TASK_ID, CLASSIFICATION, SUMMARY, RETURN_DATE_OR_NONE, ORIGINAL_TASK_STATUS with actual values. Use `None` for return_date if unknown. Use the task's original `status` field from Step 1.
+
+### Write @WorkIQ answers back to `user_notes`
+
+For tasks that had unanswered `@WorkIQ` questions, write answers back into `user_notes`. Add a second Python script (or extend the one above) that:
+
+1. Reads the current `user_notes` for the task
+2. Finds each `@WorkIQ` question line
+3. Inserts `  → [answer text]` on the line immediately below each question
+4. Writes back via `UPDATE tasks SET user_notes = ?, updated_at = ? WHERE id = ?`
+
+```bash
+python -c "
+import sqlite3
+from datetime import datetime, timezone
+conn = sqlite3.connect('data/claudetodo.db')
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+answers = [
+    (TASK_ID, [('@WorkIQ question line text', 'answer text'), ...]),
+    ...
+]
+for task_id, qa_pairs in answers:
+    row = conn.execute('SELECT user_notes FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not row or not row[0]:
+        continue
+    lines = row[0].split('\n')
+    new_lines = []
+    for line in lines:
+        new_lines.append(line)
+        for question_line, answer in qa_pairs:
+            if line.strip() == question_line.strip():
+                new_lines.append('  → ' + answer)
+                break
+    conn.execute('UPDATE tasks SET user_notes = ?, updated_at = ? WHERE id = ?', ('\n'.join(new_lines), now, task_id))
+conn.commit()
+conn.close()
+print('Wrote @WorkIQ answers back to user_notes')
+"
+```
+
+Replace TASK_ID and the question/answer pairs with actual values from the WorkIQ responses. Only include tasks that had unanswered `@WorkIQ` questions. Skip this step if no tasks had questions.
 
 ## Step 5: Print summary
 
