@@ -331,7 +331,9 @@ function updatePersonFilter() {
         container.innerHTML = '';
         return;
     }
-    var label = _personFilter ? getInitials(_personFilter) + ' ' + escapeHtml(_personFilter) : '👤 People';
+    var label = _personFilter
+        ? '<span class="person-pill-avatar">' + getInitials(_personFilter) + '</span> ' + escapeHtml(_personFilter)
+        : '👤 People';
     var activeClass = _personFilter ? ' person-filter-trigger-active' : '';
     var html = '<div class="person-filter-trigger' + activeClass + '" onclick="event.stopPropagation(); togglePersonDropdown()">'
         + label + ' ▾</div>';

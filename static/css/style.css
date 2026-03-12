@@ -446,7 +446,7 @@ html, body {
 .person-filter-trigger {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     padding: 6px 12px;
     border-radius: 16px;
     background: var(--bg-tertiary);
@@ -455,6 +455,20 @@ html, body {
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.15s, color 0.15s;
+}
+
+.person-filter-trigger .person-pill-avatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
 }
 
 .person-filter-trigger:hover {
