@@ -2,10 +2,13 @@
 
 import logging
 import os
+import sqlite3
 import sys
+import time
 import tornado.ioloop
 import tornado.web
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import init_db, get_connection
@@ -27,6 +30,8 @@ SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
 UNSNOOZE_INTERVAL_MS = 60 * 1000  # 60 seconds
 PARSE_CHECK_INTERVAL_MS = 30 * 1000  # 30 seconds
 WAITING_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000  # 4 hours
+BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000  # 6 hours
+BACKUP_KEEP_DAYS = 7
 
 
 def _periodic_sync():
@@ -39,6 +44,30 @@ def _check_waiting():
     """Called every 4 hours to check activity on waiting tasks."""
     result = run_claude("/waiting-check", label="waiting-check")
     logger.info(f"Waiting check: {result['message']}")
+
+
+def _backup_db():
+    """Called every 6 hours to back up the database. Keeps last 7 days."""
+    from .db import DB_PATH
+    backup_dir = DB_PATH.parent / "backups"
+    backup_dir.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"claudetodo_{stamp}.db"
+    try:
+        src = sqlite3.connect(str(DB_PATH))
+        dst = sqlite3.connect(str(backup_path))
+        src.backup(dst)
+        dst.close()
+        src.close()
+        logger.info(f"DB backup saved: {backup_path.name}")
+        # Prune old backups
+        cutoff = time.time() - (BACKUP_KEEP_DAYS * 86400)
+        for f in sorted(backup_dir.glob("claudetodo_*.db")):
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                logger.info(f"Pruned old backup: {f.name}")
+    except Exception as e:
+        logger.error(f"DB backup failed: {e}")
 
 
 PARSE_BASE_TIMEOUT = 300  # 5 min base
@@ -181,6 +210,12 @@ def start_server(port=8766):
     waiting_callback = tornado.ioloop.PeriodicCallback(_check_waiting, WAITING_CHECK_INTERVAL_MS)
     waiting_callback.start()
     logger.info("Waiting activity checker enabled (every 4 hr)")
+
+    # DB backup every 6 hours
+    backup_callback = tornado.ioloop.PeriodicCallback(_backup_db, BACKUP_INTERVAL_MS)
+    backup_callback.start()
+    _backup_db()  # Run once at startup
+    logger.info("DB backup enabled (every 6 hr, keep 7 days)")
 
     return app, tornado.ioloop.IOLoop.current()
 
