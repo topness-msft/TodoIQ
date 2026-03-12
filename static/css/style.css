@@ -482,6 +482,18 @@ html, body {
     font-weight: 600;
 }
 
+.person-filter-clear {
+    margin-left: 4px;
+    font-size: 12px;
+    opacity: 0.6;
+    font-weight: 400;
+    cursor: pointer;
+}
+
+.person-filter-clear:hover {
+    opacity: 1;
+}
+
 .person-filter-dropdown {
     display: none;
     position: absolute;

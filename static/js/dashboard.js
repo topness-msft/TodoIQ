@@ -9,6 +9,7 @@ var openDropdownId = null;
 var searchQuery = '';
 var _quickFilterActive = false;
 var _personFilter = '';  // empty = no filter, else person name
+var _collapsedBeforeFilter = [];  // sections that were collapsed before person filter was applied
 var lastSyncTime = null;
 var _skillPollTimer = null;
 var _runningSkills = {};
@@ -332,7 +333,9 @@ function updatePersonFilter() {
         return;
     }
     var label = _personFilter
-        ? '<span class="person-pill-avatar">' + getInitials(_personFilter) + '</span> ' + escapeHtml(_personFilter)
+        ? '<span class="person-pill-avatar">' + getInitials(_personFilter) + '</span> '
+            + escapeHtml(_personFilter)
+            + ' <span class="person-filter-clear" onclick="event.stopPropagation(); clearPersonFilter()">✕</span>'
         : '👤 People';
     var activeClass = _personFilter ? ' person-filter-trigger-active' : '';
     var html = '<div class="person-filter-trigger' + activeClass + '" onclick="event.stopPropagation(); togglePersonDropdown()">'
@@ -360,11 +363,18 @@ function togglePersonDropdown() {
 }
 
 function togglePersonFilter(name) {
+    var wasFiltered = !!_personFilter;
     _personFilter = (_personFilter === name || name === '') ? '' : name;
     var dd = document.getElementById('person-filter-dropdown');
     if (dd) dd.classList.remove('open');
 
-    if (_personFilter) {
+    if (_personFilter && !wasFiltered) {
+        // Save current collapse state before expanding
+        _collapsedBeforeFilter = [];
+        ['active', 'suggested', 'waiting', 'snoozed', 'completed', 'dismissed', 'deleted'].forEach(function(s) {
+            var body = document.getElementById('body-' + s);
+            if (body && body.classList.contains('collapsed')) _collapsedBeforeFilter.push(s);
+        });
         // Load terminal sections if needed, then expand sections with matches
         var toLoad = TERMINAL_SECTIONS.filter(function(s) { return !_loadedSections[s]; });
         var loads = toLoad.map(function(s) { return fetchSectionTasks(s); });
@@ -372,9 +382,27 @@ function togglePersonFilter(name) {
             renderTaskList();
             expandSectionsWithMatches();
         });
-    } else {
+    } else if (!_personFilter) {
+        // Restore collapse state
         renderTaskList();
+        _collapsedBeforeFilter.forEach(function(s) {
+            var body = document.getElementById('body-' + s);
+            var toggle = document.getElementById('toggle-' + s);
+            if (body && !body.classList.contains('collapsed')) {
+                body.classList.add('collapsed');
+                if (toggle) toggle.innerHTML = '&#9656;';
+            }
+        });
+        _collapsedBeforeFilter = [];
+    } else {
+        // Switching between people
+        renderTaskList();
+        expandSectionsWithMatches();
     }
+}
+
+function clearPersonFilter() {
+    togglePersonFilter('');
 }
 
 function expandSectionsWithMatches() {
