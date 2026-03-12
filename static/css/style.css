@@ -442,20 +442,62 @@ html, body {
 }
 
 .person-filter-bar {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    align-items: center;
+    position: relative;
     flex-shrink: 0;
 }
 
-.person-filter-pill {
+.person-filter-trigger {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
+    gap: 4px;
+    padding: 6px 12px;
     border-radius: 16px;
     background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+}
+
+.person-filter-trigger:hover {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.person-filter-trigger-active {
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.person-filter-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    min-width: 200px;
+    max-height: 300px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 100;
+    padding: 4px;
+}
+
+.person-filter-dropdown.open {
+    display: block;
+}
+
+.person-filter-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 12px;
     color: var(--text-secondary);
     font-size: 13px;
     cursor: pointer;
@@ -474,9 +516,18 @@ html, body {
     font-weight: 600;
 }
 
+.person-filter-pill-clear {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    border-bottom: 1px solid var(--border-primary);
+    border-radius: 0;
+    margin-bottom: 2px;
+    padding-bottom: 8px;
+}
+
 .person-filter-pill .person-pill-avatar {
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     background: var(--text-tertiary);
     color: #fff;
@@ -485,6 +536,7 @@ html, body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
 }
 
 .person-filter-pill-active .person-pill-avatar,

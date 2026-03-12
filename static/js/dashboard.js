@@ -76,6 +76,10 @@ function init() {
         if (!e.target.closest('.person-pill-wrapper')) {
             closeAllDropdowns();
         }
+        if (!e.target.closest('#person-filter')) {
+            var dd = document.getElementById('person-filter-dropdown');
+            if (dd) dd.classList.remove('open');
+        }
     });
 }
 
@@ -309,7 +313,9 @@ function toggleQuickFilter() {
 // ── Person Filter ────────────────────────────────────────────────────
 function collectAllPeople() {
     var nameSet = {};
+    var activeSections = ['active', 'in_progress', 'waiting', 'snoozed', 'suggested'];
     tasks.forEach(function(t) {
+        if (activeSections.indexOf(t.status) === -1) return;
         parsePeopleNames(t.key_people).forEach(function(name) {
             if (name) nameSet[name] = true;
         });
@@ -325,20 +331,36 @@ function updatePersonFilter() {
         container.innerHTML = '';
         return;
     }
-    var html = '';
+    var label = _personFilter ? getInitials(_personFilter) + ' ' + escapeHtml(_personFilter) : '👤 People';
+    var activeClass = _personFilter ? ' person-filter-trigger-active' : '';
+    var html = '<div class="person-filter-trigger' + activeClass + '" onclick="event.stopPropagation(); togglePersonDropdown()">'
+        + label + ' ▾</div>';
+    html += '<div class="person-filter-dropdown" id="person-filter-dropdown">';
+    if (_personFilter) {
+        html += '<div class="person-filter-pill person-filter-pill-clear" onclick="event.stopPropagation(); togglePersonFilter(\'\')">'
+            + '✕ Clear filter</div>';
+    }
     people.forEach(function(name) {
         var active = name === _personFilter ? ' person-filter-pill-active' : '';
         var initials = getInitials(name);
-        html += '<div class="person-filter-pill' + active + '" onclick="togglePersonFilter(\'' + escapeHtml(name).replace(/'/g, "\\'") + '\')">'
+        html += '<div class="person-filter-pill' + active + '" onclick="event.stopPropagation(); togglePersonFilter(\'' + escapeHtml(name).replace(/'/g, "\\'") + '\')">'
             + '<span class="person-pill-avatar">' + initials + '</span>'
             + '<span>' + escapeHtml(name) + '</span>'
             + '</div>';
     });
+    html += '</div>';
     container.innerHTML = html;
 }
 
+function togglePersonDropdown() {
+    var dd = document.getElementById('person-filter-dropdown');
+    if (dd) dd.classList.toggle('open');
+}
+
 function togglePersonFilter(name) {
-    _personFilter = (_personFilter === name) ? '' : name;
+    _personFilter = (_personFilter === name || name === '') ? '' : name;
+    var dd = document.getElementById('person-filter-dropdown');
+    if (dd) dd.classList.remove('open');
     renderTaskList();
 }
 
