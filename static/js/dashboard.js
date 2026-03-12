@@ -1127,7 +1127,7 @@ function saveTitle(taskId) {
     fetch('/api/tasks/' + taskId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle, key_people: null })
+        body: JSON.stringify({ title: newTitle })
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
