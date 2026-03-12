@@ -363,7 +363,32 @@ function togglePersonFilter(name) {
     _personFilter = (_personFilter === name || name === '') ? '' : name;
     var dd = document.getElementById('person-filter-dropdown');
     if (dd) dd.classList.remove('open');
-    renderTaskList();
+
+    if (_personFilter) {
+        // Load terminal sections if needed, then expand sections with matches
+        var toLoad = TERMINAL_SECTIONS.filter(function(s) { return !_loadedSections[s]; });
+        var loads = toLoad.map(function(s) { return fetchSectionTasks(s); });
+        Promise.all(loads).then(function() {
+            renderTaskList();
+            expandSectionsWithMatches();
+        });
+    } else {
+        renderTaskList();
+    }
+}
+
+function expandSectionsWithMatches() {
+    var sections = ['active', 'suggested', 'waiting', 'snoozed', 'completed', 'dismissed', 'deleted'];
+    sections.forEach(function(sectionId) {
+        var body = document.getElementById('body-' + sectionId);
+        var toggle = document.getElementById('toggle-' + sectionId);
+        if (!body) return;
+        var hasMatches = body.children.length > 0;
+        if (hasMatches && body.classList.contains('collapsed')) {
+            body.classList.remove('collapsed');
+            if (toggle) toggle.innerHTML = '&#9662;';
+        }
+    });
 }
 
 function applyPersonFilter() {
