@@ -1130,7 +1130,7 @@ function saveTitle(taskId) {
         body: JSON.stringify({
             title: newTitle,
             raw_input: newTitle,
-            description: '',
+            description: null,
             key_people: null,
             coaching_text: null,
             skill_output: null,
