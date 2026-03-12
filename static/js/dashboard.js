@@ -1127,7 +1127,15 @@ function saveTitle(taskId) {
     fetch('/api/tasks/' + taskId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle })
+        body: JSON.stringify({
+            title: newTitle,
+            raw_input: newTitle,
+            description: '',
+            key_people: null,
+            coaching_text: null,
+            skill_output: null,
+            cowork_prompt: null
+        })
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
