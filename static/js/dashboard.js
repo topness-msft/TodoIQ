@@ -319,6 +319,7 @@ function collectAllPeople() {
 
 function updatePersonFilter() {
     var select = document.getElementById('person-filter');
+    if (!select) return;
     var current = _personFilter;
     var people = collectAllPeople();
     var html = '<option value="">All people</option>';
