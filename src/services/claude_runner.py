@@ -1,4 +1,4 @@
-"""Shared subprocess manager for `claude -p` commands.
+"""Shared subprocess manager for `copilot -p` commands.
 
 Spawns and tracks labeled subprocesses.  Different labels run in parallel;
 the same label won't double-spawn.
@@ -245,8 +245,8 @@ def is_running(label: str) -> bool:
     return False
 
 
-def run_claude(command: str, label: str, timeout: float | None = None) -> dict:
-    """Launch `claude -p "<command>"` if *label* is not already running.
+def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
+    """Launch `copilot -p "<command>"` if *label* is not already running.
 
     Args:
         timeout: Per-process timeout in seconds. Defaults to SUBPROCESS_TIMEOUT (300s).
@@ -256,9 +256,6 @@ def run_claude(command: str, label: str, timeout: float | None = None) -> dict:
     if is_running(label):
         return {"ok": False, "message": f"'{label}' already running."}
 
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     safe_label = label.replace(":", "_").replace("/", "_")
     log_path = LOG_DIR / f"{safe_label}.log"
@@ -267,13 +264,15 @@ def run_claude(command: str, label: str, timeout: float | None = None) -> dict:
         fh = open(str(log_path), "w")
         proc = subprocess.Popen(
             [
-                "claude", "-p", command,
-                "--no-session-persistence",
-                "--allowedTools",
-                "mcp__workiq__ask_work_iq,Bash,Read,Write,Glob,Grep",
+                "copilot", "-p", command,
+                "--allow-tool=workiq",
+                "--allow-tool=shell",
+                "--allow-tool=read",
+                "--allow-tool=write",
+                "--allow-tool=glob",
+                "--allow-tool=grep",
             ],
             cwd=str(PROJECT_ROOT),
-            env=env,
             stdout=fh,
             stderr=fh,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -286,8 +285,8 @@ def run_claude(command: str, label: str, timeout: float | None = None) -> dict:
         logger.info(f"[{label}] started: PID {proc.pid} (timeout={timeout or SUBPROCESS_TIMEOUT}s)")
         return {"ok": True, "message": f"'{label}' started (PID {proc.pid})."}
     except FileNotFoundError:
-        logger.warning("claude CLI not found on PATH")
-        return {"ok": False, "message": "claude CLI not found on PATH."}
+        logger.warning("copilot CLI not found on PATH")
+        return {"ok": False, "message": "copilot CLI not found on PATH."}
     except Exception as e:
         logger.error(f"[{label}] launch failed: {e}")
         return {"ok": False, "message": str(e)}

@@ -175,10 +175,10 @@ def on_open_dashboard(icon, item):
 def on_sync_now(icon, item):
     if _ioloop is None:
         return
-    from src.services.claude_runner import run_claude
+    from src.services.claude_runner import run_copilot
 
     def _do_sync():
-        result = run_claude("/todo-refresh", label="sync")
+        result = run_copilot("/todo-refresh", label="sync")
         logger.info(f"Manual tray sync: {result['message']}")
 
     _ioloop.add_callback(_do_sync)

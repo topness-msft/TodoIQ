@@ -7,7 +7,7 @@ from ..models import (
     create_task, get_task, list_tasks, update_task, delete_task,
     get_contexts, get_stats, get_last_sync,
 )
-from ..services.claude_runner import run_claude
+from ..services.claude_runner import run_copilot
 from .ws import broadcast
 
 
@@ -45,7 +45,7 @@ class TaskListHandler(tornado.web.RequestHandler):
                 parse_status="unparsed",
             )
             # Auto-trigger parsing
-            run_claude("/todo-parse", label="parse")
+            run_copilot("/todo-parse", label="parse")
         elif title:
             task = create_task(
                 title=title,

@@ -1,6 +1,6 @@
 """Sync status and trigger handler.
 
-Launches `claude -p /todo-refresh` via the shared claude_runner.
+Launches `copilot -p /todo-refresh` via the shared claude_runner.
 Used by the 30-min PeriodicCallback in app.py and by the dashboard's
 manual sync button.
 """
@@ -10,7 +10,7 @@ import logging
 import tornado.web
 
 from ..models import get_last_sync
-from ..services.claude_runner import run_claude, is_running, get_status, get_exit_info
+from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,8 @@ def is_sync_running() -> bool:
 
 
 def run_sync() -> dict:
-    """Launch `claude -p /todo-refresh` if not already running."""
-    return run_claude("/todo-refresh", label="sync")
+    """Launch `copilot -p /todo-refresh` if not already running."""
+    return run_copilot("/todo-refresh", label="sync")
 
 
 class SyncStatusHandler(tornado.web.RequestHandler):
@@ -68,7 +68,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
 
         # On-demand waiting activity check
         if body.get("waiting_check"):
-            result = run_claude("/waiting-check", label="waiting-check")
+            result = run_copilot("/waiting-check", label="waiting-check")
             if not result["ok"] and "already running" not in result["message"].lower():
                 self.set_status(500)
             self.write(json.dumps(result))

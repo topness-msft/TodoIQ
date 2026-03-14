@@ -49,7 +49,7 @@ Re-evaluate this policy when Graph MCP or improved WorkIQ email folder/flag acce
 - `src/handlers/ws.py` — WebSocket at /ws for live updates
 - `src/handlers/dashboard.py` — GET / renders dashboard
 - `src/services/workiq_queries.py` — M365 query templates (Teams/meetings scan + awaiting-response)
-- `src/services/claude_runner.py` — Shared `claude -p` subprocess manager (label-based dedup)
+- `src/services/claude_runner.py` — Shared `copilot -p` subprocess manager (label-based dedup)
 - `src/services/refresh_scheduler.py` — Adaptive refresh intervals
 - `scripts/todoness_tray.pyw` — System tray launcher (runs server in background thread)
 - `scripts/install_startup.py` — Register TodoNess as a Windows logon startup task

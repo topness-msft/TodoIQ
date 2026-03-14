@@ -18,7 +18,7 @@ from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSk
 from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
 from .models import get_expired_snoozed, unsnooze_task, get_task
-from .services.claude_runner import run_claude
+from .services.claude_runner import run_copilot
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,14 @@ BACKUP_KEEP_DAYS = 7
 
 
 def _periodic_sync():
-    """Called every 30 minutes to launch `claude -p /todo-refresh`."""
-    result = run_claude("/todo-refresh", label="sync")
+    """Called every 30 minutes to launch `copilot -p /todo-refresh`."""
+    result = run_copilot("/todo-refresh", label="sync")
     logger.info(f"Periodic sync: {result['message']}")
 
 
 def _check_waiting():
     """Called every 4 hours to check activity on waiting tasks."""
-    result = run_claude("/waiting-check", label="waiting-check")
+    result = run_copilot("/waiting-check", label="waiting-check")
     logger.info(f"Waiting check: {result['message']}")
 
 
@@ -78,7 +78,7 @@ def _check_unparsed():
     """Called every 30 seconds to catch orphaned unparsed/queued tasks.
 
     If a parse subprocess was already running when a new task arrived,
-    run_claude silently skipped it. This callback retriggers the parse
+    run_copilot silently skipped it. This callback retriggers the parse
     once the previous one finishes, so no task stays stuck.
 
     Timeout scales with batch size: 5 min base + 3 min per task.
@@ -96,7 +96,7 @@ def _check_unparsed():
 
     if count:
         timeout = PARSE_BASE_TIMEOUT + (count * PARSE_PER_TASK_TIMEOUT)
-        result = run_claude("/todo-parse", label="parse", timeout=timeout)
+        result = run_copilot("/todo-parse", label="parse", timeout=timeout)
         if result["ok"]:
             logger.info(f"Parse check: triggered parse for {count} task(s) (timeout={timeout}s)")
 

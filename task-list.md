@@ -1,10 +1,10 @@
 # Task List
 
 ## Open Tasks
-- [ ] #004 | 2026-03-09 | L  | Migrate from Claude CLI to Copilot CLI
 - [ ] #006 | 2026-03-09 | XL | Browser Action Tasks — Playwright two-phase recon/execute for form-filling tasks
 
 - [ ] #008 | 2026-03-12 | XL | Recurring Tasks — tasks that repeat on a schedule, each recurrence runs full AI coaching and AI skill execution
+- [ ] #012 | 2026-03-14 | XS | Replace claude -p subprocess calls with copilot -p
 
 ## In Progress
 

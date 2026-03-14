@@ -8,7 +8,7 @@ from ..models import (
     promote_task, dismiss_task, complete_task, start_task,
     snooze_task, transition_task, get_task, update_task,
 )
-from ..services.claude_runner import run_claude
+from ..services.claude_runner import run_copilot
 from .ws import broadcast
 
 PARSE_BASE_TIMEOUT = 300  # 5 min base
@@ -103,8 +103,7 @@ class TaskActionHandler(tornado.web.RequestHandler):
         # (promote to active, or any transition out of suggested)
         if pre_status == "suggested" and task["status"] != "dismissed" and not task.get("coaching_text"):
             task = update_task(tid, parse_status="queued")
-            run_claude("/todo-parse", label="parse", timeout=_parse_timeout())
-
+            run_copilot("/todo-parse", label="parse", timeout=_parse_timeout())
         self.write(json.dumps({"task": task}))
         broadcast({"type": "task_updated", "task": task})
 
@@ -129,8 +128,7 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"task": updated}))
         broadcast({"type": "task_updated", "task": updated})
         # Auto-trigger parsing
-        run_claude("/todo-parse", label="parse", timeout=_parse_timeout())
-
+        run_copilot("/todo-parse", label="parse", timeout=_parse_timeout())
 
 _VALID_SKILLS = {"respond-email", "schedule-meeting", "follow-up", "prepare", "teams-message", "cowork-prompt"}
 
@@ -167,6 +165,6 @@ class TaskSkillHandler(tornado.web.RequestHandler):
             return
 
         label = f"skill:{skill}:{tid}"
-        result = run_claude(f"/{skill} {tid}", label=label)
+        result = run_copilot(f"/{skill} {tid}", label=label)
         broadcast({"type": "skill_running", "task_id": tid, "skill": skill})
         self.write(json.dumps(result))
