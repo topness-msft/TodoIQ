@@ -693,13 +693,20 @@ function renderDetailPane(task) {
 
     html += '</div>';
 
-    // Key People (pills)
-    if (task.key_people) {
-        html += '<div class="detail-card">'
-            + '<div class="detail-label">Key People</div>'
-            + renderPeoplePills(task.key_people, task.id)
-            + '</div>';
-    }
+    // Key People (pills + add)
+    html += '<div class="detail-card">'
+        + '<div class="detail-label">Key People</div>'
+        + renderPeoplePills(task.key_people, task.id)
+        + '<div class="add-person-row" id="add-person-row-' + task.id + '">'
+        + '<button class="btn btn-sm add-person-btn" onclick="event.stopPropagation(); showAddPersonInput(' + task.id + ')">+ Add</button>'
+        + '<div class="add-person-input-wrapper" id="add-person-input-' + task.id + '" style="display:none">'
+        + '<input type="text" class="add-person-name" id="add-person-name-' + task.id + '" placeholder="Name" '
+        + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();saveNewPerson(' + task.id + ')}'
+        + 'else if(event.key===\'Escape\'){hideAddPersonInput(' + task.id + ')}">'
+        + '<button class="btn btn-sm" onclick="event.stopPropagation(); saveNewPerson(' + task.id + ')">&#10003;</button>'
+        + '</div>'
+        + '</div>'
+        + '</div>';
 
     // Waiting Activity Check (between Key People and Notes)
     if (task.status === 'waiting' || (task.status === 'snoozed' && parseWaitingActivity(task) && parseWaitingActivity(task).status === 'out_of_office')) {
@@ -852,7 +859,7 @@ function getInitials(name) {
 
 function renderPeoplePills(keyPeople, taskId) {
     var people = parsePeople(keyPeople);
-    if (!people.length) return '<div class="detail-value">' + escapeHtml(keyPeople) + '</div>';
+    if (!people.length) return '';
 
     var html = '<div class="people-list">';
     people.forEach(function(person, idx) {
@@ -1025,6 +1032,57 @@ function removePerson(taskId, personIdx) {
     .catch(function(err) { console.error('Failed to remove person:', err); });
 
     closeAllDropdowns();
+}
+
+function showAddPersonInput(taskId) {
+    var wrapper = document.getElementById('add-person-input-' + taskId);
+    var btn = wrapper ? wrapper.previousElementSibling : null;
+    if (wrapper) { wrapper.style.display = 'flex'; }
+    if (btn) { btn.style.display = 'none'; }
+    var input = document.getElementById('add-person-name-' + taskId);
+    if (input) { input.value = ''; input.focus(); }
+}
+
+function hideAddPersonInput(taskId) {
+    var wrapper = document.getElementById('add-person-input-' + taskId);
+    var btn = wrapper ? wrapper.previousElementSibling : null;
+    if (wrapper) { wrapper.style.display = 'none'; }
+    if (btn) { btn.style.display = ''; }
+}
+
+function saveNewPerson(taskId) {
+    var input = document.getElementById('add-person-name-' + taskId);
+    var name = input ? input.value.trim() : '';
+    if (!name) return;
+
+    var task = tasks.find(function(t) { return t.id === taskId; });
+    if (!task) return;
+
+    var people = parsePeople(task.key_people);
+    // Don't add duplicates
+    var exists = people.some(function(p) {
+        return p.name.toLowerCase() === name.toLowerCase();
+    });
+    if (exists) { hideAddPersonInput(taskId); return; }
+
+    people.push({ name: name, alternatives: [] });
+    var newKeyPeople = JSON.stringify(people);
+
+    fetch('/api/tasks/' + taskId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key_people: newKeyPeople })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.task) {
+            var idx = tasks.findIndex(function(t) { return t.id === data.task.id; });
+            if (idx >= 0) tasks[idx] = data.task;
+            renderDetailPane(data.task);
+            renderTaskList();
+        }
+    })
+    .catch(function(err) { console.error('Failed to add person:', err); });
 }
 
 function replacePersonName(text, oldName, newName) {

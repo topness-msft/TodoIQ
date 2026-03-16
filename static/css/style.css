@@ -1126,6 +1126,48 @@ html, body {
     font-weight: 400;
 }
 
+/* ── Add Person ─────────────────────────────────────────────────────── */
+.add-person-row {
+    margin-top: 6px;
+}
+
+.add-person-btn {
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: 14px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.add-person-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.add-person-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.add-person-name {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+}
+
+.add-person-name:focus {
+    border-color: var(--accent);
+}
+
 /* ── Inline Person Pills (in description & coaching text) ───────────── */
 .inline-person-pill {
     display: inline-flex;
