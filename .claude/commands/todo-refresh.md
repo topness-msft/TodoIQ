@@ -99,6 +99,17 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 **Claude generates** (not from WorkIQ):
 - **source_id**: Composite dedup key from the original subject + first key person's email: `{source_type}::{first_person_email_lower}::{root_subject_first_50_lower}` (strip Re:/Fwd: prefixes; do NOT include date)
 
+### In-batch dedup (before DB checks)
+
+Steps 2a and 2b can return overlapping items (e.g. a Teams message appears as both "needs attention" and "awaiting response"). Before any DB interaction, deduplicate within the collected batch itself:
+
+1. Collect ALL extracted items from both 2a and 2b into a single list.
+2. Group by `source_id`. If two items share the same `source_id`, keep the one with the higher priority (lower number). If equal, keep the first one encountered.
+3. Also group by `LOWER(title[:40])` — if two items with different `source_id` values share the same 40-char title prefix, they are the same item worded differently. Keep the one with higher priority.
+4. Log how many in-batch duplicates were removed (add to `skipped` count).
+
+Only the deduplicated list proceeds to the DB dedup checks below.
+
 ### Dedup check (two-pass: exact then semantic)
 
 **Pass 1 — Exact match** on source_id or title prefix:
