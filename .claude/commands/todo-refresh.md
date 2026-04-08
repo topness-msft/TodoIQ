@@ -44,7 +44,7 @@ Report the sync window: "Scanning the last {days_since} day(s)..."
 
 Call `ask_work_iq` with ONE query for Teams messages and meeting action items. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
 
-> **Note:** Email scan is disabled. WorkIQ enterprise search cannot reliably scope to Inbox folder, detect flagged status, or filter by folder location. Re-enable when Graph MCP or improved email access is available.
+> **Note:** Broad (unflagged) email scanning is disabled — WorkIQ cannot reliably scope unflagged emails to Inbox. Flagged inbox emails are handled separately in Step 2c below.
 
 ```
 What Teams messages and meeting action items need my attention or action? Include: (1) Teams messages from the last {days_since} days directed at me by name or @mentioning me that I haven't responded to, (2) action items from meetings in the last {days_since} days assigned to me or that I committed to. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Schedule workshop walkthrough with Alex"). Not the message topic — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: teams or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Jane Doe, jane.doe@contoso.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
@@ -57,6 +57,16 @@ Call `ask_work_iq` with a separate query focused on outbound messages where I'm 
 ```
 What messages or emails have I SENT in the last {days_since} days that contain a question, request, or ask where the recipient hasn't responded yet? Only include items where I am clearly waiting for a response — not messages I sent that were purely informational. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action (e.g. "Follow up with Alex on budget approval"). 2. **Description**: 2-3 sentences: what I asked, who I'm waiting on, when I sent it. 3. **Source type**: email, teams, or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and email address. 5. **Priority**: P3 (normal) or P4 (low) — these are lower urgency since I'm waiting, not being asked. 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When I sent the message. 8. **Action type**: awaiting-response. Format each item as a numbered task with clear field labels.
 ```
+
+## Step 2c: WorkIQ scan (Flagged Inbox Emails)
+
+Call `ask_work_iq` for flagged emails in the Inbox only. Unlike Steps 2a/2b, this query has **no time window** — a flagged email represents explicit user intent regardless of age.
+
+```
+Show me only flagged emails in my Inbox folder. Do not include emails from Archive, Deleted Items, Sent Items, or any other folder — only the Inbox. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Reply to Sarah's budget proposal", "Schedule workshop walkthrough with Steve"). Not the message subject — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: email. 4. **Key people**: For each person involved, give their FULL resolved name and email address (e.g. "Jane Doe, jane.doe@contoso.com"). Resolve aliases and short names to full directory names. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
+```
+
+If WorkIQ returns no flagged emails, log "No flagged inbox emails found" and continue.
 
 ## Step 3: Validate and extract fields
 
@@ -119,9 +129,9 @@ def fuzzy_title_match(t1, t2, threshold=0.5):
 
 ### In-batch dedup (before DB checks)
 
-Steps 2a and 2b can return overlapping items (e.g. a Teams message appears as both "needs attention" and "awaiting response"). Before any DB interaction, deduplicate within the collected batch itself:
+Steps 2a, 2b, and 2c can return overlapping items (e.g. a Teams message appears as both "needs attention" and "awaiting response", or a flagged email duplicates a meeting action item). Before any DB interaction, deduplicate within the collected batch itself:
 
-1. Collect ALL extracted items from both 2a and 2b into a single list.
+1. Collect ALL extracted items from Steps 2a, 2b, and 2c into a single list.
 2. Group by `source_id`. If two items share the same `source_id`, keep the one with the higher priority (lower number). If equal, keep the first one encountered.
 3. For each remaining pair of items, if `fuzzy_title_match(title_a, title_b)` returns True, they are the same item worded differently. Keep the one with higher priority.
 4. Log how many in-batch duplicates were removed (add to `skipped` count).

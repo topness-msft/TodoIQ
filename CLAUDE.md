@@ -24,21 +24,24 @@ WorkIQ queries happen inside Claude Code commands only. The Tornado server never
 
 ## Email Integration Policy
 
-**Email is context for existing tasks, never a source of new task suggestions.**
+**Flagged inbox emails are a task source. Broad (unflagged) email scanning is not.**
 
-### Why email scanning is disabled for task creation
-WorkIQ enterprise search cannot reliably scope email queries to the Inbox folder. Queries return items from Archive, Deleted Items, and other folders indiscriminately. It also cannot detect flagged status or filter by folder location. This makes email a noisy, unreliable source for surfacing new tasks — too many false positives from old or discarded messages.
+### Flagged inbox emails (enabled — April 2026)
+WorkIQ can reliably return flagged emails scoped to the Inbox folder only. `/todo-refresh` Step 2c queries for these and creates suggested tasks. Flagged emails represent explicit user intent, so the query has no time-window — a flag from any date is actionable. Normal dedup applies.
 
-### Where email IS used
-Email serves as **read-only context** to enrich tasks that already exist:
+### Why broad email scanning remains disabled
+WorkIQ enterprise search cannot reliably scope *unflagged* email queries to the Inbox folder. Queries return items from Archive, Deleted Items, and other folders indiscriminately. This makes unflagged email a noisy, unreliable source for surfacing new tasks.
+
+### Where email is also used as read-only context
+Email serves as context to enrich tasks that already exist:
 - `/waiting-check` — cross-channel queries include email to detect if a key person replied via email even when the task originated from Teams or meetings
 - `/todo-review` — coaching context refresh includes email to build a fuller picture of task history and communication
 
 ### Why person-scoped email queries work
-These queries succeed where broad scanning fails because they ask a narrower question: "did [specific person] email about [known topic] in [recent window]?" They don't need folder awareness or flag detection. Even archived replies are valid signal — a response is a response regardless of where Outlook filed it.
+These queries succeed where broad scanning fails because they ask a narrower question: "did [specific person] email about [known topic] in [recent window]?" Even archived replies are valid signal — a response is a response regardless of where Outlook filed it.
 
 ### Re-evaluation
-Re-evaluate this policy when Graph MCP or improved WorkIQ email folder/flag access becomes available.
+Re-evaluate the broad email policy when Graph MCP or improved WorkIQ unflagged email folder access becomes available.
 
 ## Key Files
 - `src/db.py` — SQLite schema, connection management
@@ -91,7 +94,7 @@ unparsed → queued → parsing → parsed
 
 ## Sync Flow (/todo-refresh)
 1. Check sync_log for last sync time → determine scan window (1-7 days)
-2. WorkIQ scans (separate calls): (a) Teams messages + meeting action items, (b) awaiting-response items
+2. WorkIQ scans (separate calls): (a) Teams messages + meeting action items, (b) awaiting-response items, (c) flagged inbox emails (no time window)
 3. 3-tier priority validation: Direct (keep priority) → Group (downgrade by 1) → Tangential (P5)
 4. Two-pass dedup: exact match on source_id, then semantic match by sender
 5. Augment existing tasks with new context (dismissed items are never re-suggested)

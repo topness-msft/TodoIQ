@@ -1,0 +1,75 @@
+Γ£ù Query WorkIQ for Teams messages and meeting action items (shell)
+  Γöé copilot -p "Use ask_work_iq to answer this: What Teams messages and meeting action items need
+  Γöé my attention in the last 1 day? Include (1) Teams messages directed at me or @mentioning me
+  Γöé that I haven't responded to, (2) meeting action items assigned to me. For each item return:
+  Γöé Task title (imperative action), Description (2-3 sentences), Source type (teams or meeting),
+  Γöé Key people (full name and email), Priority (P1/P2/P3/P4), Original subject/topic, Date, ActionΓÇª
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Query WorkIQ with additional tool permissions (shell)
+  Γöé copilot -p "Use ask_work_iq to answer this: What Teams messages and meeting action items need
+  Γöé my attention in the last 1 day? Include (1) Teams messages directed at me or @mentioning me
+  Γöé that I haven't responded to, (2) meeting action items assigned to me. For each item return:
+  Γöé Task title (imperative action), Description (2-3 sentences), Source type (teams or meeting),
+  Γöé Key people (full name and email), Priority (P1/P2/P3/P4), Original subject/topic, Date, ActionΓÇª
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Simple WorkIQ test query (shell)
+  Γöé copilot -p "Use ask_work_iq: What Teams messages and meeting action items need my attention in
+  Γöé the last 1 day?" --allow-tool=workiq 2>&1; echo "EXIT: $LASTEXITCODE"
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Read shell output Waiting up to 5 seconds for command output
+  Γöö Invalid shell ID: wiq1. Please supply a valid shell ID to read output from.
+
+    <no active shell sessions>
+
+Γ£ù Check copilot CLI help for permission flags (shell)
+  Γöé copilot --help 2>&1 | Select-String -Pattern "allow|tool|mcp|permission" -CaseSensitive:$false |
+  Γöé head -20
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Test basic copilot invocation (shell)
+  Γöé copilot -p "Say hello" 2>&1
+  Γöö Permission denied and could not request permission from user
+
+ΓùÅ Read claude_runner.py
+  Γöé src\services\claude_runner.py
+  Γöö L240:300 (61 lines read)
+
+Γ£ù Try with ask_work_iq tool name (shell)
+  Γöé copilot -p "Use ask_work_iq to find Teams messages needing my attention today."
+  Γöé --allow-tool=ask_work_iq 2>&1
+  Γöö Permission denied and could not request permission from user
+
+ΓùÅ Read CLAUDE.md
+  Γöö 126 lines read
+
+ΓùÅ Read workiq_queries.py
+  Γöé src\services\workiq_queries.py
+  Γöö 58 lines read
+
+Γ£ù Test copilot without tool flags (shell)
+  Γöé copilot -p "What time is it?" 2>&1
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Search (glob)
+  Γöé "**/.copilot/mcp*.json" in ~
+  Γöö Permission denied and could not request permission from user
+
+ΓùÅ Search (glob)
+  Γöé "**/*.mcp.json"
+  Γöö No matches found
+
+ΓùÅ List Allowed Directories
+  Γöö {"content":"Allowed directories:\nC:\\Users\\phtopnes"}
+
+ΓùÅ Operation cancelled by user
+
+
+Total usage est:        1 Premium request
+API time spent:         1m 43s
+Total session time:     1m 56s
+Total code changes:     +0 -0
+Breakdown by AI model:
+ claude-sonnet-4.6        447.8k in, 5.1k out, 360.7k cached (Est. 1 Premium request)

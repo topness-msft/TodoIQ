@@ -709,8 +709,9 @@ function renderDetailPane(task) {
             }
             return '';
         })()
-        + '<span class="meta-item">' + quickHitToggle(task) + '</span>'
-        + '<span class="meta-item" style="margin-left:auto">' + sourceMetaLink(task) + '</span>'
+        + '<span class="meta-item" style="margin-left:auto">' + quickHitToggle(task) + '</span>'
+        + '<span id="source-meta-' + task.id + '" class="meta-item source-meta-editable" style="margin-left:auto; cursor:pointer" '
+        + 'onclick="openSourceModal(' + task.id + ')" title="Click to edit source">' + sourceMetaLink(task) + '</span>'
         + '</div>';
 
     // Description (editable)
@@ -2401,7 +2402,6 @@ function toggleQuickHit(taskId) {
 }
 
 function sourceMetaLink(task) {
-    var icon = sourceTypeIcon(task.source_type);
     // Extract the original subject from source_id (format: type::email::subject)
     var subject = '';
     if (task.source_id) {
@@ -2411,11 +2411,15 @@ function sourceMetaLink(task) {
     // Use subject as link text, fall back to source_snippet, then source_type
     var label = subject || (task.source_snippet ? truncate(task.source_snippet, 50) : (task.source_type || 'manual'));
     if (task.source_url) {
+        var icon = sourceTypeIcon(task.source_type);
         return icon + ' <a href="' + escapeHtml(task.source_url) + '" target="_blank" '
+            + 'onclick="event.stopPropagation()" '
             + 'class="source-meta-link" title="Open in Outlook/Teams">'
-            + escapeHtml(label) + ' \u2197</a>';
+            + escapeHtml(label) + ' &#8599;</a>'
+            + ' <span class="source-edit-icon" title="Edit source">&#9998;</span>';
     }
-    return icon + ' ' + escapeHtml(label);
+    // No URL yet — single pencil serves as both icon and edit affordance
+    return '<span class="source-edit-icon" title="Click to set source">&#9998; ' + escapeHtml(label) + '</span>';
 }
 
 function sourceTypeIcon(sourceType) {
@@ -2426,6 +2430,98 @@ function sourceTypeIcon(sourceType) {
         manual: '&#9998;'
     };
     return '<span class="source-icon">' + (icons[sourceType] || icons.manual) + '</span>';
+}
+
+function detectSourceType(url) {
+    if (!url) return null;
+    if (/teams\.microsoft\.com|teams\.live\.com/i.test(url)) return 'chat';
+    if (/outlook\.(office|live|com)|mail\./i.test(url)) return 'email';
+    if (/calendar\.|event/i.test(url)) return 'meeting';
+    return null;
+}
+
+function openSourceModal(taskId) {
+    var task = tasks.find(function(t) { return t.id === taskId; });
+    if (!task) return;
+    var currentUrl = task.source_url || '';
+    var currentType = task.source_type || 'manual';
+
+    // Remove existing modal if any
+    var old = document.getElementById('source-modal');
+    if (old) old.remove();
+
+    var overlay = document.createElement('div');
+    overlay.id = 'source-modal';
+    overlay.className = 'source-modal-overlay';
+    overlay.innerHTML = '<div class="source-modal">'
+        + '<div class="source-modal-header">Edit Source</div>'
+        + '<label class="source-modal-label">URL</label>'
+        + '<input type="text" id="source-modal-url" class="source-modal-input" '
+        + 'placeholder="Paste Teams or Outlook URL..." value="' + escapeHtml(currentUrl) + '">'
+        + '<label class="source-modal-label">Type: <span id="source-modal-type-display">' + escapeHtml(currentType) + '</span></label>'
+        + '<div class="source-modal-buttons">'
+        + '<button class="btn-source-modal btn-source-cancel" onclick="closeSourceModal()">Cancel</button>'
+        + '<button class="btn-source-modal btn-source-save" onclick="saveSourceModal(' + taskId + ')">Save</button>'
+        + '</div></div>';
+    document.body.appendChild(overlay);
+
+    var urlInput = document.getElementById('source-modal-url');
+    urlInput.focus();
+    urlInput.select();
+
+    // Live-detect type as user types/pastes
+    urlInput.addEventListener('input', function() {
+        var detected = detectSourceType(urlInput.value) || currentType;
+        document.getElementById('source-modal-type-display').textContent = detected;
+    });
+
+    // Enter to save, Escape to cancel
+    urlInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); saveSourceModal(taskId); }
+        if (e.key === 'Escape') closeSourceModal();
+    });
+
+    // Click overlay to cancel
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) closeSourceModal();
+    });
+}
+
+function closeSourceModal() {
+    var modal = document.getElementById('source-modal');
+    if (modal) modal.remove();
+}
+
+function saveSourceModal(taskId) {
+    var urlInput = document.getElementById('source-modal-url');
+    if (!urlInput) return;
+    var url = urlInput.value.trim();
+    var task = tasks.find(function(t) { return t.id === taskId; });
+    if (!task) return;
+
+    // If cleared, remove source
+    var updates = {};
+    if (!url) {
+        updates = { source_url: null, source_type: 'manual', source_id: null };
+    } else {
+        var newType = detectSourceType(url) || task.source_type || 'manual';
+        var personEmail = '';
+        try {
+            var people = typeof task.key_people === 'string' ? JSON.parse(task.key_people) : task.key_people;
+            if (Array.isArray(people) && people.length > 0) personEmail = (people[0].email || '').toLowerCase();
+        } catch(e) {}
+        var subject = (task.title || '').toLowerCase().substring(0, 50);
+        var newSourceId = newType + '::' + personEmail + '::' + subject;
+        updates = { source_url: url, source_type: newType, source_id: newSourceId };
+    }
+
+    fetch('/api/tasks/' + taskId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.task) closeSourceModal();
+    });
 }
 
 function escapeHtml(str) {

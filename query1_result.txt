@@ -1,0 +1,114 @@
+ΓùÅ Search (grep)
+  Γöé "enterprise_search|workiq" in **/*.md
+  Γöö 2 files found
+
+ΓùÅ Search (grep)
+  Γöé "enterprise_search|workiq" in **/*.py
+  Γöö 30 files found
+
+ΓùÅ Read _tmp_wiq_direct1.py
+  Γöö 32 lines read
+
+ΓùÅ Read _run_wiq_queries.py
+  Γöö 47 lines read
+
+Γ£ù Check WorkIQ CLI help (shell)
+  Γöé & 'C:\Users\phtopnes\AppData\Roaming\npm\workiq.cmd' --help 2>&1 | Select-Object -First 50
+  Γöö Permission denied and could not request permission from user
+
+ΓùÅ Search (grep)
+  Γöé "enterprise_search" in **/*.py
+  Γöö No matches found
+
+ΓùÅ Search (grep)
+  Γöé "enterprise_search|entity_type" in **/*.md
+  Γöö No matches found
+
+ΓùÅ Search (grep)
+  Γöé "enterprise.search|entity_type.*message" in **/*.py
+  Γöö 4 lines found
+
+ΓùÅ Read workiq_queries.py
+  Γöé src\services\workiq_queries.py
+  Γöö 58 lines read
+
+ΓùÅ Read _tmp_wiq_mcp.py
+  Γöö 19 lines read
+
+ΓùÅ Read _tmp_refresh_scan2a.py
+  Γöö 30 lines read
+
+ΓùÅ Read _tmp_refresh_scan2b.py
+  Γöö 28 lines read
+
+ΓùÅ Read _tmp_mcp_help.py
+  Γöö 10 lines read
+
+ΓùÅ Read _tmp_mcp_list.py
+  Γöö 11 lines read
+
+ΓùÅ Read _tmp_mcp_debug.py
+  Γöö 62 lines read
+
+Now I understand the WorkIQ integration. Let me call `enterprise_search` via the `claude mcp call` approach and capture the raw JSON output.
+
+Γ£ù Call WorkIQ enterprise_search for flagged emails (shell)
+  Γöé $env:CLAUDECODE = ''
+  Γöé $params = '{"query":"flagged emails in my Inbox","entity_type":"message","size":10}'
+  Γöé $result = & claude mcp call workiq enterprise_search $params 2>&1
+  Γöé $result | Out-String
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Call WorkIQ via copilot MCP (shell)
+  Γöé $params = '{"query":"flagged emails in my Inbox","entity_type":"message","size":10}'
+  Γöé $result = & copilot mcp call workiq enterprise_search $params 2>&1
+  Γöé $result | Out-String
+  Γöö Permission denied and could not request permission from user
+
+ΓùÅ Find workiq command location (shell)
+  Γöé Get-Command workiq -ErrorAction SilentlyContinue | Select-Object -Property Source, CommandType
+  Γöö 4 lines...
+
+Γ£ù Check workiq search help (shell)
+  Γöé & 'C:\Users\phtopnes\AppData\Roaming\npm\workiq.ps1' search --help 2>&1 | Out-String
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Python subprocess for WorkIQ enterprise_search (shell)
+  Γöé python -c "
+  Γöé import subprocess, json, os
+  Γöé env = os.environ.copy()
+  Γöé env['CLAUDECODE'] = ''
+  Γöé params = json.dumps({'query': 'flagged emails in my Inbox', 'entity_type': 'message', 'size': ΓÇª
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Test basic Python execution (shell)
+  Γöé python -c "print('hello')"
+  Γöö Permission denied and could not request permission from user
+
+Γ£ù Test basic PowerShell (shell)
+  Γöé Write-Output "test"
+  Γöö Permission denied and could not request permission from user
+
+I'm unable to execute this request. Here's why:
+
+1. **No direct WorkIQ MCP tool** ΓÇö WorkIQ `enterprise_search` is not available as a tool in my current session. It's not among my bound MCP tools.
+
+2. **Shell access denied** ΓÇö All PowerShell/subprocess commands are being rejected with "Permission denied", so I can't call it via `claude mcp call workiq enterprise_search` or `copilot -p` (the two approaches this project uses).
+
+### How it *would* be called (based on codebase patterns):
+
+From `_tmp_wiq_mcp.py`, the project calls WorkIQ via:
+```
+claude mcp call workiq enterprise_search '{"query":"flagged emails in my Inbox","entity_type":"message","size":10}'
+```
+
+Or via `copilot -p "..." --allow-tool=workiq` which lets the LLM decide which WorkIQ tool to invoke.
+
+### Recommendation
+Run this directly in your terminal:
+```powershell
+claude mcp call workiq enterprise_search '{"query":"flagged emails in my Inbox","entity_type":"message","size":10}'
+```
+
+That will return the raw JSON with all metadata fields including any folder info. If you want, paste the output here and I'll analyze it for you.
+

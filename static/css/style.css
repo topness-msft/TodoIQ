@@ -1050,6 +1050,102 @@ html, body {
     text-decoration: underline;
 }
 
+.source-meta-editable:hover {
+    opacity: 0.8;
+}
+
+.source-modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.source-modal {
+    background: var(--card-bg, #fff);
+    border-radius: 8px;
+    padding: 20px;
+    width: 480px;
+    max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+.source-modal-header {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text);
+}
+
+.source-modal-label {
+    font-size: 11px;
+    color: var(--text-muted, #666);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: block;
+    margin-bottom: 4px;
+    margin-top: 10px;
+}
+
+.source-modal-input {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 13px;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 6px;
+    background: var(--bg, #fff);
+    color: var(--text);
+    box-sizing: border-box;
+    outline: none;
+}
+
+.source-modal-input:focus {
+    border-color: var(--accent);
+}
+
+.source-modal-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.btn-source-modal {
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    border: none;
+}
+
+.btn-source-cancel {
+    background: var(--border, #ddd);
+    color: var(--text);
+}
+
+.btn-source-save {
+    background: var(--accent);
+    color: #fff;
+}
+
+.btn-source-save:hover {
+    opacity: 0.9;
+}
+
+.source-edit-icon {
+    font-size: 11px;
+    opacity: 0.4;
+    cursor: pointer;
+    transition: opacity 0.1s;
+}
+
+.source-meta-editable:hover .source-edit-icon {
+    opacity: 0.8;
+}
+
 /* ── Labels and Values ──────────────────────────────────────────────── */
 .detail-label {
     font-size: 11px;

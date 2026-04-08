@@ -23,12 +23,16 @@ _TASK_OUTPUT_FORMAT = (
     "Format each item as a numbered task with clear field labels."
 )
 
-# SCAN_EMAIL disabled — WorkIQ enterprise search cannot reliably:
-# - scope to Inbox folder (returns Archive/Deleted items)
-# - detect flagged status (not exposed in search metadata)
-# - filter by folder location (not a returned field)
-# Re-enable when Graph MCP or improved WorkIQ email access is available.
+# Broad email scanning remains disabled — WorkIQ enterprise search cannot
+# reliably scope unflagged emails to Inbox (returns Archive/Deleted items).
+# However, flagged-inbox queries now work reliably (confirmed April 2026).
 SCAN_EMAIL = None
+
+SCAN_FLAGGED_EMAIL = (
+    "Show me only flagged emails in my Inbox folder. "
+    "Do not include emails from Archive, Deleted Items, Sent Items, or any other folder — only the Inbox. "
+    + _TASK_OUTPUT_FORMAT
+)
 
 SCAN_TEAMS_MEETINGS = (
     "What Teams messages and meeting action items need my attention or action? "
