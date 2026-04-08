@@ -99,30 +99,61 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 **Claude generates** (not from WorkIQ):
 - **source_id**: Composite dedup key from the original subject + first key person's email: `{source_type}::{first_person_email_lower}::{root_subject_first_50_lower}` (strip Re:/Fwd: prefixes; do NOT include date)
 
+### Fuzzy title matching helper
+
+Use this function throughout dedup to catch paraphrased duplicates (e.g. "Send EBC participant list for April 21" vs "Send EBC participant names for April 21 session"):
+
+```python
+def title_tokens(t):
+    """Extract meaningful tokens from a title, lowercased, stopwords removed."""
+    stop = {'a','an','the','to','for','of','on','in','at','and','or','with','my','re','fwd'}
+    return set(w for w in t.lower().split() if w not in stop and len(w) > 1)
+
+def fuzzy_title_match(t1, t2, threshold=0.5):
+    """Token-overlap (Jaccard) match. Returns True if similarity >= threshold."""
+    s1, s2 = title_tokens(t1), title_tokens(t2)
+    if not s1 or not s2:
+        return False
+    return len(s1 & s2) / len(s1 | s2) >= threshold
+```
+
 ### In-batch dedup (before DB checks)
 
 Steps 2a and 2b can return overlapping items (e.g. a Teams message appears as both "needs attention" and "awaiting response"). Before any DB interaction, deduplicate within the collected batch itself:
 
 1. Collect ALL extracted items from both 2a and 2b into a single list.
 2. Group by `source_id`. If two items share the same `source_id`, keep the one with the higher priority (lower number). If equal, keep the first one encountered.
-3. Also group by `LOWER(title[:40])` — if two items with different `source_id` values share the same 40-char title prefix, they are the same item worded differently. Keep the one with higher priority.
+3. For each remaining pair of items, if `fuzzy_title_match(title_a, title_b)` returns True, they are the same item worded differently. Keep the one with higher priority.
 4. Log how many in-batch duplicates were removed (add to `skipped` count).
 
 Only the deduplicated list proceeds to the DB dedup checks below.
 
-### Dedup check (two-pass: exact then semantic)
+### Dedup check (two-pass: exact/fuzzy then semantic)
 
-**Pass 1 — Exact match** on source_id or title prefix:
+**Pass 1 — Exact + fuzzy match** on source_id, title prefix, or token overlap:
 
 ```python
 import sqlite3
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.row_factory = sqlite3.Row
+
+# First: exact match on source_id or title prefix
 existing = conn.execute(
     "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id = ? OR LOWER(SUBSTR(title, 1, 40)) = LOWER(SUBSTR(?, 1, 40))",
     (source_id, title)
 ).fetchall()
+
+# If no exact match, try fuzzy token-overlap against same-sender tasks
+if not existing:
+    sender_lower = first_person_email.strip().lower()
+    sender_prefix = sender_lower.split('@')[0]
+    candidates = conn.execute(
+        "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id LIKE ?",
+        ('%::' + sender_prefix + '%',)
+    ).fetchall()
+    existing = [c for c in candidates if fuzzy_title_match(title, c['title'])]
+
 conn.close()
 ```
 
