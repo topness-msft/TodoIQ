@@ -17,3 +17,16 @@ data/
 # User-specific files (contain local paths / permission grants)
 *.lnk
 .claude/settings.local.json
+
+# Scratch / temp scripts and outputs (root-level only)
+/_tmp_*
+/_parse_*
+/_run_*
+/_step*
+/_exec_*
+/_fetch_*
+/_write_*
+/_wc_*
+/_wiq_*
+/demo.py
+/*.txt
