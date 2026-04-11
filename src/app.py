@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .db import init_db, get_connection
 from .handlers.dashboard import DashboardHandler
+from .handlers.todoiq import TodoIQHandler
 from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler, broadcast
@@ -142,6 +143,7 @@ def make_app() -> tornado.web.Application:
         [
             # Dashboard
             (r"/", DashboardHandler),
+            (r"/todo", TodoIQHandler),
             # REST API
             (r"/api/tasks", TaskListHandler),
             (r"/api/tasks/(\d+)", TaskDetailHandler),
