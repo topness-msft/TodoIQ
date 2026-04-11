@@ -10,6 +10,7 @@ build/
 test-runs/
 .orchestrator/
 .dashboard_config
+.playwright-mcp/
 
 # Runtime data — DB, logs, PID, test artifacts
 data/
