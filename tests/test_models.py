@@ -227,6 +227,168 @@ class TestModels(unittest.TestCase):
         self.assertIsNone(get_last_sync())
         self.assertIsNone(get_last_sync("flagged_emails"))
 
+    # ── Fuzzy Source-ID Dedup ──
+
+    def test_normalize_source_id_basic(self):
+        from src.models import normalize_source_id
+        result = normalize_source_id("chat::spant@microsoft.com::power up okr and numbers")
+        self.assertIsNotNone(result)
+        src_type, person, tokens = result
+        self.assertEqual(src_type, "chat")
+        self.assertEqual(person, "spant")
+        self.assertIn("power", tokens)
+        self.assertIn("okr", tokens)
+        self.assertIn("numbers", tokens)
+        # stop words removed
+        self.assertNotIn("and", tokens)
+        self.assertNotIn("up", tokens)
+
+    def test_normalize_source_id_no_domain(self):
+        from src.models import normalize_source_id
+        result = normalize_source_id("chat::spant::power up latest okr and numbers")
+        self.assertIsNotNone(result)
+        _, person, _ = result
+        self.assertEqual(person, "spant")
+
+    def test_normalize_source_id_bad_format(self):
+        from src.models import normalize_source_id
+        self.assertIsNone(normalize_source_id(""))
+        self.assertIsNone(normalize_source_id(None))
+        self.assertIsNone(normalize_source_id("just-a-string"))
+        self.assertIsNone(normalize_source_id("only::two"))
+
+    def test_user_examples_all_match(self):
+        """The 4 source_ids from the bug report should all be considered duplicates."""
+        from src.models import normalize_source_id, _jaccard
+
+        ids = [
+            "chat::spant@microsoft.com::power up okr and numbers",
+            "chat::spant::power up latest okr and numbers",
+            "chat::saurabh.pant@microsoft.com::power up slides okrs metrics",
+            "chat::spant@microsoft.com::power up latest okr and numbers",
+        ]
+        parsed = [normalize_source_id(sid) for sid in ids]
+        for p in parsed:
+            self.assertIsNotNone(p)
+
+        # IDs 0, 1, 3 share person alias "spant"
+        self.assertEqual(parsed[0][1], parsed[1][1])
+        self.assertEqual(parsed[0][1], parsed[3][1])
+
+        # ID 2 has different alias "saurabh.pant" (different person alias)
+        self.assertNotEqual(parsed[0][1], parsed[2][1])
+
+        # Token overlap between 0 and 1 should exceed 0.5
+        self.assertGreaterEqual(_jaccard(parsed[0][2], parsed[1][2]), 0.5)
+        # Token overlap between 0 and 3
+        self.assertGreaterEqual(_jaccard(parsed[0][2], parsed[3][2]), 0.5)
+
+    def test_find_similar_source_matches(self):
+        from src.models import create_task, find_similar_source
+        from src.db import get_connection
+        # Create an existing task with a source_id
+        create_task(
+            title="Power up OKR",
+            source_type="chat",
+            source_id="chat::spant@microsoft.com::power up okr and numbers",
+            status="suggested",
+        )
+        conn = get_connection()
+        try:
+            # Slightly different source_id should fuzzy-match
+            match = find_similar_source(
+                conn,
+                "chat::spant::power up latest okr and numbers",
+                "chat",
+            )
+            self.assertIsNotNone(match)
+            self.assertEqual(match["title"], "Power up OKR")
+        finally:
+            conn.close()
+
+    def test_find_similar_source_no_match_different_person(self):
+        from src.models import create_task, find_similar_source
+        from src.db import get_connection
+        create_task(
+            title="Power up OKR",
+            source_type="chat",
+            source_id="chat::spant@microsoft.com::power up okr and numbers",
+            status="suggested",
+        )
+        conn = get_connection()
+        try:
+            # Different person alias should NOT match
+            match = find_similar_source(
+                conn,
+                "chat::johndoe@microsoft.com::power up okr and numbers",
+                "chat",
+            )
+            self.assertIsNone(match)
+        finally:
+            conn.close()
+
+    def test_find_similar_source_no_match_different_topic(self):
+        from src.models import create_task, find_similar_source
+        from src.db import get_connection
+        create_task(
+            title="Power up OKR",
+            source_type="chat",
+            source_id="chat::spant@microsoft.com::power up okr and numbers",
+            status="suggested",
+        )
+        conn = get_connection()
+        try:
+            # Completely different topic should NOT match
+            match = find_similar_source(
+                conn,
+                "chat::spant@microsoft.com::budget review quarterly finance",
+                "chat",
+            )
+            self.assertIsNone(match)
+        finally:
+            conn.close()
+
+    def test_create_task_exact_dedup(self):
+        from src.models import create_task
+        t1 = create_task(
+            title="Task A",
+            source_type="chat",
+            source_id="chat::alice@example.com::project update",
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Task A duplicate",
+            source_type="chat",
+            source_id="chat::alice@example.com::project update",
+            status="suggested",
+        )
+        # Should return the same task
+        self.assertEqual(t1["id"], t2["id"])
+
+    def test_create_task_fuzzy_dedup(self):
+        from src.models import create_task
+        t1 = create_task(
+            title="Power up OKR",
+            source_type="chat",
+            source_id="chat::spant@microsoft.com::power up okr and numbers",
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Power up latest OKR",
+            source_type="chat",
+            source_id="chat::spant::power up latest okr and numbers",
+            status="suggested",
+        )
+        # Fuzzy match should return original task
+        self.assertEqual(t1["id"], t2["id"])
+
+    def test_create_task_no_source_id_skips_dedup(self):
+        from src.models import create_task
+        t1 = create_task(title="Manual task A")
+        t2 = create_task(title="Manual task B")
+        # No source_id → no dedup, separate tasks created
+        self.assertNotEqual(t1["id"], t2["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

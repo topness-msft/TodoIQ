@@ -1,8 +1,11 @@
 """Task CRUD and lifecycle operations for TodoNess."""
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from .db import get_connection, init_db
+
+logger = logging.getLogger(__name__)
 
 # Valid status transitions
 VALID_TRANSITIONS = {
@@ -34,6 +37,72 @@ def ensure_db():
     conn.close()
 
 
+# ── Source-ID Fuzzy Dedup ──────────────────────────────────────────────────
+
+_STOP_WORDS = frozenset(
+    {'a', 'an', 'the', 'to', 'for', 'of', 'on', 'in', 'at', 'and', 'or',
+     'with', 'my', 're', 'fwd', 'up', 'is', 'be', 'do', 'it', 'we'}
+)
+
+
+def normalize_source_id(source_id: str) -> tuple[str, str, set[str]] | None:
+    """Split a source_id into (source_type, person_alias, keyword_tokens).
+
+    Returns None if the source_id doesn't have the expected format.
+    """
+    if not source_id:
+        return None
+    parts = source_id.split("::")
+    if len(parts) < 3:
+        return None
+    source_type = parts[0].lower().strip()
+    person_raw = parts[1].lower().strip()
+    person_alias = person_raw.split("@")[0] if "@" in person_raw else person_raw
+    keyword_str = "::".join(parts[2:]).lower()
+    tokens = {w for w in keyword_str.split() if w not in _STOP_WORDS and len(w) > 1}
+    return source_type, person_alias, tokens
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def find_similar_source(
+    conn: sqlite3.Connection,
+    source_id: str,
+    source_type: str | None = None,
+    threshold: float = 0.5,
+) -> dict | None:
+    """Find an existing non-deleted task whose source_id fuzzy-matches.
+
+    Returns the matching task dict, or None.
+    """
+    parsed = normalize_source_id(source_id)
+    if parsed is None:
+        return None
+    src_type, person_alias, new_tokens = parsed
+
+    # Fetch candidate tasks: same source_type, not deleted, having a source_id
+    type_filter = source_type or src_type
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE source_type = ? AND status != 'deleted' AND source_id IS NOT NULL",
+        (type_filter,),
+    ).fetchall()
+
+    for row in rows:
+        existing_parsed = normalize_source_id(row["source_id"])
+        if existing_parsed is None:
+            continue
+        ex_type, ex_person, ex_tokens = existing_parsed
+        if ex_person != person_alias:
+            continue
+        if _jaccard(new_tokens, ex_tokens) >= threshold:
+            return dict(row)
+    return None
+
+
 # ── Task CRUD ──────────────────────────────────────────────────────────────
 
 def create_task(
@@ -59,6 +128,24 @@ def create_task(
     """Create a new task and return it as a dict."""
     conn = get_connection()
     try:
+        # ── Dedup: exact match first, then fuzzy fallback ──
+        if source_id:
+            exact = conn.execute(
+                "SELECT * FROM tasks WHERE source_id = ? AND status != 'deleted'",
+                (source_id,),
+            ).fetchone()
+            if exact:
+                logger.debug("Exact source_id match → existing task #%s", exact["id"])
+                return dict(exact)
+
+            fuzzy_match = find_similar_source(conn, source_id, source_type)
+            if fuzzy_match:
+                logger.info(
+                    "Fuzzy source_id dedup: new '%s' matched existing task #%s '%s'",
+                    source_id, fuzzy_match["id"], fuzzy_match["source_id"],
+                )
+                return fuzzy_match
+
         now = _now()
         cursor = conn.execute(
             """INSERT INTO tasks
