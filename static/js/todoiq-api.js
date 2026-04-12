@@ -16,12 +16,24 @@ function normalizeTask(t) {
   t.ai_output = t.skill_output || null;
   t.ai_enriched = !!(t.skill_output || t.coaching_text);
   if (!t.notes && t.user_notes) t.notes = t.user_notes;
+  // Parse waiting_activity JSON → extract summary
+  if (typeof t.waiting_activity === 'string' && t.waiting_activity.startsWith('{')) {
+    try {
+      const wa = JSON.parse(t.waiting_activity);
+      t._wa_status = wa.status; // activity_detected, no_activity, out_of_office
+      t._wa_summary = wa.summary || '';
+      t._wa_checked = wa.checked_at;
+      t._wa_return = wa.return_date;
+    } catch(e) { t._wa_summary = t.waiting_activity; }
+  } else if (t.waiting_activity) {
+    t._wa_summary = t.waiting_activity;
+  }
   return t;
 }
 
 async function fetchTasks() {
   try {
-    const res = await fetch('/api/tasks?exclude_status=deleted');
+    const res = await fetch('/api/tasks?exclude_status=deleted&limit=2000');
     const data = await res.json();
     tasks = data.tasks.map(normalizeTask);
     const today = new Date().toISOString().slice(0, 10);

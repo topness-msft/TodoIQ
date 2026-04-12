@@ -226,6 +226,18 @@ body {
   color: #fff; font-size: 8px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center;
 }
+.task-people { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.status-pill {
+  font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: 3px;
+  flex-shrink: 0; margin-left: 4px; line-height: 16px;
+}
+.status-pill.waiting { background: #fff3e0; color: #e65100; }
+.status-pill.snoozed { background: #f0f0f0; color: #888; }
+.status-pill.checked { background: #dff6dd; color: #107c10; }
+.dark .status-pill.waiting { background: #3e2723; color: #ffab40; }
+.dark .status-pill.snoozed { background: #333; color: #999; }
+.dark .status-pill.checked { background: #1e3a1e; color: #4caf50; }
 
 .priority-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .priority-dot.p1 { background: var(--danger); }
@@ -966,6 +978,7 @@ let searchQuery = '';
 let nextId = 500;
 let quickStreak = 3; // mock: 3 quick tasks done today
 let briefingVisible = true;
+let _dismissedSectionOpen = false;
 
 // ── Init ───────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -1035,7 +1048,16 @@ function renderTasks() {
 
   // My Day: grouped into sections
   if (v.grouped && !searchQuery) {
-    const suggestions = list.filter(t => t.status==='suggested');
+    const allSuggestions = list.filter(t => t.status==='suggested');
+    // Sort suggestions: by priority (ascending), then newest first
+    allSuggestions.sort((a, b) => {
+      const pa = parseInt((a.priority||'P3').replace('P',''));
+      const pb = parseInt((b.priority||'P3').replace('P',''));
+      if (pa !== pb) return pa - pb;
+      return (b.created_at||'').localeCompare(a.created_at||'');
+    });
+    const MAX_SUGGESTIONS = 7;
+    const suggestions = allSuggestions.slice(0, MAX_SUGGESTIONS);
     const active = list.filter(t => t.status!=='suggested');
     // AI picks top focus tasks: due soonest, highest priority, has AI output
     const focus = pickFocus(active, 5);
@@ -1043,7 +1065,13 @@ function renderTasks() {
 
     let html = '';
     if (suggestions.length) {
-      html += `<div class="section-header ai"><span class="sh-icon">⬦</span> New for you <span class="sh-count">${suggestions.length}</span><span class="sh-see-all" onclick="setView('review')">See all ${suggestions.length} in Suggestions →</span></div>`;
+      const moreCount = allSuggestions.length - suggestions.length;
+      const seeAll = allSuggestions.length > MAX_SUGGESTIONS
+        ? `<span class="sh-see-all" onclick="setView('review')">See all ${allSuggestions.length} in Suggestions →</span>`
+        : allSuggestions.length > 0
+        ? `<span class="sh-see-all" onclick="setView('review')">See all in Suggestions →</span>`
+        : '';
+      html += `<div class="section-header ai"><span class="sh-icon">⬦</span> New for you <span class="sh-count">${allSuggestions.length}</span>${seeAll}</div>`;
       html += suggestions.map(t => renderRow(t, true)).join('');
     }
     if (focus.length) {
@@ -1062,12 +1090,12 @@ function renderTasks() {
 
   // Resolved filter for Waiting view — with subsections
   if (currentView === 'waiting' && !searchQuery) {
-    const resolvedCount = list.filter(t => t.waiting_activity && /replied|resolved|confirmed/i.test(t.waiting_activity)).length;
+    const resolvedCount = list.filter(t => (t._wa_summary || t.waiting_activity) && /replied|resolved|confirmed/i.test(t._wa_summary || t.waiting_activity)).length;
     const filterBar = `<div class="filter-bar">
       <button class="filter-pill${showResolved?' active':''}" onclick="showResolved=!showResolved;refresh()">
         ${showResolved?'Hide':'Show'} resolved (${resolvedCount})</button></div>`;
     if (!showResolved) {
-      list = list.filter(t => !(t.waiting_activity && /replied|resolved|confirmed/i.test(t.waiting_activity)));
+      list = list.filter(t => !((t._wa_summary || t.waiting_activity) && /replied|resolved|confirmed/i.test(t._wa_summary || t.waiting_activity)));
     }
     const waiting = list.filter(t => t.status === 'waiting');
     const snoozed = list.filter(t => t.status === 'snoozed');
@@ -1098,11 +1126,12 @@ function renderTasks() {
   if (v.showDismissed) {
     const dismissed = tasks.filter(t => t.status==='dismissed');
     if (dismissed.length) {
+      const wasOpen = _dismissedSectionOpen;
       el.insertAdjacentHTML('beforeend',
-        `<div class="dismissed-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'block':'none'">
+        `<div class="dismissed-toggle${wasOpen?' open':''}" onclick="_dismissedSectionOpen=!_dismissedSectionOpen;this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'block':'none'">
           <span class="dt-arrow">▸</span> Recently dismissed <span style="color:var(--text-muted)">(${dismissed.length})</span>
         </div>
-        <div class="dismissed-list" style="display:none">${dismissed.map(t => renderRow(t)).join('')}</div>`);
+        <div class="dismissed-list" style="display:${wasOpen?'block':'none'}">${dismissed.map(t => renderRow(t)).join('')}</div>`);
     }
   }
 }
@@ -1143,9 +1172,15 @@ function renderRow(t, compact) {
     const ghost = (isSug && t.ai_output && t.action_type)
       ? `<div class="ghost-preview${compact?' compact':''}">⬦ ${ACTION_HINTS[t.action_type]||'AI action ready'} — ${truncate(t.ai_output, 80)}</div>` : '';
 
-    return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})">
+    // Status pill for tasks with activity detection
+    let statusPill = '';
+    if (t.status === 'waiting') statusPill = '<span class="status-pill waiting">Waiting</span>';
+    else if (t.status === 'snoozed') statusPill = '<span class="status-pill snoozed">Snoozed</span>';
+    else if (t.status === 'suggested' && t.suggestion_refreshed_at) statusPill = '<span class="status-pill checked">Checked</span>';
+
+    return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})" title="Task #${t.id}">
       ${chk}<div class="task-body">
-        <div class="task-line1">${priDot}<div class="task-title">${esc(t.title)}</div>${dueHtml}</div>
+        <div class="task-line1">${priDot}<div class="task-title">${esc(t.title)}</div>${statusPill}${dueHtml}</div>
         ${line2?`<div class="task-line2">${line2}</div>`:''}${ghost}
       </div>
       <div class="task-right">
@@ -1168,8 +1203,15 @@ function buildLine2(t, isSug) {
 
   // Snoozed badge
   if (t.status==='snoozed') {
-    const wakeLabel = t.snoozed_until ? new Date(t.snoozed_until).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) : 'Apr 14';
+    const wakeLabel = t.snoozed_until ? new Date(t.snoozed_until).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) : 'later';
     parts.push(`<span class="snooze-badge">◑ Snoozed · wakes ${wakeLabel}</span>`);
+  }
+
+  // Suggestion checked/new badge
+  if (t.status==='suggested') {
+    if (t.suggestion_refreshed_at) {
+      parts.push('<span class="task-hint" style="color:var(--success)">✓ Checked</span>');
+    }
   }
 
   // AI hint or status
@@ -1180,8 +1222,9 @@ function buildLine2(t, isSug) {
     const hint = (t.action_type && ACTION_HINTS[t.action_type]) || '⚡ Ready';
     parts.push(`<span class="task-hint ai-ready">${hint}</span>`);
   }
-  if (t.status==='waiting' && t.waiting_activity) {
-    parts.push(`<span class="snooze-badge">📡 ${esc(truncate(t.waiting_activity, 40))}</span>`);
+  if (t.status==='waiting' && (t._wa_summary || t.waiting_activity)) {
+    const summary = t._wa_summary || t.waiting_activity;
+    parts.push(`<span class="snooze-badge">↗ ${esc(truncate(summary, 40))}</span>`);
   }
 
   // Source icon
@@ -1195,12 +1238,22 @@ function buildLine2(t, isSug) {
     parts.push(`<span class="task-desc-snippet">${esc(truncate(t.description, 80))}</span>`);
   }
 
-  // Key person
+  // Key people — show all in Suggestions view, first + count elsewhere
   if (t.key_people?.length) {
-    const p = t.key_people[0];
-    const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
-    const extra = t.key_people.length > 1 ? ` +${t.key_people.length-1}` : '';
-    parts.push(`<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}${extra}</span>`);
+    const inSuggestions = currentView === 'review';
+    if (inSuggestions && t.key_people.length > 1) {
+      const chips = t.key_people.slice(0, 3).map(p => {
+        const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+        return `<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}</span>`;
+      });
+      const extra = t.key_people.length > 3 ? `<span class="task-person">+${t.key_people.length-3}</span>` : '';
+      parts.push(`<span class="task-people">${chips.join('')}${extra}</span>`);
+    } else {
+      const p = t.key_people[0];
+      const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+      const extra = t.key_people.length > 1 ? ` +${t.key_people.length-1}` : '';
+      parts.push(`<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}${extra}</span>`);
+    }
   }
 
   return parts.join('<span class="l2-sep">·</span>');
@@ -1243,7 +1296,7 @@ function selectTask(id) {
     : `<div class="detail-row" style="cursor:pointer" onclick="event.stopPropagation();showDueMenu(${t.id},this)"><span class="row-icon">📅</span><span class="row-label">Add due date</span></div>`;
 
   const src = t.source_type
-    ? `<div class="detail-row has-value" style="cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})"><span class="row-icon">${{email:'✉️',teams:'💬',meeting:'📅'}[t.source_type]||'📎'}</span><span class="row-label">Source: ${t.source_type}${t.source_url?' — '+truncate(t.source_url,30):''}</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}" value="${esc(t.source_url||'')}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`
+    ? `<div class="detail-row has-value" style="cursor:pointer" onclick="event.stopPropagation();openSource(${t.id})"><span class="row-icon">${{email:'✉️',teams:'💬',meeting:'📅'}[t.source_type]||'📎'}</span><span class="row-label">Source: ${t.source_type}${t.source_url?' — '+truncate(t.source_url,30):''}</span><span style="margin-left:auto;font-size:11px;color:var(--text-muted);cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})">✎</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}" value="${esc(t.source_url||'')}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`
     : `<div class="detail-row" style="cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})"><span class="row-icon">📎</span><span class="row-label">Add source</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`;
 
   const sugActions = isSug ? `<div class="detail-actions">
@@ -1303,7 +1356,7 @@ function selectTask(id) {
         <span style="margin-left:auto;color:var(--text-muted);cursor:pointer;font-size:12px" onclick="event.stopPropagation();wakeTask(${t.id})">Wake up</span></div>` : '';
 
   document.getElementById('detail-content').innerHTML = `
-    <div class="detail-header">${chk}<div class="detail-title" onclick="editTitle(${t.id},this)">${esc(t.title)}</div>
+    <div class="detail-header">${chk}<div class="detail-title" title="Task #${t.id}" onclick="editTitle(${t.id},this)">${esc(t.title)}</div>
       ${parseBadge}
       <button class="detail-close" onclick="closeDetail()">✕</button></div>
     ${priRow}
@@ -1596,6 +1649,14 @@ function editDescription(id, el) {
 }
 
 // ── Source Edit Helpers ───────────────────────────────────
+function openSource(id) {
+  const t = tasks.find(t=>t.id===id);
+  if (t && t.source_url) {
+    window.open(t.source_url, '_blank');
+  } else {
+    toggleSourceEdit(id);
+  }
+}
 function toggleSourceEdit(id) {
   const form = document.getElementById('source-edit-'+id);
   if (form) form.style.display = form.style.display==='none' ? 'flex' : 'none';
@@ -1683,7 +1744,7 @@ function renderBriefing() {
       ${waitUpdates?`<div class="briefing-item" onclick="setView('waiting')"><span class="bi-icon">↗</span> ${waitUpdates} waiting task${waitUpdates>1?'s':''} got a reply</div>`:''}
       ${readyCount?`<div class="briefing-item" onclick="setView('ready')"><span class="bi-icon">◆</span> ${readyCount} tasks have AI actions ready to go</div>`:''}
       ${quickCount?`<div class="briefing-item" onclick="setView('quick')"><span class="bi-icon">◎</span> ${quickCount} quick task${quickCount>1?'s':''} you can knock out fast</div>`:''}
-      <div class="briefing-item" style="color:var(--ai);font-weight:500">AI actions saved an estimated ~47 min today</div>
+      ${readyCount?`<div class="briefing-item" style="color:var(--ai);font-weight:500">AI actions saved an estimated ~${readyCount * 6} min today</div>`:''}
     </div>
     <button class="briefing-dismiss" onclick="dismissBriefing()">Dismiss</button>
   </div>`;

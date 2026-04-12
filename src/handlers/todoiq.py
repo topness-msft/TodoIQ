@@ -15,9 +15,17 @@ class TodoIQHandler(tornado.web.RequestHandler):
         with open(mock_path, "r", encoding="utf-8") as f:
             html = f.read()
 
-        # Inject the API adapter script before </body>
-        adapter_tag = '<script src="/static/js/todoiq-api.js"></script>'
+        # Inject the API adapter script with cache-busting hash
+        import hashlib
+        adapter_path = os.path.join(static_dir, "js", "todoiq-api.js")
+        try:
+            with open(adapter_path, "rb") as af:
+                h = hashlib.md5(af.read()).hexdigest()[:8]
+        except FileNotFoundError:
+            h = "0"
+        adapter_tag = f'<script src="/static/js/todoiq-api.js?v={h}"></script>'
         html = html.replace("</body>", adapter_tag + "\n</body>")
 
         self.set_header("Content-Type", "text/html; charset=utf-8")
+        self.set_header("Cache-Control", "no-cache")
         self.write(html)

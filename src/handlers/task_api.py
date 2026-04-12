@@ -21,8 +21,9 @@ class TaskListHandler(tornado.web.RequestHandler):
         status = self.get_argument("status", None)
         parse_status = self.get_argument("parse_status", None)
         exclude_status = self.get_argument("exclude_status", None)
+        limit = int(self.get_argument("limit", "200"))
         exclude_statuses = [s.strip() for s in exclude_status.split(",") if s.strip()] if exclude_status else None
-        tasks = list_tasks(status=status, parse_status=parse_status, exclude_statuses=exclude_statuses)
+        tasks = list_tasks(status=status, parse_status=parse_status, exclude_statuses=exclude_statuses, limit=limit)
         self.write(json.dumps({"tasks": tasks}))
 
     def post(self):

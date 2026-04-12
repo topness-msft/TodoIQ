@@ -69,6 +69,19 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
+def _person_match(a: str, b: str) -> bool:
+    """Check if two person aliases refer to the same person.
+
+    After normalizing (strip @domain), compare exact match only.
+    The refresh commands ask WorkIQ to resolve all aliases to
+    first.last@microsoft.com format, so exact match is reliable
+    for new tasks. Legacy tasks may still have short aliases.
+    """
+    if a == b:
+        return True
+    return False
+
+
 def find_similar_source(
     conn: sqlite3.Connection,
     source_id: str,
@@ -96,7 +109,9 @@ def find_similar_source(
         if existing_parsed is None:
             continue
         ex_type, ex_person, ex_tokens = existing_parsed
-        if ex_person != person_alias:
+        # Person match: exact, or one alias contains the other's last-name part
+        # Handles spant vs saurabh.pant, phtopnes vs peter.topness
+        if not _person_match(person_alias, ex_person):
             continue
         if _jaccard(new_tokens, ex_tokens) >= threshold:
             return dict(row)
