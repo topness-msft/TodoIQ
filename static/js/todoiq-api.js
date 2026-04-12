@@ -174,7 +174,7 @@ dismissTask = async function(id) {
   const prevStatus = t.status;
   try {
     await apiAction(id, { action: 'dismiss' });
-    if (selectedId === id) closeDetail();
+    if (selectedId === id) selectTask(id); // re-render detail with dismissed state
     // Undo toast
     const c = document.getElementById('toast-container');
     const d = document.createElement('div');
@@ -347,6 +347,83 @@ retryParse = async function(id) {
   } catch (e) { toast('Retry failed'); }
 };
 
+// Redo skill — call POST /api/tasks/{id}/skill
+async function redoSkill(id, actionType) {
+  const skillMap = {
+    'respond-email': 'respond-email',
+    'follow-up': 'follow-up',
+    'schedule-meeting': 'schedule-meeting',
+    'prepare': 'prepare',
+    'awaiting-response': 'follow-up',
+    'general': 'follow-up'
+  };
+  const skill = skillMap[actionType] || 'follow-up';
+  _showGeneratingCard();
+  try {
+    const res = await fetch(`/api/tasks/${id}/skill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill })
+    });
+    const data = await res.json();
+    if (data.ok === false && data.message?.includes('already running')) {
+      toast('Already generating — please wait');
+    } else {
+      toast('Generating — this runs in the background...');
+    }
+    pollForSkillResult(id);
+  } catch (e) {
+    toast('Failed to regenerate');
+    if (selectedId === id) selectTask(id);
+  }
+}
+
+function _showGeneratingCard() {
+  const card = document.querySelector('.ai-action-card');
+  if (card) {
+    card.style.borderStyle = 'dashed';
+    card.querySelector('.ai-action-body').innerHTML = `<div style="text-align:center;padding:16px;color:var(--text-muted)">
+      <div style="font-size:14px;margin-bottom:4px">Generating...</div>
+      <div style="font-size:12px">This runs in the background — you can navigate away.</div>
+    </div>`;
+    const footer = card.querySelector('.ai-action-footer');
+    if (footer) footer.innerHTML = '';
+  }
+}
+
+async function isSkillRunning(id) {
+  try {
+    const res = await fetch('/api/runner-status');
+    const data = await res.json();
+    for (const key of Object.keys(data)) {
+      if (key.includes(':' + id) && data[key] === true) return true;
+    }
+  } catch(e) {}
+  return false;
+}
+
+function pollForSkillResult(id) {
+  let attempts = 0;
+  const poll = setInterval(async () => {
+    attempts++;
+    if (attempts > 90) {
+      clearInterval(poll);
+      toast('Generation timed out — check back later');
+      if (selectedId === id) selectTask(id);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/tasks/${id}`);
+      const data = await res.json();
+      if (data.task?.skill_output) {
+        clearInterval(poll);
+        updateLocalTask(data.task);
+        toast('AI draft generated');
+      }
+    } catch(e) {}
+  }, 2000);
+}
+
 // Override: doSnoozeHours
 if (typeof doSnoozeHours === 'function') {
   doSnoozeHours = async function(id, hours) {
@@ -386,6 +463,19 @@ if (typeof doSnooze === 'function') {
 
   // Connect WebSocket
   connectWS();
+
+  // Wrap selectTask to check runner-status for active skill runs
+  const _origSelectTask = selectTask;
+  selectTask = function(id) {
+    _origSelectTask(id);
+    // Check server-side if a skill is running for this task
+    isSkillRunning(id).then(running => {
+      if (running && selectedId === id) {
+        _showGeneratingCard();
+        pollForSkillResult(id);
+      }
+    });
+  };
 
   console.log('TodoIQ API adapter loaded —', tasks.length, 'tasks from backend');
 })();

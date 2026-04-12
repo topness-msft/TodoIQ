@@ -226,7 +226,7 @@ body {
   color: #fff; font-size: 8px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.task-people { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.task-people { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 1; overflow: hidden; }
 
 .status-pill {
   font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: 3px;
@@ -235,9 +235,13 @@ body {
 .status-pill.waiting { background: #fff3e0; color: #e65100; }
 .status-pill.snoozed { background: #f0f0f0; color: #888; }
 .status-pill.checked { background: #dff6dd; color: #107c10; }
+.status-pill.pending { background: #e8f0fe; color: #2564cf; }
+.status-pill.unclear { background: #fff3e0; color: #9e6b00; }
 .dark .status-pill.waiting { background: #3e2723; color: #ffab40; }
 .dark .status-pill.snoozed { background: #333; color: #999; }
 .dark .status-pill.checked { background: #1e3a1e; color: #4caf50; }
+.dark .status-pill.pending { background: #1a3050; color: #6aafff; }
+.dark .status-pill.unclear { background: #3e3010; color: #e0a020; }
 
 .priority-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .priority-dot.p1 { background: var(--danger); }
@@ -582,6 +586,11 @@ body {
 .source-edit-form .source-cancel {
   background: transparent; color: var(--text-muted); border-color: var(--border);
 }
+.source-row { cursor: pointer; }
+.source-row:hover .source-link { text-decoration: underline; }
+.source-label { font-weight: 500; color: var(--text); }
+.source-link { display: block; font-size: 12px; color: var(--accent); margin-top: 1px; }
+.dark .source-link { color: var(--accent); }
 
 /* ── Person Chips (enhanced) ─────────────────────────── */
 .person-chip { position: relative; }
@@ -1035,6 +1044,7 @@ function renderTasks() {
   const v = VIEWS.find(v => v.id===currentView);
   let list = tasks.filter(v.filter);
   if (searchQuery) list = list.filter(t =>
+    String(t.id).includes(searchQuery) ||
     t.title.toLowerCase().includes(searchQuery) ||
     (t.description||'').toLowerCase().includes(searchQuery) ||
     (t.key_people||[]).some(p => p.name.toLowerCase().includes(searchQuery)));
@@ -1088,15 +1098,24 @@ function renderTasks() {
     return;
   }
 
-  // Resolved filter for Waiting view — with subsections
+  // Waiting & Snoozed view — with filter pills and subsections
   if (currentView === 'waiting' && !searchQuery) {
-    const resolvedCount = list.filter(t => (t._wa_summary || t.waiting_activity) && /replied|resolved|confirmed/i.test(t._wa_summary || t.waiting_activity)).length;
+    const allItems = list;
+    const resolvedItems = allItems.filter(t => t._wa_status === 'likely_resolved' || (t._wa_summary && /replied|resolved|confirmed/i.test(t._wa_summary)));
+    const waitingItems = allItems.filter(t => !resolvedItems.includes(t));
+
+    const resolvedCount = resolvedItems.length;
+    const waitingCount = waitingItems.length;
+
     const filterBar = `<div class="filter-bar">
-      <button class="filter-pill${showResolved?' active':''}" onclick="showResolved=!showResolved;refresh()">
-        ${showResolved?'Hide':'Show'} resolved (${resolvedCount})</button></div>`;
-    if (!showResolved) {
-      list = list.filter(t => !((t._wa_summary || t.waiting_activity) && /replied|resolved|confirmed/i.test(t._wa_summary || t.waiting_activity)));
-    }
+      <button class="filter-pill${waitingFilter==='all'?' active':''}" onclick="waitingFilter='all';refresh()">All (${allItems.length})</button>
+      <button class="filter-pill${waitingFilter==='waiting'?' active':''}" onclick="waitingFilter='waiting';refresh()">Still waiting (${waitingCount})</button>
+      <button class="filter-pill${waitingFilter==='resolved'?' active':''}" onclick="waitingFilter='resolved';refresh()">Resolved (${resolvedCount})</button>
+    </div>`;
+
+    if (waitingFilter === 'resolved') list = resolvedItems;
+    else if (waitingFilter === 'waiting') list = waitingItems;
+
     const waiting = list.filter(t => t.status === 'waiting');
     const snoozed = list.filter(t => t.status === 'snoozed');
     let html = filterBar;
@@ -1109,15 +1128,32 @@ function renderTasks() {
       html += `<div class="section-header"><span class="sh-icon">◑</span> Snoozed by me <span class="sh-count">${snoozed.length}</span></div>`;
       html += snoozed.map(t => renderRow(t)).join('');
     }
+    if (!waiting.length && !snoozed.length) {
+      html += `<div class="empty-state"><div class="empty-title">No matching tasks</div><div class="empty-subtitle">Try a different filter</div></div>`;
+    }
     el.innerHTML = html;
     return;
   }
 
-  // Resolved count badge for Suggestions view
+  // Suggestions view — with resolution filter pills
   if (currentView === 'review' && !searchQuery) {
-    const resolvedSugCount = tasks.filter(t => t.status==='suggested' && t.ai_enriched && t.ai_output).length;
-    const badge = resolvedSugCount ? `<div class="resolved-count">✨ ${resolvedSugCount} AI-enriched and ready to act</div>` : '';
-    el.innerHTML = badge + list.map(t => renderRow(t)).join('');
+    const resolvedSugs = list.filter(t => t._wa_status === 'likely_resolved');
+    const pendingSugs = list.filter(t => t._wa_status === 'still_pending' || !t._wa_status);
+    const unclearSugs = list.filter(t => t._wa_status === 'unclear');
+
+    const filterBar = `<div class="filter-bar">
+      <button class="filter-pill${sugFilter==='all'?' active':''}" onclick="sugFilter='all';refresh()">All (${list.length})</button>
+      <button class="filter-pill${sugFilter==='pending'?' active':''}" onclick="sugFilter='pending';refresh()">Pending (${pendingSugs.length})</button>
+      <button class="filter-pill${sugFilter==='resolved'?' active':''}" onclick="sugFilter='resolved';refresh()">Resolved (${resolvedSugs.length})</button>
+      <button class="filter-pill${sugFilter==='unclear'?' active':''}" onclick="sugFilter='unclear';refresh()">Unclear (${unclearSugs.length})</button>
+    </div>`;
+
+    let filtered = list;
+    if (sugFilter === 'resolved') filtered = resolvedSugs;
+    else if (sugFilter === 'pending') filtered = pendingSugs;
+    else if (sugFilter === 'unclear') filtered = unclearSugs;
+
+    el.innerHTML = filterBar + filtered.map(t => renderRow(t)).join('');
   } else {
     el.innerHTML = list.map(t => renderRow(t)).join('');
   }
@@ -1176,6 +1212,9 @@ function renderRow(t, compact) {
     let statusPill = '';
     if (t.status === 'waiting') statusPill = '<span class="status-pill waiting">Waiting</span>';
     else if (t.status === 'snoozed') statusPill = '<span class="status-pill snoozed">Snoozed</span>';
+    else if (t.status === 'suggested' && t._wa_status === 'likely_resolved') statusPill = '<span class="status-pill checked">Resolved</span>';
+    else if (t.status === 'suggested' && t._wa_status === 'still_pending') statusPill = '<span class="status-pill pending">Pending</span>';
+    else if (t.status === 'suggested' && t._wa_status === 'unclear') statusPill = '<span class="status-pill unclear">Unclear</span>';
     else if (t.status === 'suggested' && t.suggestion_refreshed_at) statusPill = '<span class="status-pill checked">Checked</span>';
 
     return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})" title="Task #${t.id}">
@@ -1238,10 +1277,9 @@ function buildLine2(t, isSug) {
     parts.push(`<span class="task-desc-snippet">${esc(truncate(t.description, 80))}</span>`);
   }
 
-  // Key people — show all in Suggestions view, first + count elsewhere
+  // Key people — show up to 3 with avatars, overflow as +N
   if (t.key_people?.length) {
-    const inSuggestions = currentView === 'review';
-    if (inSuggestions && t.key_people.length > 1) {
+    if (t.key_people.length > 1) {
       const chips = t.key_people.slice(0, 3).map(p => {
         const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
         return `<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}</span>`;
@@ -1251,8 +1289,7 @@ function buildLine2(t, isSug) {
     } else {
       const p = t.key_people[0];
       const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
-      const extra = t.key_people.length > 1 ? ` +${t.key_people.length-1}` : '';
-      parts.push(`<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}${extra}</span>`);
+      parts.push(`<span class="task-person"><span class="tp-avatar">${initials}</span>${p.name.split(' ')[0]}</span>`);
     }
   }
 
@@ -1275,13 +1312,15 @@ function selectTask(id) {
     ? `<div class="detail-row has-value"><span class="row-icon">👤</span><div class="row-label">
         <div class="people-chips">${t.key_people.map((p,i)=>{
           const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
-          const altIndicator = p.alternatives?.length ? `<span class="person-alt-indicator" onclick="event.stopPropagation();togglePersonAlts(${t.id},${i})">▼</span>` : '';
+          const hasAlts = p.alternatives?.length;
+          const altClick = hasAlts ? `onclick="event.stopPropagation();togglePersonAlts(${t.id},${i})" style="cursor:pointer"` : '';
+          const altIndicator = hasAlts ? `<span class="person-alt-indicator">▼</span>` : '';
           const altDropdown = `<div class="person-alt-dropdown" id="person-alt-${t.id}-${i}" style="display:none">
             <div class="alt-header">Did you mean?</div>
             ${(p.alternatives||[]).map(a=>`<div class="alt-item" onclick="event.stopPropagation();swapPerson(${t.id},${i},'${esc(a.name)}','${esc(a.email)}')">
               <span>${a.name}</span><span class="alt-role">${a.role||''}</span></div>`).join('')}
           </div>`;
-          return `<span class="person-chip"><span class="person-avatar">${initials}</span>${esc(p.name)}${altIndicator}<button class="person-remove" onclick="event.stopPropagation();removePerson(${t.id},${i})">✕</button>${altDropdown}</span>`;
+          return `<span class="person-chip"><span class="person-avatar">${initials}</span><span ${altClick}>${esc(p.name)}${altIndicator}</span><button class="person-remove" onclick="event.stopPropagation();removePerson(${t.id},${i})">✕</button>${altDropdown}</span>`;
         }).join('')}</div>
         <div class="person-add-row"><button class="person-add-btn" id="person-add-btn-${t.id}" onclick="event.stopPropagation();showPersonAdd(${t.id})">+ Add person</button>
           <input class="person-add-input" id="person-add-input-${t.id}" style="display:none" placeholder="Name" onkeydown="if(event.key==='Enter'){event.stopPropagation();addPerson(${t.id},this.value);}" onblur="hidePersonAdd(${t.id})">
@@ -1296,7 +1335,7 @@ function selectTask(id) {
     : `<div class="detail-row" style="cursor:pointer" onclick="event.stopPropagation();showDueMenu(${t.id},this)"><span class="row-icon">📅</span><span class="row-label">Add due date</span></div>`;
 
   const src = t.source_type
-    ? `<div class="detail-row has-value" style="cursor:pointer" onclick="event.stopPropagation();openSource(${t.id})"><span class="row-icon">${{email:'✉️',teams:'💬',meeting:'📅'}[t.source_type]||'📎'}</span><span class="row-label">Source: ${t.source_type}${t.source_url?' — '+truncate(t.source_url,30):''}</span><span style="margin-left:auto;font-size:11px;color:var(--text-muted);cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})">✎</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}" value="${esc(t.source_url||'')}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`
+    ? `<div class="detail-row has-value source-row" onclick="event.stopPropagation();openSource(${t.id})"><span class="row-icon">${{email:'✉️',teams:'💬',meeting:'📅'}[t.source_type]||'📎'}</span><span class="row-label"><span class="source-label">${{email:'Email',teams:'Teams chat',meeting:'Meeting',chat:'Teams chat'}[t.source_type]||'Source'}</span>${t.source_url?`<span class="source-link">${t.source_snippet?truncate(t.source_snippet,40):'Open in '+ ({email:'Outlook',teams:'Teams',meeting:'Teams',chat:'Teams'}[t.source_type]||'browser')}</span>`:''}</span><span style="margin-left:auto;font-size:11px;color:var(--text-muted);cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})">✎</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}" value="${esc(t.source_url||'')}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`
     : `<div class="detail-row" style="cursor:pointer" onclick="event.stopPropagation();toggleSourceEdit(${t.id})"><span class="row-icon">📎</span><span class="row-label">Add source</span></div><div class="source-edit-form" id="source-edit-${t.id}" style="display:none"><input type="url" placeholder="Paste URL" id="source-url-${t.id}"><button onclick="saveSource(${t.id})">Save</button><button class="source-cancel" onclick="document.getElementById('source-edit-${t.id}').style.display='none'">Cancel</button></div>`;
 
   const sugActions = isSug ? `<div class="detail-actions">
@@ -1322,14 +1361,22 @@ function selectTask(id) {
     }
 
     const copyBtn = !t.ai_slots ? `<button class="ai-btn ai-btn-primary" onclick="copyAiOutput();this.textContent='Copied ✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button>` : '';
-    const openBtn = t.action_type==='respond-email' ? '<button class="ai-btn ai-btn-secondary" onclick="toast(\'Opening in Outlook...\')">Open in Outlook</button>'
-      : t.action_type==='follow-up'||t.action_type==='awaiting-response' ? '<button class="ai-btn ai-btn-secondary" onclick="toast(\'Opening in Teams...\')">Open in Teams</button>' : '';
+    const openBtn = t.action_type==='respond-email' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Outlook</button>`
+      : t.action_type==='follow-up'||t.action_type==='awaiting-response' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Teams</button>` : '';
 
     aiCard = `<div class="ai-action-card">
       <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span>
-        <button class="ai-btn ai-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="this.textContent='Generating...';this.disabled=true;setTimeout(()=>{this.textContent='↻ Redo';this.disabled=false;toast('Regenerated')},2000)">↻ Redo</button></div>
+        <button class="ai-btn ai-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="redoSkill(${t.id},'${t.action_type||'general'}',this)">↻ Redo</button></div>
       <div class="ai-action-body">${body}</div>
       <div class="ai-action-footer">${copyBtn}${openBtn}</div></div>`;
+  } else if (t.action_type && !t.ai_output) {
+    const label = ACTION_LABELS[t.action_type] || '⚡ AI Action';
+    aiCard = `<div class="ai-action-card" style="border-style:dashed" id="ai-card-${t.id}">
+      <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span></div>
+      <div class="ai-action-body"><div style="text-align:center;padding:16px;color:var(--text-muted)">
+        No AI draft yet<br>
+        <span style="color:var(--accent);cursor:pointer;font-size:13px" onclick="redoSkill(${t.id},'${t.action_type}')">✦ Generate ${label}</span>
+      </div></div></div>`;
   }
 
   const created = t.created_at ? new Date(t.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
@@ -1343,9 +1390,17 @@ function selectTask(id) {
   const priColors = {P1:'#d13438',P2:'#e65100',P3:'var(--text-secondary)',P4:'var(--text-muted)'};
   const priLabels = {P1:'Important',P2:'Important',P3:'Normal',P4:'Low'};
   const pri = t.priority || 'P3';
+  // Resolution status pill for the detail pane
+  let resPill = '';
+  if (t._wa_status === 'likely_resolved') resPill = '<span class="status-pill checked" style="margin-left:8px">Resolved</span>';
+  else if (t._wa_status === 'still_pending') resPill = '<span class="status-pill pending" style="margin-left:8px">Pending</span>';
+  else if (t._wa_status === 'unclear') resPill = '<span class="status-pill unclear" style="margin-left:8px">Unclear</span>';
+  else if (t.status === 'waiting') resPill = '<span class="status-pill waiting" style="margin-left:8px">Waiting</span>';
+  else if (t.status === 'snoozed') resPill = '<span class="status-pill snoozed" style="margin-left:8px">Snoozed</span>';
+
   const priRow = `<div class="detail-row has-value" onclick="event.stopPropagation();showPrioritySelector(${t.id})" style="cursor:pointer">
     <span class="row-icon" style="color:${priColors[pri]}">⚑</span>
-    <span class="row-label" style="color:${priColors[pri]}">${priLabels[pri]||'Normal'}</span></div>`;
+    <span class="row-label" style="color:${priColors[pri]}">${priLabels[pri]||'Normal'}</span>${resPill}</div>`;
 
   // Snooze as a detail row (like "Remind me" in To Do)
   const snoozeRow = !isSug && !isDone && t.status!=='snoozed'
@@ -1649,6 +1704,34 @@ function editDescription(id, el) {
 }
 
 // ── Source Edit Helpers ───────────────────────────────────
+function extractDraftBody(text) {
+  if (!text) return '';
+  // Strip metadata lines: Channel:, To:, Subject:, Last interaction:, Urgency:, Tone:, Key points:, ---
+  const lines = text.split('\n');
+  const filtered = lines.filter(l => {
+    const trimmed = l.trim();
+    if (!trimmed || trimmed === '---') return false;
+    if (/^(Channel|To|Subject|Re:|Last interaction|Urgency|Tone|Key points|Duration|Attendees|Time estimate|Materials|Prep Notes|Before):?\s/i.test(trimmed)) return false;
+    if (/^(Suggested meeting slots|Sent via TodoIQ)/i.test(trimmed)) return false;
+    if (/^\[[ x]\]/i.test(trimmed)) return true; // keep checklist items
+    return true;
+  });
+  return filtered.join('\n').trim();
+}
+
+async function openWithDraft(id) {
+  const t = tasks.find(t => t.id === id);
+  if (!t) return;
+  const draft = extractDraftBody(t.ai_output || t.skill_output || '');
+  if (draft) {
+    try {
+      await navigator.clipboard.writeText(draft);
+      toast('Draft copied — paste it in the reply');
+    } catch(e) { /* clipboard may fail without user gesture */ }
+  }
+  openSource(id);
+}
+
 function openSource(id) {
   const t = tasks.find(t=>t.id===id);
   if (t && t.source_url) {
@@ -1724,8 +1807,9 @@ function retryParse(id) {
   setTimeout(() => { t.parse_status = 'parsed'; toast('✓ Parse complete'); if(selectedId===id) selectTask(id); }, 2000);
 }
 
-// ── Resolved filter state ─────────────────────────────────
-let showResolved = false;
+// ── Filter state ──────────────────────────────────────────
+let waitingFilter = 'all'; // 'all', 'resolved', 'waiting'
+let sugFilter = 'all'; // 'all', 'resolved', 'pending', 'unclear'
 function refresh() { renderNav(); renderBriefing(); renderTasks(); }
 function truncate(s,n) { if(!s) return ''; const clean=s.replace(/\n/g,' ').trim(); return clean.length>n ? clean.slice(0,n)+'…' : clean; }
 
