@@ -40,11 +40,14 @@ class TestDatabaseSchema(unittest.TestCase):
         rows = self.conn.execute("PRAGMA table_info(tasks)").fetchall()
         cols = {r["name"] for r in rows}
         expected = {
-            "id", "title", "description", "status", "parse_status",
-            "raw_input", "priority", "due_date", "committed_date",
+            "id", "title", "description", "status", "snoozed_until",
+            "parse_status", "raw_input", "error_message", "is_quick_hit",
+            "priority", "due_date", "committed_date",
             "source_type", "source_id", "source_url", "source_snippet",
-            "coaching_text", "key_people", "related_meeting", "user_notes",
-            "suggestion_refreshed_at", "created_at", "updated_at",
+            "source_date", "coaching_text", "action_type", "skill_output",
+            "cowork_prompt", "key_people", "related_meeting", "user_notes",
+            "waiting_activity", "suggestion_refreshed_at",
+            "created_at", "updated_at",
         }
         self.assertEqual(cols, expected)
 

@@ -104,6 +104,7 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 | **priority** | WorkIQ `Priority` | Map: P1→1, P2→2, P3→3, P4→4. Override to **4** if validation found item is not clearly actionable by me. |
 | **action_type** | WorkIQ `Action type` | Use as-is (respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general) |
 | **source_snippet** | WorkIQ `Description` | Same as description — the contextual summary |
+| **source_date** | WorkIQ `Date` | ISO 8601 date string (e.g. "2026-04-14") when the source item was sent/occurred |
 | **source_url** | WorkIQ link references | Extract from markdown links in WorkIQ response if available, otherwise null |
 
 **Claude generates** (not from WorkIQ):
@@ -122,15 +123,32 @@ Use this function throughout dedup to catch paraphrased duplicates (e.g. "Send E
 ```python
 def title_tokens(t):
     """Extract meaningful tokens from a title, lowercased, stopwords removed."""
-    stop = {'a','an','the','to','for','of','on','in','at','and','or','with','my','re','fwd'}
+    stop = {'a','an','the','to','for','of','on','in','at','and','or','with','my',
+            're','fwd','follow','up','check','confirm','send','share','provide',
+            'schedule','review','respond','reply','draft','prepare','update',
+            'get','set','discuss','meeting','email','teams','message','request'}
     return set(w for w in t.lower().split() if w not in stop and len(w) > 1)
 
-def fuzzy_title_match(t1, t2, threshold=0.5):
-    """Token-overlap (Jaccard) match. Returns True if similarity >= threshold."""
+def person_tokens(t):
+    """Extract likely person name tokens (capitalized words) from a title."""
+    return set(w.lower() for w in t.split() if w[0].isupper() and len(w) > 2
+               and w not in ('Teams','Email','Meeting','Power','Scale','Agent','CAT',
+                             'CAPE','EBC','CAB','Level','Brazil','Kickstarter'))
+
+def fuzzy_title_match(t1, t2, threshold=0.45):
+    """Token-overlap (Jaccard) match. Returns True if similarity >= threshold.
+    Also returns True if person names overlap AND topic tokens overlap >= 0.3."""
     s1, s2 = title_tokens(t1), title_tokens(t2)
     if not s1 or not s2:
         return False
-    return len(s1 & s2) / len(s1 | s2) >= threshold
+    jaccard = len(s1 & s2) / len(s1 | s2)
+    if jaccard >= threshold:
+        return True
+    # Fallback: if same person mentioned in both titles and some topic overlap
+    p1, p2 = person_tokens(t1), person_tokens(t2)
+    if p1 and p2 and p1 & p2 and jaccard >= 0.3:
+        return True
+    return False
 ```
 
 ### In-batch dedup (before DB checks)
@@ -144,9 +162,9 @@ Steps 2a, 2b, and 2c can return overlapping items (e.g. a Teams message appears 
 
 Only the deduplicated list proceeds to the DB dedup checks below.
 
-### Dedup check (two-pass: exact/fuzzy then semantic)
+### Dedup check (three-pass: exact, fuzzy, then semantic)
 
-**Pass 1 — Exact + fuzzy match** on source_id, title prefix, or token overlap:
+**Pass 1 — Exact match** on source_id or title prefix:
 
 ```python
 import sqlite3
@@ -154,43 +172,54 @@ import sqlite3
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.row_factory = sqlite3.Row
 
-# First: exact match on source_id or title prefix
+# Exact match on source_id or title prefix
 existing = conn.execute(
     "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id = ? OR LOWER(SUBSTR(title, 1, 40)) = LOWER(SUBSTR(?, 1, 40))",
     (source_id, title)
 ).fetchall()
-
-# If no exact match, try fuzzy token-overlap against same-sender tasks
-if not existing:
-    sender_lower = first_person_email.strip().lower()
-    sender_prefix = sender_lower.split('@')[0]
-    candidates = conn.execute(
-        "SELECT id, status, source_id, title, source_snippet FROM tasks WHERE source_id LIKE ?",
-        ('%::' + sender_prefix + '%',)
-    ).fetchall()
-    existing = [c for c in candidates if fuzzy_title_match(title, c['title'])]
-
 conn.close()
 ```
 
-**Pass 2 — Semantic match** (if no exact match found):
+**Pass 2 — Fuzzy match by person** (if no exact match found):
 
-Query existing tasks from the same key person to check for semantic duplicates:
+Search for candidates using BOTH source_id patterns AND key_people JSON. This catches cases where the same person appears with different email formats or aliases.
 
 ```python
+import json
+
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.row_factory = sqlite3.Row
-# Normalize sender: match both alias forms (e.g. jane.doe@ and jdoe@)
+
+# Extract all person identifiers for broad candidate search
 sender_lower = first_person_email.strip().lower()
 sender_prefix = sender_lower.split('@')[0]
-same_sender_tasks = conn.execute(
-    "SELECT id, status, source_id, title, source_snippet, action_type FROM tasks WHERE source_id LIKE ?",
-    ('%::' + sender_prefix + '%',)
+# Also extract person's last name for key_people JSON search
+sender_parts = sender_prefix.replace('.', ' ').split()
+sender_last = sender_parts[-1] if sender_parts else sender_prefix
+
+# Search by source_id pattern OR key_people containing the person's name/email
+candidates = conn.execute(
+    """SELECT id, status, source_id, title, source_snippet, key_people, action_type
+       FROM tasks
+       WHERE status NOT IN ('deleted')
+       AND (source_id LIKE ? OR source_id LIKE ?
+            OR key_people LIKE ? OR key_people LIKE ?)""",
+    ('%::' + sender_prefix + '::%',
+     '%::' + sender_last + '%',
+     '%' + sender_lower + '%',
+     '%' + sender_last + '%')
 ).fetchall()
 conn.close()
+
+# Apply fuzzy title match against all candidates
+existing = [c for c in candidates if fuzzy_title_match(title, c['title'])]
 ```
 
-For each `same_sender_task`, decide if it's a semantic duplicate of the new item. Two tasks are duplicates if they involve **the same person AND the same underlying conversation, project, or topic** — even if:
+**Pass 3 — Semantic match** (if still no match found):
+
+Use the same candidate set from Pass 2 (already fetched). For each candidate, apply Claude's judgment to detect semantic duplicates.
+
+For each candidate task, decide if it's a semantic duplicate of the new item. Two tasks are duplicates if they involve **the same person AND the same underlying conversation, project, or topic** — even if:
 - The titles use different wording (e.g. "Advise X on Y" vs. "Follow up with X about Y")
 - The action types differ (e.g. one is `follow-up` and the other is `awaiting-response`)
 - One came from Step 2a and the other from Step 2b
@@ -205,10 +234,10 @@ For each `same_sender_task`, decide if it's a semantic duplicate of the new item
 
 Be aggressive about dedup — it's better to augment an existing task than to create a near-duplicate. **When in doubt, it's a match.**
 
-**If a match is found**, decide based on status:
+**If a match is found** (from any pass), decide based on the matched task's status:
 - **dismissed** → skip entirely, never re-suggest dismissed items
-- **active / in_progress / completed** → **augment**: update `source_snippet` with latest context if meaningfully new (e.g. new deadline, escalation). Update `updated_at`. Increment `updated_count`.
-- **suggested** → update `source_snippet` and `priority` if the new item shows increased urgency. Increment `updated_count`.
+- **active / in_progress / waiting / completed** → **augment**: update `source_snippet` with latest context if meaningfully new (e.g. new deadline, escalation). Update `source_date` and `updated_at`. Increment `updated_count`.
+- **suggested** → update `source_snippet`, `source_date`, and `priority` if the new item shows increased urgency. Increment `updated_count`.
 
 ```python
 # Augment existing task with newer context
@@ -218,8 +247,8 @@ from datetime import datetime, timezone
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute(
-    "UPDATE tasks SET source_snippet = ?, priority = MIN(priority, ?), updated_at = ? WHERE id = ?",
-    (new_source_snippet, new_priority, now, existing_task_id)
+    "UPDATE tasks SET source_snippet = ?, source_date = COALESCE(?, source_date), priority = MIN(priority, ?), updated_at = ? WHERE id = ?",
+    (new_source_snippet, new_source_date, new_priority, now, existing_task_id)
 )
 conn.commit()
 conn.close()
@@ -237,11 +266,11 @@ conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute(
     """INSERT INTO tasks (title, description, status, parse_status, priority,
-       source_type, source_id, source_snippet, source_url, key_people,
+       source_type, source_id, source_snippet, source_date, source_url, key_people,
        action_type, coaching_text, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
     (title, description, 'suggested', 'parsed', priority,
-     source_type, source_id, source_snippet, source_url, key_people,
+     source_type, source_id, source_snippet, source_date, source_url, key_people,
      action_type, coaching_text, now, now)
 )
 conn.commit()

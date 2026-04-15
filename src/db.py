@@ -167,6 +167,12 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE tasks ADD COLUMN is_quick_hit INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
+    # Add source_date column if missing (ISO 8601 date when the source item was sent/occurred)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "source_date" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN source_date TEXT")
+        conn.commit()
+
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
         r[0] for r in conn.execute(
@@ -225,6 +231,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     source_id       TEXT,
     source_url      TEXT,
     source_snippet  TEXT,
+    source_date     TEXT,
     coaching_text   TEXT,
     action_type     TEXT DEFAULT 'general'
                         CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
