@@ -5,9 +5,9 @@
 
 - [ ] #008 | 2026-03-12 | XL | Recurring Tasks — tasks that repeat on a schedule, each recurrence runs full AI coaching and AI skill execution
 
-- [ ] #013 | 2026-04-15 | M | Add source_date column to tasks schema — No source_date field exists, so we can't tell when the underlying Teams message/meeting/email occurred (only when the DB record was created). Add source_date TEXT (ISO 8601), populate from WorkIQ timestamps during /todo-refresh, backfill where possible. Enables staleness detection for auto-dismissing old suggestions.
+- [x] #013 | 2026-04-15 | M | Add source_date column to tasks schema — No source_date field exists, so we can't tell when the underlying Teams message/meeting/email occurred (only when the DB record was created). Add source_date TEXT (ISO 8601), populate from WorkIQ timestamps during /todo-refresh, backfill where possible. Enables staleness detection for auto-dismissing old suggestions. | completed: 2026-04-15
 
-- [ ] #014 | 2026-04-15 | L | Improve semantic dedup in todo-refresh — Current dedup only catches exact source_id matches. Analysis found 29 duplicate groups covering 112/166 suggested tasks (~67%), plus ~15-20 suggestions duplicating active/waiting tasks. Needs: (1) fuzzy title comparison within suggested tasks, (2) cross-status dedup against active/waiting/in_progress tasks, (3) person+topic matching from source_id fields. Worst offenders had 5-6 copies of the same task.
+- [x] #014 | 2026-04-15 | L | Improve semantic dedup in todo-refresh — Current dedup only catches exact source_id matches. Analysis found 29 duplicate groups covering 112/166 suggested tasks (~67%), plus ~15-20 suggestions duplicating active/waiting tasks. Needs: (1) fuzzy title comparison within suggested tasks, (2) cross-status dedup against active/waiting/in_progress tasks, (3) person+topic matching from source_id fields. Worst offenders had 5-6 copies of the same task. | completed: 2026-04-15
 
 ## In Progress
 
