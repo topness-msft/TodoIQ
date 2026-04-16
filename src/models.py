@@ -1,5 +1,6 @@
 """Task CRUD and lifecycle operations for TodoNess."""
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -69,15 +70,47 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def _person_match(a: str, b: str) -> bool:
+def _extract_people_aliases(key_people_json: str | None) -> set[str]:
+    """Extract lowercase email-prefix aliases from key_people JSON.
+
+    Given '[{"name": "John Wheat", "email": "john.wheat@microsoft.com"}]',
+    returns {'john.wheat'}.
+    """
+    if not key_people_json:
+        return set()
+    try:
+        people = json.loads(key_people_json)
+        return {
+            p["email"].lower().split("@")[0]
+            for p in people
+            if isinstance(p, dict) and p.get("email")
+        }
+    except (json.JSONDecodeError, TypeError):
+        return set()
+
+
+def _person_match(
+    a: str,
+    b: str,
+    people_a: set[str] | None = None,
+    people_b: set[str] | None = None,
+) -> bool:
     """Check if two person aliases refer to the same person.
 
-    After normalizing (strip @domain), compare exact match only.
-    The refresh commands ask WorkIQ to resolve all aliases to
-    first.last@microsoft.com format, so exact match is reliable
-    for new tasks. Legacy tasks may still have short aliases.
+    First tries exact alias match.  Falls back to cross-checking
+    each alias against the other task's key_people email prefixes,
+    and finally checks for any shared person across both key_people
+    sets (same conversation, different attributed sender).
     """
     if a == b:
+        return True
+    # Cross-check: alias appears in the other task's key_people
+    if people_b and a in people_b:
+        return True
+    if people_a and b in people_a:
+        return True
+    # Shared person across both tasks' key_people
+    if people_a and people_b and (people_a & people_b):
         return True
     return False
 
@@ -87,6 +120,7 @@ def find_similar_source(
     source_id: str,
     source_type: str | None = None,
     threshold: float = 0.5,
+    key_people: str | None = None,
 ) -> dict | None:
     """Find an existing non-deleted task whose source_id fuzzy-matches.
 
@@ -96,6 +130,7 @@ def find_similar_source(
     if parsed is None:
         return None
     src_type, person_alias, new_tokens = parsed
+    new_people = _extract_people_aliases(key_people)
 
     # Fetch candidate tasks: same source_type, not deleted, having a source_id
     type_filter = source_type or src_type
@@ -109,9 +144,8 @@ def find_similar_source(
         if existing_parsed is None:
             continue
         ex_type, ex_person, ex_tokens = existing_parsed
-        # Person match: exact, or one alias contains the other's last-name part
-        # Handles spant vs saurabh.pant, phtopnes vs peter.topness
-        if not _person_match(person_alias, ex_person):
+        ex_people = _extract_people_aliases(row["key_people"])
+        if not _person_match(person_alias, ex_person, new_people, ex_people):
             continue
         if _jaccard(new_tokens, ex_tokens) >= threshold:
             return dict(row)
@@ -153,7 +187,7 @@ def create_task(
                 logger.debug("Exact source_id match → existing task #%s", exact["id"])
                 return dict(exact)
 
-            fuzzy_match = find_similar_source(conn, source_id, source_type)
+            fuzzy_match = find_similar_source(conn, source_id, source_type, key_people=key_people)
             if fuzzy_match:
                 logger.info(
                     "Fuzzy source_id dedup: new '%s' matched existing task #%s '%s'",
