@@ -565,6 +565,141 @@ body {
 .init-btn.ai:hover { opacity: 0.85; }
 .init-btn.secondary { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
 .init-btn.secondary:hover { background: var(--bg-hover); }
+
+/* ── Task Link ──────────────────────────────────────────── */
+.task-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 1px dashed var(--accent);
+  transition: opacity 0.12s;
+}
+.task-link:hover { opacity: 0.7; }
+
+/* ── Detail Side Panel ──────────────────────────────────── */
+.briefing-detail {
+  position: fixed;
+  top: 48px; right: 0; bottom: 0;
+  width: 380px;
+  background: var(--bg-detail);
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 20px rgba(0,0,0,0.08);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.briefing-detail.open { transform: translateX(0); }
+.briefing-detail::-webkit-scrollbar { width: 5px; }
+.briefing-detail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.bd-header {
+  padding: 16px 20px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.bd-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.bd-close {
+  width: 28px; height: 28px;
+  border: none; background: transparent;
+  border-radius: 4px; cursor: pointer;
+  font-size: 18px; color: var(--text-secondary);
+  display: flex; align-items: center; justify-content: center;
+}
+.bd-close:hover { background: var(--bg-hover); }
+.bd-id {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 20px 0;
+}
+
+.bd-description {
+  padding: 8px 20px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.bd-rows { padding: 4px 0; }
+.bd-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.bd-row .row-icon { width: 18px; text-align: center; font-size: 14px; flex-shrink: 0; }
+.bd-row .row-label { flex: 1; }
+.bd-row.has-value .row-label { color: var(--text); }
+
+.bd-sep { border: none; border-top: 1px solid var(--border); margin: 4px 20px; }
+
+.bd-coaching {
+  padding: 12px 20px;
+  background: var(--ai-light);
+  border-top: 1px solid var(--ai-border);
+  margin-top: auto;
+}
+.bd-coaching-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ai);
+  margin-bottom: 4px;
+}
+.bd-coaching-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  font-style: italic;
+}
+
+.bd-footer {
+  padding: 8px 20px 12px;
+  display: flex;
+  gap: 8px;
+}
+.bd-footer .bd-btn {
+  padding: 6px 14px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  transition: all 0.12s;
+}
+.bd-btn.primary { background: var(--accent); color: #fff; }
+.bd-btn.primary:hover { background: var(--accent-hover); }
+.bd-btn.secondary { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+.bd-btn.secondary:hover { background: var(--bg-hover); }
+
+.bd-loading {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* Overlay to close panel on outside click */
+.bd-overlay {
+  position: fixed;
+  top: 48px; left: 0; right: 0; bottom: 0;
+  z-index: 99;
+  display: none;
+}
+.bd-overlay.open { display: block; }
 </style>
 </head>
 <body>
@@ -637,155 +772,6 @@ body {
       <div class="insight-actions">
         <button class="insight-btn ai">✦ Draft quick check-ins</button>
         <button class="insight-btn secondary">View all 6 waiting →</button>
-      </div>
-    </div>
-
-    <!-- Insight: Unanswered inbound -->
-    <div class="insight-card risk">
-      <div class="insight-icon">📨</div>
-      <div class="insight-label">Unanswered</div>
-      <div class="insight-title">Lisa McKee and Pratap Ladhani are waiting on a reply from you</div>
-      <div class="insight-body">
-        Lisa messaged about <strong>Frontier Maturity Model framing</strong> 6 days ago — no response. Pratap is waiting on <strong>interview framing questions</strong> for 6 days. Both are time-sensitive: Lisa needs availability confirmation and Pratap has interviews coming up.
-      </div>
-      <div class="insight-actions">
-        <button class="insight-btn primary">Respond to Lisa</button>
-        <button class="insight-btn secondary">Respond to Pratap</button>
-      </div>
-    </div>
-
-    <!-- ════════════════════════════════════════════════
-         SECTION: PREPARING FOR TODAY
-         ════════════════════════════════════════════════ -->
-    <div class="section-label">📋 Preparing for today</div>
-
-    <!-- Insight: Today's meeting load + prep gaps -->
-    <div class="insight-card prep">
-      <div class="insight-icon">📅</div>
-      <div class="insight-label">Today's calendar</div>
-      <div class="insight-title">5.5 hours of meetings — 1 has no agenda and 2 connect to open tasks</div>
-      <div class="insight-body">
-        You're seeing <strong>Saurabh Pant</strong> at 9:00 — you have 3 open tasks with him including setting up the adoption patterns review. The <strong>ZT4AI Workshop</strong> at 3:00 with Steve Jeffery has no agenda posted; consider asking Steve what he needs ahead of time. Your <strong>Agent Ecosystems</strong> presentation is due April 23 — today's working session is a chance to make progress.
-      </div>
-      <div class="insight-tasks">
-        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#812</span><span class="it-title">Set up meeting with Saurabh to review adoption patterns</span><span class="it-meta">9:00 mtg</span></div>
-        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#823</span><span class="it-title">Review ZT4AI workshop as governance workstream</span><span class="it-meta">3:00 mtg · no agenda</span></div>
-        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#656</span><span class="it-title">Prepare for Agent Ecosystems Presentation on April 23</span><span class="it-meta">due in 7d</span></div>
-      </div>
-      <div class="insight-actions">
-        <button class="insight-btn ai">✦ Build prep notes for Saurabh 1:1</button>
-        <button class="insight-btn secondary">Ask Steve for agenda</button>
-      </div>
-    </div>
-
-    <!-- Insight: Week load with recommendation -->
-    <div class="insight-card info">
-      <div class="insight-icon">📊</div>
-      <div class="insight-label">Week ahead</div>
-      <div class="insight-title">Thursday is your heaviest day — protect Friday for the presentation deadline</div>
-      <div class="day-load">
-        <div class="day-load-bar today">
-          <div class="bar-label">Wed</div>
-          <div class="bar-fill-container"><div class="bar-fill heavy" style="width:69%"></div></div>
-          <div class="bar-hours">5.5h</div>
-        </div>
-        <div class="day-load-bar">
-          <div class="bar-label">Thu</div>
-          <div class="bar-fill-container"><div class="bar-fill heavy" style="width:75%"></div></div>
-          <div class="bar-hours">6.0h</div>
-        </div>
-        <div class="day-load-bar">
-          <div class="bar-label">Fri</div>
-          <div class="bar-fill-container"><div class="bar-fill medium" style="width:44%"></div></div>
-          <div class="bar-hours">3.5h</div>
-        </div>
-        <div class="day-load-bar">
-          <div class="bar-label">Mon</div>
-          <div class="bar-fill-container"><div class="bar-fill medium" style="width:50%"></div></div>
-          <div class="bar-hours">4.0h</div>
-        </div>
-        <div class="day-load-bar">
-          <div class="bar-label">Tue</div>
-          <div class="bar-fill-container"><div class="bar-fill light" style="width:31%"></div></div>
-          <div class="bar-hours">2.5h</div>
-        </div>
-      </div>
-      <div class="rec-text">
-        <strong>Recommendation:</strong> Thursday has 6 hours of meetings leaving almost no working time. Your Agent Ecosystems presentation (#656) is due April 23 — Friday afternoon has the most open space this week. Consider blocking 2 hours Friday PM for focused prep.
-      </div>
-    </div>
-
-    <!-- ════════════════════════════════════════════════
-         SECTION: RELATIONSHIPS AT RISK
-         ════════════════════════════════════════════════ -->
-    <div class="section-label">🤝 People to prioritize</div>
-
-    <div class="people-strip">
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#e65100">GH</div>
-        <div>
-          <div class="person-chip-name">Greg Hurlman</div>
-          <div class="person-chip-detail">5 tasks · 3 waiting</div>
-        </div>
-        <span class="chip-badge waiting">3 stale</span>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#2564cf">JW</div>
-        <div>
-          <div class="person-chip-name">John Wheat</div>
-          <div class="person-chip-detail">Mtg 1:00 PM · 2 open</div>
-        </div>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#8b5cf6">SP</div>
-        <div>
-          <div class="person-chip-name">Saurabh Pant</div>
-          <div class="person-chip-detail">Mtg 9:00 AM · 3 open</div>
-        </div>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#d13438">LM</div>
-        <div>
-          <div class="person-chip-name">Lisa McKee</div>
-          <div class="person-chip-detail">Last contact: 6 days ago</div>
-        </div>
-        <span class="chip-badge risk">Unanswered</span>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#107c10">AM</div>
-        <div>
-          <div class="person-chip-name">Adrian Maclean</div>
-          <div class="person-chip-detail">2 tasks · 1 waiting</div>
-        </div>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#f7630c">AK</div>
-        <div>
-          <div class="person-chip-name">Aamer Kaleem</div>
-          <div class="person-chip-detail">4 tasks · mtg 11:30</div>
-        </div>
-      </div>
-      <div class="person-chip">
-        <div class="person-avatar" style="background:#616161">PL</div>
-        <div>
-          <div class="person-chip-name">Pratap Ladhani</div>
-          <div class="person-chip-detail">Waiting 6 days</div>
-        </div>
-        <span class="chip-badge risk">Unanswered</span>
-      </div>
-    </div>
-
-    <!-- Insight: Greg Hurlman pattern -->
-    <div class="insight-card opportunity">
-      <div class="insight-icon">✦</div>
-      <div class="insight-label">Relationship insight</div>
-      <div class="insight-title">Greg Hurlman has 3 stale threads — consider a single catch-up instead of 3 separate follow-ups</div>
-      <div class="insight-body">
-        You're waiting on Greg for: <strong>Kunal follow-ups</strong> (24d), <strong>Spark Tank rollout</strong> (21d), and <strong>TPID reporting demo</strong> (recent). Instead of sending 3 messages, a 15-minute call would clear all three and be less awkward than a chain of "just checking in" pings.
-      </div>
-      <div class="insight-actions">
-        <button class="insight-btn ai">✦ Find time for Greg catch-up</button>
-        <button class="insight-btn secondary">Draft consolidated message</button>
       </div>
     </div>
 
@@ -953,10 +939,163 @@ body {
 
     </div><!-- /initiative-grid -->
 
+    <!-- Insight: Unanswered inbound -->
+    <div class="insight-card risk">
+      <div class="insight-icon">📨</div>
+      <div class="insight-label">Unanswered</div>
+      <div class="insight-title">Lisa McKee and Pratap Ladhani are waiting on a reply from you</div>
+      <div class="insight-body">
+        Lisa messaged about <strong>Frontier Maturity Model framing</strong> 6 days ago — no response. Pratap is waiting on <strong>interview framing questions</strong> for 6 days. Both are time-sensitive: Lisa needs availability confirmation and Pratap has interviews coming up.
+      </div>
+      <div class="insight-actions">
+        <button class="insight-btn primary">Respond to Lisa</button>
+        <button class="insight-btn secondary">Respond to Pratap</button>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════
+         SECTION: PREPARING FOR TODAY
+         ════════════════════════════════════════════════ -->
+    <div class="section-label">📋 Preparing for today</div>
+
+    <!-- Insight: Today's meeting load + prep gaps -->
+    <div class="insight-card prep">
+      <div class="insight-icon">📅</div>
+      <div class="insight-label">Today's calendar</div>
+      <div class="insight-title">5.5 hours of meetings — 1 has no agenda and 2 connect to open tasks</div>
+      <div class="insight-body">
+        You're seeing <strong>Saurabh Pant</strong> at 9:00 — you have 3 open tasks with him including setting up the adoption patterns review. The <strong>ZT4AI Workshop</strong> at 3:00 with Steve Jeffery has no agenda posted; consider asking Steve what he needs ahead of time. Your <strong>Agent Ecosystems</strong> presentation is due April 23 — today's working session is a chance to make progress.
+      </div>
+      <div class="insight-tasks">
+        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#812</span><span class="it-title">Set up meeting with Saurabh to review adoption patterns</span><span class="it-meta">9:00 mtg</span></div>
+        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#823</span><span class="it-title">Review ZT4AI workshop as governance workstream</span><span class="it-meta">3:00 mtg · no agenda</span></div>
+        <div class="insight-task"><span class="priority-dot p2"></span><span class="it-id">#656</span><span class="it-title">Prepare for Agent Ecosystems Presentation on April 23</span><span class="it-meta">due in 7d</span></div>
+      </div>
+      <div class="insight-actions">
+        <button class="insight-btn ai">✦ Build prep notes for Saurabh 1:1</button>
+        <button class="insight-btn secondary">Ask Steve for agenda</button>
+      </div>
+    </div>
+
+    <!-- Insight: Week load with recommendation -->
+    <div class="insight-card info">
+      <div class="insight-icon">📊</div>
+      <div class="insight-label">Week ahead</div>
+      <div class="insight-title">Thursday is your heaviest day — protect Friday for the presentation deadline</div>
+      <div class="day-load">
+        <div class="day-load-bar today">
+          <div class="bar-label">Wed</div>
+          <div class="bar-fill-container"><div class="bar-fill heavy" style="width:69%"></div></div>
+          <div class="bar-hours">5.5h</div>
+        </div>
+        <div class="day-load-bar">
+          <div class="bar-label">Thu</div>
+          <div class="bar-fill-container"><div class="bar-fill heavy" style="width:75%"></div></div>
+          <div class="bar-hours">6.0h</div>
+        </div>
+        <div class="day-load-bar">
+          <div class="bar-label">Fri</div>
+          <div class="bar-fill-container"><div class="bar-fill medium" style="width:44%"></div></div>
+          <div class="bar-hours">3.5h</div>
+        </div>
+        <div class="day-load-bar">
+          <div class="bar-label">Mon</div>
+          <div class="bar-fill-container"><div class="bar-fill medium" style="width:50%"></div></div>
+          <div class="bar-hours">4.0h</div>
+        </div>
+        <div class="day-load-bar">
+          <div class="bar-label">Tue</div>
+          <div class="bar-fill-container"><div class="bar-fill light" style="width:31%"></div></div>
+          <div class="bar-hours">2.5h</div>
+        </div>
+      </div>
+      <div class="rec-text">
+        <strong>Recommendation:</strong> Thursday has 6 hours of meetings leaving almost no working time. Your Agent Ecosystems presentation (#656) is due April 23 — Friday afternoon has the most open space this week. Consider blocking 2 hours Friday PM for focused prep.
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════
+         SECTION: RELATIONSHIPS AT RISK
+         ════════════════════════════════════════════════ -->
+    <div class="section-label">🤝 People to prioritize</div>
+
+    <div class="people-strip">
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#e65100">GH</div>
+        <div>
+          <div class="person-chip-name">Greg Hurlman</div>
+          <div class="person-chip-detail">5 tasks · 3 waiting</div>
+        </div>
+        <span class="chip-badge waiting">3 stale</span>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#2564cf">JW</div>
+        <div>
+          <div class="person-chip-name">John Wheat</div>
+          <div class="person-chip-detail">Mtg 1:00 PM · 2 open</div>
+        </div>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#8b5cf6">SP</div>
+        <div>
+          <div class="person-chip-name">Saurabh Pant</div>
+          <div class="person-chip-detail">Mtg 9:00 AM · 3 open</div>
+        </div>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#d13438">LM</div>
+        <div>
+          <div class="person-chip-name">Lisa McKee</div>
+          <div class="person-chip-detail">Last contact: 6 days ago</div>
+        </div>
+        <span class="chip-badge risk">Unanswered</span>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#107c10">AM</div>
+        <div>
+          <div class="person-chip-name">Adrian Maclean</div>
+          <div class="person-chip-detail">2 tasks · 1 waiting</div>
+        </div>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#f7630c">AK</div>
+        <div>
+          <div class="person-chip-name">Aamer Kaleem</div>
+          <div class="person-chip-detail">4 tasks · mtg 11:30</div>
+        </div>
+      </div>
+      <div class="person-chip">
+        <div class="person-avatar" style="background:#616161">PL</div>
+        <div>
+          <div class="person-chip-name">Pratap Ladhani</div>
+          <div class="person-chip-detail">Waiting 6 days</div>
+        </div>
+        <span class="chip-badge risk">Unanswered</span>
+      </div>
+    </div>
+
+    <!-- Insight: Greg Hurlman pattern -->
+    <div class="insight-card opportunity">
+      <div class="insight-icon">✦</div>
+      <div class="insight-label">Relationship insight</div>
+      <div class="insight-title">Greg Hurlman has 3 stale threads — consider a single catch-up instead of 3 separate follow-ups</div>
+      <div class="insight-body">
+        You're waiting on Greg for: <strong>Kunal follow-ups</strong> (24d), <strong>Spark Tank rollout</strong> (21d), and <strong>TPID reporting demo</strong> (recent). Instead of sending 3 messages, a 15-minute call would clear all three and be less awkward than a chain of "just checking in" pings.
+      </div>
+      <div class="insight-actions">
+        <button class="insight-btn ai">✦ Find time for Greg catch-up</button>
+        <button class="insight-btn secondary">Draft consolidated message</button>
+      </div>
+    </div>
+
   </div><!-- /content-body -->
 </div><!-- /main-content -->
 
 </div><!-- /app-body -->
+<!-- Detail Panel -->
+<div class="bd-overlay" id="bd-overlay" onclick="closeTaskPanel()"></div>
+<aside class="briefing-detail" id="briefing-detail"></aside>
+
 </div><!-- /app -->
 
 <script>
@@ -964,6 +1103,110 @@ body {
   var now = new Date();
   document.getElementById('briefing-date').textContent =
     now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+})();
+
+function openTaskPanel(id) {
+  var panel = document.getElementById('briefing-detail');
+  var overlay = document.getElementById('bd-overlay');
+  panel.innerHTML = '<div class="bd-loading">Loading task #' + id + '...</div>';
+  panel.classList.add('open');
+  overlay.classList.add('open');
+
+  fetch('/api/tasks/' + id)
+    .then(function(r) { return r.json(); })
+    .then(function(t) { renderTaskPanel(t); })
+    .catch(function(e) {
+      panel.innerHTML = '<div class="bd-loading">Could not load task #' + id + '</div>';
+    });
+}
+
+function closeTaskPanel() {
+  document.getElementById('briefing-detail').classList.remove('open');
+  document.getElementById('bd-overlay').classList.remove('open');
+}
+
+function renderTaskPanel(t) {
+  var panel = document.getElementById('briefing-detail');
+  var priColors = {1:'#d13438',2:'#e65100',3:'var(--accent)',4:'var(--text-muted)',5:'var(--text-muted)'};
+  var priLabels = {1:'P1 · Urgent',2:'P2 · Important',3:'P3 · Normal',4:'P4 · Low',5:'P5 · Info'};
+  var statusLabels = {active:'Active',in_progress:'In Progress',waiting:'Waiting',suggested:'Suggested',completed:'Completed',dismissed:'Dismissed',snoozed:'Snoozed'};
+  var srcIcons = {email:'✉️',teams:'💬',meeting:'📅',chat:'💬',manual:'✏️'};
+
+  var people = '';
+  if (t.key_people) {
+    try {
+      var kp = typeof t.key_people === 'string' ? JSON.parse(t.key_people) : t.key_people;
+      if (kp.length) {
+        people = '<div class="bd-row has-value"><span class="row-icon">👤</span><div class="row-label">' +
+          kp.map(function(p) { return '<span style="display:inline-block;margin:1px 4px 1px 0;padding:2px 8px;background:var(--bg-input);border-radius:10px;font-size:12px">' + esc(p.name) + '</span>'; }).join('') +
+          '</div></div>';
+      }
+    } catch(e) {}
+  }
+
+  var src = t.source_type
+    ? '<div class="bd-row has-value"><span class="row-icon">' + (srcIcons[t.source_type]||'📎') + '</span><span class="row-label">' +
+      (t.source_url ? '<a href="' + esc(t.source_url) + '" target="_blank" style="color:var(--accent)">' + esc(t.source_type) + ' ↗</a>' : esc(t.source_type)) +
+      '</span></div>'
+    : '';
+
+  var due = t.due_date
+    ? '<div class="bd-row has-value"><span class="row-icon">📅</span><span class="row-label">Due ' + new Date(t.due_date + 'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) + '</span></div>'
+    : '';
+
+  var coaching = t.coaching_text
+    ? '<div class="bd-coaching"><div class="bd-coaching-label">✦ Coaching</div><div class="bd-coaching-text">' + esc(t.coaching_text) + '</div></div>'
+    : '';
+
+  var snippet = t.source_snippet
+    ? '<div class="bd-row has-value"><span class="row-icon">📝</span><span class="row-label" style="font-size:12px;color:var(--text-muted)">' + esc(t.source_snippet).substring(0,150) + '</span></div>'
+    : '';
+
+  var waitingInfo = '';
+  if (t.waiting_activity) {
+    try {
+      var wa = typeof t.waiting_activity === 'string' ? JSON.parse(t.waiting_activity) : t.waiting_activity;
+      if (wa.summary) {
+        var waColor = wa.status === 'activity_detected' ? 'var(--success)' : wa.status === 'no_activity' ? 'var(--danger)' : 'var(--warning)';
+        waitingInfo = '<div class="bd-row has-value"><span class="row-icon" style="color:' + waColor + '">◉</span><span class="row-label" style="font-size:12px">' + esc(wa.summary).substring(0,120) + '</span></div>';
+      }
+    } catch(e) {}
+  }
+
+  var openInTodoIQ = '<div class="bd-footer"><a class="bd-btn primary" href="/todo" style="text-decoration:none;text-align:center">Open in TodoIQ</a>' +
+    '<button class="bd-btn secondary" onclick="closeTaskPanel()">Close</button></div>';
+
+  panel.innerHTML =
+    '<div class="bd-header"><div class="bd-title">' + esc(t.title) + '</div><button class="bd-close" onclick="closeTaskPanel()">✕</button></div>' +
+    '<div class="bd-id">#' + t.id + ' · ' + (statusLabels[t.status]||t.status) + ' · <span style="color:' + (priColors[t.priority]||'inherit') + '">' + (priLabels[t.priority]||'P'+t.priority) + '</span></div>' +
+    (t.description ? '<div class="bd-description">' + esc(t.description) + '</div>' : '') +
+    '<hr class="bd-sep">' +
+    '<div class="bd-rows">' + due + people + src + snippet + waitingInfo + '</div>' +
+    coaching +
+    openInTodoIQ;
+}
+
+function esc(s) { if (!s) return ''; var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+// Close panel on Escape
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeTaskPanel();
+});
+
+// Auto-linkify task IDs
+(function() {
+  document.querySelectorAll('.it-id').forEach(function(el) {
+    var m = el.textContent.match(/#(\d+)/);
+    if (m) {
+      el.innerHTML = '<a href="#" class="task-link" data-task-id="' + m[1] + '" onclick="openTaskPanel(' + m[1] + ');return false">' + el.textContent + '</a>';
+    }
+  });
+  var containers = document.querySelectorAll('.insight-body, .insight-title, .init-cos-text, .rec-text, .it-meta, .init-actions');
+  containers.forEach(function(el) {
+    el.innerHTML = el.innerHTML.replace(/#(\d{2,4})(?![^<]*>)/g, function(match, id) {
+      return '<a href="#" class="task-link" data-task-id="' + id + '" onclick="openTaskPanel(' + id + ');return false">' + match + '</a>';
+    });
+  });
 })();
 
 /* ══════════════════════════════════════════════════════════
