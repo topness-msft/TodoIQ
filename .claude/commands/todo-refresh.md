@@ -58,17 +58,11 @@ Call `ask_work_iq` with a separate query focused on outbound messages where I'm 
 What Teams messages or chats have I SENT in the last {days_since} days that contain a question, request, or ask where the recipient hasn't responded yet? Only include Teams messages — do NOT include emails. Only include items where I am clearly waiting for a response — not messages I sent that were purely informational. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action (e.g. "Follow up with Alex on budget approval"). 2. **Description**: 2-3 sentences: what I asked, who I'm waiting on, when I sent it. 3. **Source type**: email, teams, or meeting. 4. **Key people**: For each person involved, give their FULL resolved name and PRIMARY email address in first.last@microsoft.com format (resolve aliases like "spant" to "saurabh.pant@microsoft.com" via directory lookup). 5. **Priority**: P3 (normal) or P4 (low) — these are lower urgency since I'm waiting, not being asked. 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When I sent the message. 8. **Action type**: awaiting-response. Format each item as a numbered task with clear field labels.
 ```
 
-## Step 2c: WorkIQ scan (Flagged Inbox Emails)
+## Step 2c: DISABLED — Email scanning
 
-Call `ask_work_iq` for flagged emails in the Inbox only. Unlike Steps 2a/2b, this query has **no time window** — a flagged email represents explicit user intent regardless of age.
+Email scanning (flagged inbox) is **disabled** as of April 2026. WorkIQ cannot reliably scope email queries to flagged-only items in the Inbox folder — results include unflagged emails from all folders. Skip this step entirely.
 
-```
-Show me only flagged emails in my Inbox folder. Do not include emails from Archive, Deleted Items, Sent Items, or any other folder — only the Inbox. For each item, return it as a structured task suggestion with ALL of these fields: 1. **Task title**: A clean imperative action describing WHAT I NEED TO DO (e.g. "Reply to Sarah's budget proposal", "Schedule workshop walkthrough with Steve"). Not the message subject — describe the action. 2. **Description**: 2-3 sentences of context: what was the original ask, current state, what specifically needs to happen next. 3. **Source type**: email. 4. **Key people**: For each person involved, give their FULL resolved name and PRIMARY email address in first.last@microsoft.com format (resolve aliases like "spant" to "saurabh.pant@microsoft.com" via directory lookup). Exclude myself from the list. 5. **Priority**: P1 (urgent/deadline today), P2 (time-sensitive), P3 (normal), P4 (low/FYI). 6. **Original subject or topic**: The root subject (strip Re:/Fwd: prefixes). 7. **Date**: When the item was sent/occurred. 8. **Action type**: One of: respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general. Format each item as a numbered task with clear field labels.
-```
-
-If WorkIQ returns no flagged emails, log "No flagged inbox emails found" and continue.
-
-## Step 3: Validate and extract fields
+## Step 3:Validate and extract fields
 
 ### Step 3a: Relevance validation — 3-tier priority (Claude)
 

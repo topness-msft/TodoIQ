@@ -24,13 +24,10 @@ WorkIQ queries happen inside Claude Code commands only. The Tornado server never
 
 ## Email Integration Policy
 
-**Flagged inbox emails are a task source. Broad (unflagged) email scanning is not.**
+**All email scanning as a task source is disabled.**
 
-### Flagged inbox emails (enabled — April 2026)
-WorkIQ can reliably return flagged emails scoped to the Inbox folder only. `/todo-refresh` Step 2c queries for these and creates suggested tasks. Flagged emails represent explicit user intent, so the query has no time-window — a flag from any date is actionable. Normal dedup applies.
-
-### Why broad email scanning remains disabled
-WorkIQ enterprise search cannot reliably scope *unflagged* email queries to the Inbox folder. Queries return items from Archive, Deleted Items, and other folders indiscriminately. This makes unflagged email a noisy, unreliable source for surfacing new tasks.
+### Why email scanning is disabled (April 2026)
+WorkIQ cannot reliably scope email queries — neither flagged nor unflagged — to the Inbox folder only. The "flagged inbox" query (Step 2c) was returning unflagged emails from all folders, producing noisy, irrelevant suggestions. Step 2b (awaiting-response) was also restricted to Teams-only to prevent email leakage.
 
 ### Where email is also used as read-only context
 Email serves as context to enrich tasks that already exist:
@@ -94,7 +91,7 @@ unparsed → queued → parsing → parsed
 
 ## Sync Flow (/todo-refresh)
 1. Check sync_log for last sync time → determine scan window (1-7 days)
-2. WorkIQ scans (separate calls): (a) Teams messages + meeting action items, (b) awaiting-response items, (c) flagged inbox emails (no time window)
+2. WorkIQ scans (separate calls): (a) Teams messages + meeting action items, (b) awaiting-response (Teams only), (c) DISABLED — email scanning
 3. 3-tier priority validation: Direct (keep priority) → Group (downgrade by 1) → Tangential (P5)
 4. Two-pass dedup: exact match on source_id, then semantic match by sender
 5. Augment existing tasks with new context (dismissed items are never re-suggested)
