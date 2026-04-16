@@ -3012,6 +3012,24 @@ function handleKeyboardShortcut(e) {
         if (allowedC && allowedC.indexOf('completed') !== -1) {
             doAction(task.id, 'complete');
         }
+    } else if (key === 'D' && e.shiftKey) {
+        // Shift-D: dismiss and advance to next task
+        var allowedSD = VALID_TRANSITIONS[task.status];
+        if (allowedSD && allowedSD.indexOf('dismissed') !== -1) {
+            var rows = _getVisibleRows();
+            var curIdx = rows.findIndex(function(r) { return parseInt(r.getAttribute('data-id')) === task.id; });
+            doAction(task.id, 'dismiss');
+            // After dismiss, select the next task (or previous if at end)
+            setTimeout(function() {
+                var newRows = _getVisibleRows();
+                if (!newRows.length) { clearDetailPane(); return; }
+                var nextIdx = Math.min(curIdx, newRows.length - 1);
+                _kbSelectedIdx = nextIdx;
+                _applyKeyboardSelection(newRows);
+                var nextId = parseInt(newRows[nextIdx].getAttribute('data-id'));
+                if (nextId) selectTask(nextId);
+            }, 200);
+        }
     } else if (key === 'd') {
         var allowedD = VALID_TRANSITIONS[task.status];
         if (allowedD && allowedD.indexOf('dismissed') !== -1) {
