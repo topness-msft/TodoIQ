@@ -1895,7 +1895,13 @@ function showListOverflow(e) {
 }
 function showOverflow(anchor,items) {
   const m=document.getElementById('overflow-menu');
-  m.innerHTML=items.map(i=>i.sep?'<hr class="overflow-sep">':`<div class="overflow-item${i.danger?' danger':''}" onclick="event.stopPropagation();hideOverflow();(${i.action.toString()})()">${i.icon?`<span class="ov-icon">${i.icon}</span>`:''}${i.label}</div>`).join('');
+  window._overflowActions = items.filter(i=>!i.sep).map(i=>i.action);
+  let actionIdx = 0;
+  m.innerHTML=items.map(i=>{
+    if(i.sep) return '<hr class="overflow-sep">';
+    const idx = actionIdx++;
+    return `<div class="overflow-item${i.danger?' danger':''}" onclick="event.stopPropagation();hideOverflow();window._overflowActions[${idx}]()">${i.icon?`<span class="ov-icon">${i.icon}</span>`:''}${i.label}</div>`;
+  }).join('');
   const r=anchor.getBoundingClientRect();
   m.style.display='block';
   m.style.top=Math.min(r.bottom+4,innerHeight-m.offsetHeight-8)+'px';
