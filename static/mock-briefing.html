@@ -1114,7 +1114,7 @@ function openTaskPanel(id) {
 
   fetch('/api/tasks/' + id)
     .then(function(r) { return r.json(); })
-    .then(function(t) { renderTaskPanel(t); })
+    .then(function(data) { renderTaskPanel(data.task || data); })
     .catch(function(e) {
       panel.innerHTML = '<div class="bd-loading">Could not load task #' + id + '</div>';
     });
