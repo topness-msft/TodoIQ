@@ -66,6 +66,152 @@
     '.spin{display:inline-block;animation:briefing-spin 1.5s linear infinite}';
   document.head.appendChild(style);
 
+  // ── Person tasks panel ─────────────────────────────────
+  window._showPersonTasks = function (personName) {
+    var panel = document.getElementById('briefing-detail');
+    var overlay = document.getElementById('bd-overlay');
+    panel.innerHTML = '<div class="bd-loading">Loading tasks for ' + personName + '...</div>';
+    panel.classList.add('open');
+    overlay.classList.add('open');
+
+    fetch('/api/tasks?limit=2000')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var tasks = (data.tasks || data || []).filter(function (t) {
+          if (!t.key_people) return false;
+          try {
+            var kp = typeof t.key_people === 'string' ? JSON.parse(t.key_people) : t.key_people;
+            return kp.some(function (p) {
+              return (p.name || '').toLowerCase().indexOf(personName.toLowerCase()) >= 0;
+            });
+          } catch (e) { return false; }
+        });
+
+        if (!tasks.length) {
+          panel.innerHTML = '<div class="bd-header"><div class="bd-title">' + esc(personName) + '</div>' +
+            '<button class="bd-close" onclick="closeTaskPanel()">✕</button></div>' +
+            '<div class="bd-loading">No matching tasks found</div>';
+          return;
+        }
+
+        var statusOrder = { in_progress: 0, active: 1, waiting: 2, suggested: 3 };
+        tasks.sort(function (a, b) {
+          return (statusOrder[a.status] || 9) - (statusOrder[b.status] || 9) || a.priority - b.priority;
+        });
+
+        var statusColors = {
+          active: 'var(--accent)', in_progress: 'var(--success)', waiting: '#e65100',
+          suggested: 'var(--text-muted)', completed: 'var(--success)', dismissed: 'var(--text-muted)'
+        };
+
+        var html = '<div class="bd-header"><div class="bd-title">👤 ' + esc(personName) + '</div>' +
+          '<button class="bd-close" onclick="closeTaskPanel()">✕</button></div>' +
+          '<div class="bd-id">' + tasks.length + ' tasks</div><hr class="bd-sep">';
+
+        html += tasks.map(function (t) {
+          return '<div style="padding:8px 20px;cursor:pointer;border-bottom:1px solid var(--border)" ' +
+            'onclick="openTaskPanel(' + t.id + ')" onmouseover="this.style.background=\'var(--bg-hover)\'" ' +
+            'onmouseout="this.style.background=\'\'">' +
+            '<div style="font-size:13px;font-weight:500">#' + t.id + ' · ' + esc(t.title) + '</div>' +
+            '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' +
+            '<span style="color:' + (statusColors[t.status] || 'inherit') + '">' + esc(t.status) + '</span>' +
+            ' · P' + t.priority + '</div></div>';
+        }).join('');
+
+        panel.innerHTML = html;
+      })
+      .catch(function () {
+        panel.innerHTML = '<div class="bd-loading">Could not load tasks</div>';
+      });
+  };
+
+  // ── Button action handlers ─────────────────────────────
+  function handleAction(a) {
+    if (!a) return;
+    // Promote/dismiss/start/complete → task action API
+    if (a.action && a.task_id) {
+      fetch('/api/tasks/' + a.task_id + '/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: a.action })
+      }).then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.task) {
+            showToast((a.action === 'promote' ? 'Promoted' : a.action === 'start' ? 'Started' : 'Updated') + ' #' + a.task_id);
+          }
+        });
+      return;
+    }
+    // Skill generation (AI buttons)
+    if (a.type === 'ai' && a.task_id) {
+      fetch('/api/tasks/' + a.task_id + '/skill', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.ok) showToast('Generating skill output for #' + a.task_id + '...');
+          else showToast(d.message || 'Could not start skill', true);
+        });
+      openTaskPanel(a.task_id);
+      return;
+    }
+    // Open task in panel
+    if (a.task_id) {
+      openTaskPanel(a.task_id);
+      return;
+    }
+    // Navigate to TodoIQ
+    if (a.href) {
+      window.location.href = a.href;
+      return;
+    }
+  }
+
+  function showToast(msg, isError) {
+    var toast = document.createElement('div');
+    toast.style.cssText =
+      'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 20px;' +
+      'border-radius:8px;font-size:13px;font-weight:500;z-index:200;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:opacity 0.3s;' +
+      (isError ? 'background:#d13438;color:#fff' : 'background:var(--text);color:var(--bg)');
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(function () { toast.style.opacity = '0'; }, 2500);
+    setTimeout(function () { toast.remove(); }, 3000);
+  }
+
+  function actionButton(a, btnClass) {
+    var cls = btnClass || (a.type === 'ai' ? 'ai' : a.type === 'primary' ? 'primary' : 'secondary');
+    var prefix = a.type === 'ai' ? '✦ ' : '';
+    var dataAttr = '';
+    if (a.task_id) dataAttr += ' data-task-id="' + a.task_id + '"';
+    if (a.action) dataAttr += ' data-action="' + esc(a.action) + '"';
+    if (a.href) dataAttr += ' data-href="' + esc(a.href) + '"';
+    return '<button class="init-btn ' + cls + '"' + dataAttr + ' onclick="window._briefingAction(this)">' +
+      prefix + esc(a.label) + '</button>';
+  }
+
+  function insightActionButton(a) {
+    var cls = a.type === 'ai' ? 'ai' : a.type === 'primary' ? 'primary' : 'secondary';
+    var prefix = a.type === 'ai' ? '✦ ' : '';
+    var dataAttr = '';
+    if (a.task_id) dataAttr += ' data-task-id="' + a.task_id + '"';
+    if (a.action) dataAttr += ' data-action="' + esc(a.action) + '"';
+    if (a.href) dataAttr += ' data-href="' + esc(a.href) + '"';
+    return '<button class="insight-btn ' + cls + '"' + dataAttr + ' onclick="window._briefingAction(this)">' +
+      prefix + esc(a.label) + '</button>';
+  }
+
+  // Global click handler for action buttons
+  window._briefingAction = function (el) {
+    var a = {};
+    if (el.dataset.taskId) a.task_id = parseInt(el.dataset.taskId);
+    if (el.dataset.action) a.action = el.dataset.action;
+    if (el.dataset.href) a.href = el.dataset.href;
+    if (el.classList.contains('ai')) a.type = 'ai';
+    else if (el.classList.contains('primary')) a.type = 'primary';
+    else a.type = 'secondary';
+    handleAction(a);
+  };
+
   // ── Section renderers ────────────────────────────────────
 
   function renderAttention(data) {
@@ -93,6 +239,14 @@
               '<span class="it-meta">' + i.days_waiting + 'd waiting</span></div>';
           }).join('');
         }
+
+        // Wire up action buttons
+        var actionsEl = card.querySelector('.insight-actions');
+        if (actionsEl) {
+          actionsEl.innerHTML =
+            insightActionButton({ label: 'Draft quick check-ins', type: 'ai', task_id: items[0].task_id }) +
+            insightActionButton({ label: 'View all ' + items.length + ' waiting →', type: 'secondary', href: '/todo' });
+        }
       }
     }
   }
@@ -116,9 +270,7 @@
       var actions = '';
       if (init.actions && init.actions.length) {
         actions = '<div class="init-actions">' + init.actions.map(function (a) {
-          var cls = a.type === 'ai' ? 'ai' : a.type === 'primary' ? 'primary' : 'secondary';
-          var prefix = a.type === 'ai' ? '✦ ' : '';
-          return '<button class="init-btn ' + cls + '">' + prefix + esc(a.label) + '</button>';
+          return actionButton(a);
         }).join('') + '</div>';
       }
 
@@ -158,6 +310,57 @@
 
       var tasksEl = prepCard.querySelector('.insight-tasks');
       if (tasksEl) tasksEl.innerHTML = '';
+
+      // Replace single card body with per-meeting preps if available
+      if (cal.meeting_preps && cal.meeting_preps.length) {
+        var bodyEl = prepCard.querySelector('.insight-body');
+        if (bodyEl) bodyEl.innerHTML = '';
+        if (tasksEl) tasksEl.innerHTML = '';
+
+        // Insert meeting prep cards after the main prep card
+        var container = prepCard.parentNode;
+        // Remove any previously injected meeting cards
+        container.querySelectorAll('.meeting-prep-card').forEach(function (el) { el.remove(); });
+
+        cal.meeting_preps.forEach(function (mp) {
+          var card = document.createElement('div');
+          card.className = 'insight-card prep meeting-prep-card';
+          card.style.marginTop = '8px';
+
+          var taskRows = '';
+          if (mp.open_tasks && mp.open_tasks.length) {
+            taskRows = '<div class="insight-tasks" style="margin-top:6px">' +
+              mp.open_tasks.map(function (t) {
+                return '<div class="insight-task">' +
+                  '<span class="it-id">#' + t.id + '</span>' +
+                  '<span class="it-title">' + esc(t.title) + '</span>' +
+                  '<span class="it-meta">' + esc(t.status) + '</span></div>';
+              }).join('') + '</div>';
+          }
+
+          var actions = '';
+          if (mp.actions && mp.actions.length) {
+            actions = '<div class="insight-actions">' + mp.actions.map(function (a) {
+              return insightActionButton(a);
+            }).join('') + '</div>';
+          }
+
+          card.innerHTML =
+            '<div class="insight-icon">📅</div>' +
+            '<div class="insight-label">' + esc(mp.time) + '</div>' +
+            '<div class="insight-title">' + esc(mp.title) + '</div>' +
+            '<div class="insight-body" style="font-size:12px;color:var(--text-muted);margin-bottom:4px">' +
+            'With: ' + (mp.attendees || []).map(function (a) { return esc(a); }).join(', ') + '</div>' +
+            '<div class="insight-body">' + esc(mp.prep_insight || '') + '</div>' +
+            taskRows + actions;
+
+          container.insertBefore(card, prepCard.nextSibling);
+        });
+
+        // Update summary card to just show the count
+        prepCard.querySelector('.insight-title').innerHTML = esc(cal.today_summary);
+        if (bodyEl) bodyEl.innerHTML = cal.meeting_preps.length + ' meetings with prep notes below';
+      }
     }
 
     // Week load
@@ -198,7 +401,8 @@
         var badgeType = p.badge_type || 'risk';
         badge = '<span class="chip-badge ' + badgeType + '">' + esc(p.badge) + '</span>';
       }
-      return '<div class="person-chip">' +
+      return '<div class="person-chip" style="cursor:pointer" onclick="window._showPersonTasks(\'' +
+        esc(p.name).replace(/'/g, "\\'") + '\')">' +
         '<div class="person-avatar" style="background:' + (p.color || '#616161') + '">' +
         esc(p.initials || '') + '</div>' +
         '<div><div class="person-chip-name">' + esc(p.name) + '</div>' +
@@ -218,9 +422,7 @@
           var actionsEl = insightCard.querySelector('.insight-actions');
           if (actionsEl) {
             actionsEl.innerHTML = ri.actions.map(function (a) {
-              var cls = a.type === 'ai' ? 'ai' : a.type === 'primary' ? 'primary' : 'secondary';
-              var prefix = a.type === 'ai' ? '✦ ' : '';
-              return '<button class="insight-btn ' + cls + '">' + prefix + esc(a.label) + '</button>';
+              return insightActionButton(a);
             }).join('');
           }
         }

@@ -119,7 +119,7 @@ Output ONLY valid JSON (no markdown fences, no commentary) with this exact struc
       "task_ids": [450, 488, 513],
       "cos_narrative": "Full CoS narrative in HTML. Use <p> tags for paragraphs and <strong> for emphasis. Include Progress, Risk, and Next Actions sections.",
       "actions": [
-        {"label": "Action button text", "type": "primary|ai|secondary", "task_id": 450}
+        {"label": "Action button text", "type": "primary|ai|secondary", "task_id": 450, "action": "promote|start|null"}
       ]
     }
   ],
@@ -127,6 +127,18 @@ Output ONLY valid JSON (no markdown fences, no commentary) with this exact struc
     "today_summary": "5.5 hours of meetings — 1 has no agenda",
     "today_meetings": [
       {"time": "9:00 AM", "title": "Meeting name", "attendees": ["Name"], "has_agenda": true, "related_task_ids": [812]}
+    ],
+    "meeting_preps": [
+      {
+        "time": "9:00 AM",
+        "title": "Meeting name",
+        "attendees": ["Name One", "Name Two"],
+        "open_tasks": [{"id": 812, "title": "...", "status": "active"}],
+        "prep_insight": "CoS-style prep note: what to bring up, what to watch for, what commitments you made previously with these attendees. Be specific and actionable.",
+        "actions": [
+          {"label": "Build prep notes", "type": "ai", "task_id": 812}
+        ]
+      }
     ],
     "week_load": [
       {"day": "Wed", "hours": 5.5, "meeting_count": 6, "is_today": true}
@@ -150,7 +162,7 @@ Output ONLY valid JSON (no markdown fences, no commentary) with this exact struc
     "title": "Insight title",
     "body": "Insight body text",
     "actions": [
-      {"label": "Action text", "type": "ai|primary|secondary"}
+      {"label": "Action text", "type": "ai|primary|secondary", "task_id": 450}
     ]
   }
 }
@@ -162,6 +174,7 @@ Important:
 - Stale follow-ups: only include waiting tasks older than 7 days
 - People list: sorted by urgency (most stale/overdue first), max 8 people
 - Calendar week_load: next 5 business days
+- **Action buttons**: Every button MUST have a `task_id`. Use `"action": "promote"` for buttons that promote suggested tasks to active. Use `"type": "ai"` for buttons that should trigger AI skill generation (draft replies, build prep notes). Use `"type": "primary"` for direct actions, `"secondary"` for lower-priority. Buttons without `action` field will open the task detail panel.
 
 ## Step 4: Save to database
 

@@ -1125,6 +1125,27 @@ function closeTaskPanel() {
   document.getElementById('bd-overlay').classList.remove('open');
 }
 
+function dismissFromPanel(id) {
+  fetch('/api/tasks/' + id + '/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'dismiss' })
+  }).then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.task) {
+        // Re-render panel with updated status
+        renderTaskPanel(d.task);
+        // Show brief confirmation
+        var toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,0.15);background:var(--text);color:var(--bg)';
+        toast.textContent = 'Task #' + id + ' dismissed';
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.style.opacity = '0'; toast.style.transition = 'opacity 0.3s'; }, 2500);
+        setTimeout(function() { toast.remove(); }, 3000);
+      }
+    });
+}
+
 function renderTaskPanel(t) {
   var panel = document.getElementById('briefing-detail');
   var priColors = {1:'#d13438',2:'#e65100',3:'var(--accent)',4:'var(--text-muted)',5:'var(--text-muted)'};
@@ -1173,7 +1194,12 @@ function renderTaskPanel(t) {
     } catch(e) {}
   }
 
+  var dismissBtn = (t.status !== 'dismissed' && t.status !== 'completed' && t.status !== 'deleted')
+    ? '<button class="bd-btn secondary" onclick="dismissFromPanel(' + t.id + ')" style="color:var(--danger)">Dismiss</button>'
+    : '';
+
   var openInTodoIQ = '<div class="bd-footer"><a class="bd-btn primary" href="/todo" style="text-decoration:none;text-align:center">Open in TodoIQ</a>' +
+    dismissBtn +
     '<button class="bd-btn secondary" onclick="closeTaskPanel()">Close</button></div>';
 
   panel.innerHTML =
