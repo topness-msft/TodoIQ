@@ -1,4 +1,4 @@
-# TodoNess
+# TodoIQ
 
 Local AI-powered task manager that integrates with Microsoft 365 via WorkIQ MCP.
 
