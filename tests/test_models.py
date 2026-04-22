@@ -509,6 +509,148 @@ class TestModels(unittest.TestCase):
         self.assertEqual(task["priority"], 5)
         self.assertIn("Auto-downgraded", task["coaching_text"])
 
+    # ── Title-Based Dedup ──
+
+    def test_title_dedup_catches_paraphrased_duplicates(self):
+        """Real-world case: same person, same topic, different phrasing across chats."""
+        from src.models import create_task
+        people = '[{"name": "Ramakrishnan Raman", "email": "ramakrishnan.raman@microsoft.com"}]'
+        t1 = create_task(
+            title="Follow up with Ramakrishnan Raman on preferred question-collection process",
+            source_type="chat",
+            source_id="chat::ramakrishnan.raman@microsoft.com::question collection process",
+            key_people=people,
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Follow up with Ramakrishnan Raman on question intake method",
+            source_type="chat",
+            source_id="chat::ramakrishnan.raman@microsoft.com::question intake method chat",
+            key_people=people,
+            status="suggested",
+        )
+        self.assertEqual(t1["id"], t2["id"])
+
+    def test_title_dedup_catches_webinar_repo_variants(self):
+        """Real-world case: webinar trimming repo task surfaced 3 times."""
+        from src.models import create_task
+        people = '[{"name": "Vasavi Bhaviri Setty", "email": "vasavi.bhaviri@microsoft.com"}]'
+        t1 = create_task(
+            title="Try Vasavi's webinar-trimming GitHub repo and provide feedback",
+            source_type="chat",
+            source_id="chat::vasavi.bhaviri@microsoft.com::webinar trimming repo",
+            key_people=people,
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Test webinar trimming GitHub repo for Vasavi",
+            source_type="meeting",
+            source_id="meeting::vasavi.bhaviri@microsoft.com::webinar repo review",
+            key_people=people,
+            status="suggested",
+        )
+        self.assertEqual(t1["id"], t2["id"])
+
+    def test_title_dedup_different_topics_same_person_no_merge(self):
+        """Same person but genuinely different tasks should NOT dedup."""
+        from src.models import create_task
+        people = '[{"name": "Vasavi Bhaviri Setty", "email": "vasavi.bhaviri@microsoft.com"}]'
+        t1 = create_task(
+            title="Meet with Vasavi to identify webinar automation pilot areas",
+            source_type="meeting",
+            source_id="meeting::vasavi.bhaviri@microsoft.com::webinar automation pilot",
+            key_people=people,
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Confirm CAPE Scale EBC 1-slider with Vasavi",
+            source_type="chat",
+            source_id="chat::vasavi.bhaviri@microsoft.com::cape scale ebc slider",
+            key_people=people,
+            status="suggested",
+        )
+        self.assertNotEqual(t1["id"], t2["id"])
+
+    def test_title_dedup_completed_task_not_matched(self):
+        """Title dedup should NOT match against completed tasks."""
+        from src.models import create_task, transition_task
+        people = '[{"name": "Bill Spencer", "email": "bill.spencer@microsoft.com"}]'
+        t1 = create_task(
+            title="Follow up with Bill Spencer on speaker timing confirmation",
+            source_type="chat",
+            source_id="chat::bill.spencer@microsoft.com::speaker timing old",
+            key_people=people,
+            status="active",
+        )
+        transition_task(t1["id"], "completed")
+        t2 = create_task(
+            title="Follow up with Bill Spencer on allotted speaking time",
+            source_type="chat",
+            source_id="chat::bill.spencer@microsoft.com::speaking time new",
+            key_people=people,
+            status="suggested",
+        )
+        # Should be a new task since t1 is completed
+        self.assertNotEqual(t1["id"], t2["id"])
+
+    def test_title_dedup_no_people_no_match(self):
+        """Without people info, title dedup should not fire."""
+        from src.models import create_task
+        t1 = create_task(
+            title="Review the quarterly deck and finalize updates",
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Review the quarterly deck and finalize changes",
+            status="suggested",
+        )
+        self.assertNotEqual(t1["id"], t2["id"])
+
+    def test_title_dedup_augments_context(self):
+        """When title dedup matches, provenance should be saved as context."""
+        from src.models import create_task, get_contexts
+        people = '[{"name": "Mudit Agarwal", "email": "mudit.agarwal@microsoft.com"}]'
+        t1 = create_task(
+            title="Complete and submit Mudit's Connect feedback",
+            source_type="chat",
+            source_id="chat::mudit.agarwal@microsoft.com::connect feedback submit",
+            key_people=people,
+            source_snippet="Mudit asked for Connect feedback",
+            status="suggested",
+        )
+        t2 = create_task(
+            title="Complete Mudit Agarwal's Connect request",
+            source_type="chat",
+            source_id="chat::mudit.agarwal@microsoft.com::connect request completion",
+            key_people=people,
+            source_snippet="Mudit's Connect request needs completion",
+            status="suggested",
+        )
+        self.assertEqual(t1["id"], t2["id"])
+        contexts = get_contexts(t1["id"])
+        dedup_contexts = [c for c in contexts if c["context_type"] == "dedup"]
+        self.assertEqual(len(dedup_contexts), 1)
+        self.assertIn("title similarity", dedup_contexts[0]["content"])
+
+    def test_title_dedup_falls_back_to_source_id_person(self):
+        """Title dedup should work via source_id person even without key_people."""
+        from src.models import create_task
+        t1 = create_task(
+            title="Follow up with Bill Spencer on speaker timing confirmation",
+            source_type="chat",
+            source_id="chat::bill.spencer@microsoft.com::speaker timing old",
+            key_people='[{"name": "Bill Spencer", "email": "bill.spencer@microsoft.com"}]',
+            status="suggested",
+        )
+        # Second task has no key_people but same person in source_id
+        t2 = create_task(
+            title="Follow up with Bill Spencer on allotted speaking time",
+            source_type="chat",
+            source_id="chat::bill.spencer@microsoft.com::allotted time new",
+            status="suggested",
+        )
+        self.assertEqual(t1["id"], t2["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

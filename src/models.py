@@ -45,6 +45,9 @@ _STOP_WORDS = frozenset(
      'with', 'my', 're', 'fwd', 'up', 'is', 'be', 'do', 'it', 'we'}
 )
 
+# Unresolved statuses — title dedup only matches against these
+_UNRESOLVED = frozenset({'suggested', 'active', 'in_progress', 'waiting', 'snoozed'})
+
 
 def normalize_source_id(source_id: str) -> tuple[str, str, set[str]] | None:
     """Split a source_id into (source_type, person_alias, keyword_tokens).
@@ -152,6 +155,144 @@ def find_similar_source(
     return None
 
 
+# ── Title-Based Fuzzy Dedup ────────────────────────────────────────────────
+
+import re as _re
+
+_TITLE_STOP_WORDS = _STOP_WORDS | frozenset({
+    'follow', 'confirm', 'check', 'share', 'reply', 'respond', 'schedule',
+    'discuss', 'review', 'send', 'prepare', 'set', 'ask', 'ping', 'meet',
+    'draft', 'complete', 'submit', 'test', 'try', 'provide',
+    'address', 'update', 'finalize', 'next', 'steps', 'status',
+})
+
+_SUFFIX_MAP = {
+    'tion': '', 'sion': '', 'ing': '', 'ment': '', 'ness': '',
+    'ting': 't', 'ning': 'n', 'ming': 'm',
+}
+
+_SYNONYM_MAP = {
+    'repo': 'repository', 'github': 'repository',
+    'intake': 'collection', 'collected': 'collection',
+    'collect': 'collection', 'gathering': 'collection',
+    'collection': 'collection',
+    'question': 'question', 'questions': 'question',
+    'golive': 'golive', 'go-live': 'golive',
+    'timing': 'time', 'timeline': 'time', 'timed': 'time',
+    'speaker': 'speak', 'speaking': 'speak', 'talk': 'speak',
+    'allotted': 'speak',
+    'trimming': 'trim', 'trim': 'trim',
+    'webinar': 'webinar', 'webinars': 'webinar',
+    'deck': 'deck', 'slides': 'deck', 'slide': 'deck', 'presentation': 'deck',
+    'template': 'templates', 'templates': 'templates',
+    'feedback': 'feedback', 'report': 'feedback',
+    'conf': 'conference',
+}
+
+
+def _stem_token(word: str) -> str:
+    """Very simple suffix-stripping stemmer."""
+    if len(word) <= 5:
+        return word
+    for suffix, repl in _SUFFIX_MAP.items():
+        result = word[:-len(suffix)] + repl
+        if word.endswith(suffix) and len(result) >= 4:
+            return result
+    return word
+
+
+def _normalize_title_tokens(title: str) -> set[str]:
+    """Extract meaningful, normalized tokens from a task title."""
+    t = title.lower()
+    # Preserve compound terms before splitting
+    t = t.replace('go-live', 'golive').replace('go live', 'golive')
+    t = t.replace('-', ' ')
+    # Remove possessives before tokenizing
+    t = _re.sub(r"'s\b", '', t)
+    words = _re.findall(r'[a-z0-9]+', t)
+    tokens = set()
+    for w in words:
+        if w in _TITLE_STOP_WORDS or len(w) < 3:
+            continue
+        # Apply synonym mapping first, then stem
+        canonical = _SYNONYM_MAP.get(w)
+        if canonical:
+            tokens.add(canonical)
+        else:
+            tokens.add(_stem_token(w))
+    return tokens
+
+
+def find_similar_by_title(
+    conn: sqlite3.Connection,
+    title: str,
+    key_people: str | None = None,
+    source_id: str | None = None,
+    threshold: float = 0.35,
+) -> dict | None:
+    """Find an existing unresolved task with matching people and similar title.
+
+    Falls back to person alias from source_id when key_people is empty.
+    Returns the matching task dict, or None.
+    """
+    new_tokens = _normalize_title_tokens(title)
+    if len(new_tokens) < 2:
+        return None  # title too generic to dedup safely
+
+    # Gather person aliases from key_people and/or source_id
+    new_people = _extract_people_aliases(key_people)
+    source_person = None
+    if source_id:
+        parsed = normalize_source_id(source_id)
+        if parsed:
+            source_person = parsed[1]  # person_alias
+
+    if not new_people and not source_person:
+        return None  # need at least one person signal
+
+    # Fetch unresolved candidates
+    placeholders = ','.join('?' for _ in _UNRESOLVED)
+    rows = conn.execute(
+        f"SELECT * FROM tasks WHERE status IN ({placeholders}) AND title IS NOT NULL",
+        tuple(_UNRESOLVED),
+    ).fetchall()
+
+    for row in rows:
+        ex_people = _extract_people_aliases(row["key_people"])
+        ex_source_person = None
+        if row["source_id"]:
+            ex_parsed = normalize_source_id(row["source_id"])
+            if ex_parsed:
+                ex_source_person = ex_parsed[1]
+
+        # Require person overlap
+        person_overlap = False
+        if new_people and ex_people and (new_people & ex_people):
+            person_overlap = True
+        elif source_person and ex_source_person and source_person == ex_source_person:
+            person_overlap = True
+        elif source_person and ex_people and source_person in ex_people:
+            person_overlap = True
+        elif new_people and ex_source_person and ex_source_person in new_people:
+            person_overlap = True
+        if not person_overlap:
+            continue
+
+        ex_tokens = _normalize_title_tokens(row["title"])
+        if len(ex_tokens) < 2:
+            continue
+
+        overlap = new_tokens & ex_tokens
+        if len(overlap) < 2:
+            continue  # require at least 2 meaningful words in common
+
+        score = _jaccard(new_tokens, ex_tokens)
+        if score >= threshold:
+            return dict(row)
+
+    return None
+
+
 # ── Task CRUD ──────────────────────────────────────────────────────────────
 
 def create_task(
@@ -178,23 +319,49 @@ def create_task(
     """Create a new task and return it as a dict."""
     conn = get_connection()
     try:
-        # ── Dedup: exact match first, then fuzzy fallback ──
+        # ── Dedup: exact source_id → fuzzy source_id → title similarity ──
+        dedup_match = None
+        dedup_reason = None
+
         if source_id:
             exact = conn.execute(
                 "SELECT * FROM tasks WHERE source_id = ? AND status != 'deleted'",
                 (source_id,),
             ).fetchone()
             if exact:
-                logger.debug("Exact source_id match → existing task #%s", exact["id"])
-                return dict(exact)
+                dedup_match = dict(exact)
+                dedup_reason = "exact source_id"
 
-            fuzzy_match = find_similar_source(conn, source_id, source_type, key_people=key_people)
-            if fuzzy_match:
-                logger.info(
-                    "Fuzzy source_id dedup: new '%s' matched existing task #%s '%s'",
-                    source_id, fuzzy_match["id"], fuzzy_match["source_id"],
+            if not dedup_match:
+                fuzzy_match = find_similar_source(conn, source_id, source_type, key_people=key_people)
+                if fuzzy_match:
+                    dedup_match = fuzzy_match
+                    dedup_reason = "fuzzy source_id"
+
+        if not dedup_match:
+            title_match = find_similar_by_title(conn, title, key_people=key_people, source_id=source_id)
+            if title_match:
+                dedup_match = title_match
+                dedup_reason = "title similarity"
+
+        if dedup_match:
+            logger.info(
+                "Dedup (%s): new '%s' matched existing task #%s '%s'",
+                dedup_reason, title or source_id, dedup_match["id"], dedup_match["title"],
+            )
+            # Augment with new source context so we don't lose provenance
+            if source_snippet and dedup_reason != "exact source_id":
+                ctx = f"[Dedup — {dedup_reason}] Also surfaced as: {title}"
+                if source_id:
+                    ctx += f"\nSource: {source_id}"
+                if source_snippet:
+                    ctx += f"\nSnippet: {source_snippet[:300]}"
+                conn.execute(
+                    "INSERT INTO task_context (task_id, context_type, content, query_used) VALUES (?,?,?,?)",
+                    (dedup_match["id"], "dedup", ctx, None),
                 )
-                return fuzzy_match
+                conn.commit()
+            return dedup_match
 
         # Staleness guard: if source predates last refresh, it was already
         # available and either skipped or not surfaced — downgrade to P5.

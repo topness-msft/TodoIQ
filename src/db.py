@@ -173,6 +173,26 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE tasks ADD COLUMN source_date TEXT")
         conn.commit()
 
+    # Migrate task_context to support 'dedup' context_type
+    tc_schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_context'"
+    ).fetchone()
+    if tc_schema and "'dedup'" not in (tc_schema[0] or ""):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS task_context_new (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id       INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                context_type  TEXT NOT NULL
+                                  CHECK (context_type IN ('email_thread','meeting','calendar_event','suggestion','dedup')),
+                content       TEXT NOT NULL,
+                query_used    TEXT,
+                fetched_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            INSERT INTO task_context_new SELECT * FROM task_context;
+            DROP TABLE task_context;
+            ALTER TABLE task_context_new RENAME TO task_context;
+        """)
+
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
         r[0] for r in conn.execute(
@@ -250,7 +270,7 @@ CREATE TABLE IF NOT EXISTS task_context (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id       INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     context_type  TEXT NOT NULL
-                      CHECK (context_type IN ('email_thread','meeting','calendar_event','suggestion')),
+                      CHECK (context_type IN ('email_thread','meeting','calendar_event','suggestion','dedup')),
     content       TEXT NOT NULL,
     query_used    TEXT,
     fetched_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
