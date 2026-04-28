@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from .db import get_connection, init_db
+from .services import person_identity as _pi
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +403,14 @@ def create_task(
             ),
         )
         task_id = cursor.lastrowid
+        # Derive canonical person ids for this task (Change B integration).
+        try:
+            _pi.derive_task_persons(
+                conn, task_id,
+                key_people_json=key_people, source_id=source_id,
+            )
+        except Exception as e:
+            logger.warning(f"derive_task_persons failed for task {task_id}: {e}")
         conn.commit()
         return get_task(task_id, conn)
     finally:
@@ -460,6 +469,20 @@ def update_task(task_id: int, **fields) -> dict | None:
     conn = get_connection()
     try:
         conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+        # If the people-bearing fields changed, re-derive task_person.
+        if "key_people" in fields or "source_id" in fields:
+            row = conn.execute(
+                "SELECT key_people, source_id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is not None:
+                try:
+                    _pi.derive_task_persons(
+                        conn, task_id,
+                        key_people_json=row["key_people"],
+                        source_id=row["source_id"],
+                    )
+                except Exception as e:
+                    logger.warning(f"derive_task_persons failed for task {task_id}: {e}")
         conn.commit()
         return get_task(task_id, conn)
     finally:

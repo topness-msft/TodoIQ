@@ -232,56 +232,85 @@ Be aggressive about dedup — it's better to augment an existing task than to cr
 
 **If a match is found** (from any pass), decide based on the matched task's status:
 - **dismissed** → skip entirely, never re-suggest dismissed items
-- **active / in_progress / waiting / completed** → **augment**: update `source_snippet` with latest context if meaningfully new (e.g. new deadline, escalation). Update `source_date` and `updated_at`. Increment `updated_count`.
-- **suggested** → update `source_snippet`, `source_date`, and `priority` if the new item shows increased urgency. Increment `updated_count`.
+- **completed** → skip dedup; create a fresh suggestion. Completed tasks close the loop; re-occurrence is a legitimate new signal.
+- **active / in_progress / waiting / snoozed / suggested** → **augment**: source_date = MAX(existing, new), priority = MIN(existing, new), source_snippet replaced with newer context (older preserved as a `task_context` row of type 'dedup').
+
+Use the typed creation/augmentation service which atomically performs the
+status-conditional dedup-check + insert/update inside `BEGIN IMMEDIATE` so
+parallel refreshes can't race into duplicates:
 
 ```python
-# Augment existing task with newer context
-import sqlite3
-from datetime import datetime, timezone
+from src.services.refresh_dedup import create_or_refresh_suggestion
 
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
-now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-conn.execute(
-    "UPDATE tasks SET source_snippet = ?, source_date = COALESCE(?, source_date), priority = MIN(priority, ?), updated_at = ? WHERE id = ?",
-    (new_source_snippet, new_source_date, new_priority, now, existing_task_id)
+result = create_or_refresh_suggestion(
+    title=title,
+    description=description,
+    source_type=source_type,
+    source_id=source_id,
+    source_snippet=source_snippet,
+    source_date=source_date,
+    source_url=source_url,
+    key_people=key_people,
+    priority=priority,
+    action_type=action_type,
+    coaching_text=coaching_text,
 )
-conn.commit()
-conn.close()
+# result.outcome ∈ {'created', 'augmented', 'skipped_dismissed', 'skipped_completed'}
+# result.task is the resulting task dict (or matched task for skips)
+# result.matched_task_id / result.dedup_reason describe the dedup decision
 ```
+
+The service handles:
+  - exact source_id, fuzzy source_id, and title-similarity dedup checks
+  - status-conditional behavior (dismissed/completed skip, live augment)
+  - MAX semantics for `source_date` so older signals never clobber newer
+  - MIN semantics for `priority` so urgency only ratchets up
+  - automatic `task_person` derivation for the canonical person identity layer
+  - non-destructive provenance: augmentations append a `task_context` row
 
 **Note on flagged/categorized emails:** WorkIQ always returns these regardless of age. Normal dedup applies — if already in the DB, augment. But any *newly* flagged email that isn't already in the DB is always created as a suggestion.
 
-If no match found, create the task:
-
-```python
-import sqlite3
-from datetime import datetime, timezone
-
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
-now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-conn.execute(
-    """INSERT INTO tasks (title, description, status, parse_status, priority,
-       source_type, source_id, source_snippet, source_date, source_url, key_people,
-       action_type, coaching_text, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-    (title, description, 'suggested', 'parsed', priority,
-     source_type, source_id, source_snippet, source_date, source_url, key_people,
-     action_type, coaching_text, now, now)
-)
-conn.commit()
-conn.close()
-```
-
 **Staleness guard:** The `create_task()` function in `src/models.py` also enforces a code-side staleness check — suggested tasks with `source_date` older than 14 days (excluding emails) are auto-downgraded to P5. This is a safety net; the prompt-side filter above should catch most stale items before they reach the DB.
 
-Track counts: `created`, `updated` (augmented existing), `skipped` (dismissed), and counts by source type (`email`, `chat`, `meeting`).
+Track counts: `created`, `updated` (`outcome == 'augmented'`), `skipped` (`outcome` starts with `skipped_`), and counts by source type (`email`, `chat`, `meeting`).
 
 ## Step 4: Parse any unparsed tasks
 
 Check for tasks with `parse_status IN ('unparsed', 'queued')` — if any exist, run the same logic as `/todo-parse` to enrich them.
 
-## Step 5: Log the sync
+## Step 5: Shadow-mode LLM dedup cross-check
+
+After all task creation/augmentation is complete, run the shadow dedup module as a final post-check. This is **SHADOW MODE**: it does NOT delete, merge, dismiss, or change any tasks. It only writes `shadow_dup_of` and `shadow_dup_reason` annotations on newly-created tasks so a human can review potential duplicates via the dashboard. The Pass 1/2/3 dedup above remains the authoritative dedup — shadow dedup is an independent cross-check that uses batched LLM ratification against person-overlapping candidates.
+
+Run the CLI entry point from the project root and capture its JSON stdout. A 120-minute window covers edge cases where this refresh itself took up to ~2 hours:
+
+```python
+import json
+import subprocess
+
+shadow_proc = subprocess.run(
+    ['python', '-m', 'src.services.shadow_dedup', '--since', '120'],
+    cwd='$PROJECT_ROOT',
+    capture_output=True,
+    text=True,
+    timeout=600,
+)
+
+try:
+    shadow_summary = json.loads(shadow_proc.stdout.strip().splitlines()[-1])
+except (json.JSONDecodeError, IndexError):
+    shadow_summary = {
+        "ok": False,
+        "error": "failed to parse shadow dedup output",
+        "stdout": shadow_proc.stdout[-500:],
+        "stderr": shadow_proc.stderr[-500:],
+        "returncode": shadow_proc.returncode,
+    }
+```
+
+`shadow_summary` will look like `{"ok": true, "new_items": 14, "flagged": 6}`. It is attached to the sync_log `result_summary` in Step 6 below. Do not act on `flagged` — those annotations are for human review only.
+
+## Step 6: Log the sync
 
 ```python
 import json
@@ -294,7 +323,8 @@ summary = json.dumps({
     "meeting": meeting_count,
     "created": created_count,
     "updated": updated_count,
-    "skipped": skipped_count
+    "skipped": skipped_count,
+    "shadow_dedup": shadow_summary
 })
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
@@ -307,12 +337,12 @@ conn.commit()
 conn.close()
 ```
 
-## Step 6: Show summary
+## Step 7: Show summary
 
 Display a summary table:
 
 ```
-TodoNess Refresh Complete
+TodoIQ Refresh Complete
 ──────────────────────────────────────────────────
 Source       | Found | Created | Updated | Skipped
 ──────────────────────────────────────────────────

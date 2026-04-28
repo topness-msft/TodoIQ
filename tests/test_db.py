@@ -33,7 +33,11 @@ class TestDatabaseSchema(unittest.TestCase):
 
     def test_init_db_creates_all_tables(self):
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log"}
+        expected = {
+            "tasks", "task_context", "refresh_schedule", "sync_log",
+            "briefing_cache",
+            "person", "person_alias", "person_merge_history", "task_person",
+        }
         self.assertEqual(tables, expected)
 
     def test_tasks_table_columns(self):
@@ -47,6 +51,7 @@ class TestDatabaseSchema(unittest.TestCase):
             "source_date", "coaching_text", "action_type", "skill_output",
             "cowork_prompt", "key_people", "related_meeting", "user_notes",
             "waiting_activity", "suggestion_refreshed_at",
+            "shadow_dup_of", "shadow_dup_reason", "shadow_checked_at",
             "created_at", "updated_at",
         }
         self.assertEqual(cols, expected)
@@ -122,7 +127,11 @@ class TestDatabaseSchema(unittest.TestCase):
         # Running init_db a second time should not raise
         init_db(self.conn)
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log"}
+        expected = {
+            "tasks", "task_context", "refresh_schedule", "sync_log",
+            "briefing_cache",
+            "person", "person_alias", "person_merge_history", "task_person",
+        }
         self.assertEqual(tables, expected)
 
 

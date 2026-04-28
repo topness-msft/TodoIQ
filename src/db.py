@@ -14,6 +14,8 @@ def get_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Wait up to 5s for write locks rather than failing immediately on contention.
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -173,6 +175,18 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE tasks ADD COLUMN source_date TEXT")
         conn.commit()
 
+    # Add shadow dedup columns if missing (shadow-mode LLM dedup flags)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "shadow_dup_of" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN shadow_dup_of INTEGER")
+        conn.commit()
+    if "shadow_dup_reason" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN shadow_dup_reason TEXT")
+        conn.commit()
+    if "shadow_checked_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN shadow_checked_at TEXT")
+        conn.commit()
+
     # Migrate task_context to support 'dedup' context_type
     tc_schema = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_context'"
@@ -262,6 +276,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     user_notes      TEXT DEFAULT '',
     waiting_activity TEXT,
     suggestion_refreshed_at TEXT,
+    shadow_dup_of     INTEGER,
+    shadow_dup_reason TEXT,
+    shadow_checked_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -304,9 +321,48 @@ CREATE TABLE IF NOT EXISTS briefing_cache (
     error_message   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS person (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name        TEXT NOT NULL,
+    primary_email       TEXT,
+    aad_object_id       TEXT UNIQUE,
+    canonical_person_id INTEGER REFERENCES person(id),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS person_alias (
+    person_id    INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    alias_kind   TEXT NOT NULL CHECK (alias_kind IN ('aad','email','upn','name')),
+    alias_value  TEXT NOT NULL,
+    confidence   TEXT NOT NULL CHECK (confidence IN ('aad','email','user','inferred','name')),
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (alias_kind, alias_value, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS person_merge_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    losing_id    INTEGER NOT NULL,
+    winning_id   INTEGER NOT NULL,
+    reason       TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    undone_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_person (
+    task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    person_id   INTEGER NOT NULL REFERENCES person(id),
+    role        TEXT NOT NULL CHECK (role IN ('sender','key_people','attendee')),
+    PRIMARY KEY (task_id, person_id, role)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_task_context_task_id ON task_context(task_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_next ON refresh_schedule(next_refresh_at);
+CREATE INDEX IF NOT EXISTS idx_person_email ON person(primary_email);
+CREATE INDEX IF NOT EXISTS idx_person_canonical ON person(canonical_person_id);
+CREATE INDEX IF NOT EXISTS idx_person_alias_value ON person_alias(alias_value);
+CREATE INDEX IF NOT EXISTS idx_task_person_person ON task_person(person_id);
 """
