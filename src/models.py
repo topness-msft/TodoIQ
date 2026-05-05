@@ -188,6 +188,29 @@ _SYNONYM_MAP = {
     'template': 'templates', 'templates': 'templates',
     'feedback': 'feedback', 'report': 'feedback',
     'conf': 'conference',
+    # Topic abbreviations (added 2026-05-05 to fix paraphrase-driven dedup misses)
+    # Each entry collapses common shorthand to a canonical token so titles like
+    # "A365 training reuse" and "Agent 365 training approach" share tokens.
+    'a365': 'agent365', 'agent365': 'agent365',
+    'cad': 'cad', 'customer-acceleration-day': 'cad',
+    'cab': 'cab', 'advisory': 'cab', 'advisories': 'cab',
+    'ae': 'agentexcellence', 'agentexcellence': 'agentexcellence',
+    'ks': 'kickstarter', 'kickstarter': 'kickstarter',
+    'ebc': 'ebc', 'briefing': 'ebc',
+    'po': 'po', 'pos': 'po', 'docusign': 'po', 'docusigned': 'po',
+    'okrs': 'okrs', 'okr': 'okrs', 'kr': 'okrs',
+    'cpm': 'cpm', 'frontier': 'frontier',
+    'csu': 'csu', 'fasttrack': 'fasttrack',
+    'snd': 'snd',
+    'sce': 'sce',
+    'tap': 'tap',
+    'pab': 'pab',
+    'attendance': 'attend', 'attending': 'attend', 'attend': 'attend',
+    'participation': 'attend', 'participate': 'attend', 'participating': 'attend',
+    'rejoin': 'attend', 'rejoining': 'attend',
+    'reuse': 'reuse', 're-use': 'reuse', 'reusing': 'reuse',
+    'momentum': 'reuse',
+    'install': 'install', 'installing': 'install', 'installation': 'install',
 }
 
 
@@ -205,8 +228,25 @@ def _stem_token(word: str) -> str:
 def _normalize_title_tokens(title: str) -> set[str]:
     """Extract meaningful, normalized tokens from a task title."""
     t = title.lower()
-    # Preserve compound terms before splitting
-    t = t.replace('go-live', 'golive').replace('go live', 'golive')
+    # Preserve multi-word compound terms before they get split into single tokens.
+    # Order matters: longer phrases first.
+    _MULTI_WORD = (
+        ('go-live', 'golive'),
+        ('go live', 'golive'),
+        ('customer acceleration day', 'cad'),
+        ('customer advisory board', 'cab'),
+        ('agent excellence', 'agentexcellence'),
+        ('agent 365', 'agent365'),
+        ('a365', 'agent365'),
+        ('m365', 'm365'),
+        ('frontier transformation', 'frontier'),
+        ('power up', 'powerup'),
+        ('trim webinar', 'trimwebinar'),
+        ('trim-webinar', 'trimwebinar'),
+        ('po status', 'po'),
+    )
+    for src, dst in _MULTI_WORD:
+        t = t.replace(src, dst)
     t = t.replace('-', ' ')
     # Remove possessives before tokenizing
     t = _re.sub(r"'s\b", '', t)
@@ -230,8 +270,18 @@ def find_similar_by_title(
     key_people: str | None = None,
     source_id: str | None = None,
     threshold: float = 0.35,
+    include_resolved: bool = False,
 ) -> dict | None:
-    """Find an existing unresolved task with matching people and similar title.
+    """Find an existing task with matching people and similar title.
+
+    By default (`include_resolved=False`) only scans unresolved tasks
+    (suggested/active/in_progress/waiting/snoozed) — used by the augment
+    path so we never re-augment a closed task.
+
+    With `include_resolved=True` the scan also returns dismissed/completed
+    matches. Refresh dedup uses this so the "skip dismissed" policy applies
+    to title-only matches too — without this flag, paraphrased re-surfaces
+    of a dismissed conversation create ghost duplicates every refresh.
 
     Falls back to person alias from source_id when key_people is empty.
     Returns the matching task dict, or None.
@@ -251,14 +301,26 @@ def find_similar_by_title(
     if not new_people and not source_person:
         return None  # need at least one person signal
 
-    # Fetch unresolved candidates
-    placeholders = ','.join('?' for _ in _UNRESOLVED)
+    # Build candidate query. Default: unresolved only. With include_resolved,
+    # also pull dismissed/completed so the dedup caller can apply the
+    # status-conditional skip-dismissed / skip-completed policy.
+    if include_resolved:
+        statuses = _UNRESOLVED | {'dismissed', 'completed'}
+    else:
+        statuses = _UNRESOLVED
+    placeholders = ','.join('?' for _ in statuses)
     rows = conn.execute(
         f"SELECT * FROM tasks WHERE status IN ({placeholders}) AND title IS NOT NULL",
-        tuple(_UNRESOLVED),
+        tuple(statuses),
     ).fetchall()
 
-    for row in rows:
+    # When include_resolved=True, prefer unresolved matches over dismissed/
+    # completed so an active task takes priority over a closed one if both
+    # match. Search unresolved first; fall back to resolved.
+    unresolved_rows = [r for r in rows if r["status"] in _UNRESOLVED]
+    resolved_rows = [r for r in rows if r["status"] not in _UNRESOLVED]
+
+    for row in unresolved_rows + resolved_rows:
         ex_people = _extract_people_aliases(row["key_people"])
         ex_source_person = None
         if row["source_id"]:

@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -65,6 +67,67 @@ def _max_date(a: str | None, b: str | None) -> str | None:
     if not b:
         return a
     return a if a >= b else b
+
+
+# Teams message URLs embed the originating message's createdTime as a
+# 13-digit millisecond Unix timestamp inside the path: ".../1770135153375?...".
+# WorkIQ has been observed misreporting `Date` for old Teams messages
+# (drift of 30–90 days), causing stale conversations to surface as fresh
+# suggestions. When the URL provides a verifiable original timestamp, we
+# trust it over WorkIQ's claim if the drift exceeds the threshold.
+_TEAMS_URL_TS_RE = re.compile(r'/(\d{13})(?:\?|$)')
+_URL_RECONCILE_THRESHOLD_DAYS = 14
+
+
+def _extract_teams_url_date(source_url: str | None) -> str | None:
+    """Return the ISO date embedded in a Teams chat URL, or None."""
+    if not source_url or "teams.microsoft.com" not in source_url:
+        return None
+    decoded = urllib.parse.unquote(source_url)
+    m = _TEAMS_URL_TS_RE.search(decoded)
+    if not m:
+        return None
+    try:
+        ms = int(m.group(1))
+        # Sanity bound: 1990-01-01 .. 2100-01-01 in ms.
+        if ms < 631_152_000_000 or ms > 4_102_444_800_000:
+            return None
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
+    except (ValueError, OSError):
+        return None
+
+
+def _reconcile_source_date_with_url(
+    source_date: str | None,
+    source_url: str | None,
+    *,
+    threshold_days: int = _URL_RECONCILE_THRESHOLD_DAYS,
+) -> tuple[str | None, str | None]:
+    """If a Teams URL has an embedded timestamp older than `source_date` by
+    more than `threshold_days`, return the URL timestamp instead.
+
+    Returns (reconciled_date, log_reason). reconciled_date is the date to
+    actually persist. log_reason is non-None when reconciliation occurred.
+    """
+    url_date = _extract_teams_url_date(source_url)
+    if not url_date:
+        return source_date, None
+    if not source_date:
+        # No reported date at all — trust the URL.
+        return url_date, f"using Teams URL date {url_date} (no source_date provided)"
+    try:
+        reported_d = datetime.strptime(source_date[:10], "%Y-%m-%d").date()
+        url_d = datetime.strptime(url_date, "%Y-%m-%d").date()
+    except ValueError:
+        return source_date, None
+    drift = (reported_d - url_d).days
+    if drift > threshold_days:
+        return (
+            url_date,
+            f"WorkIQ source_date drift +{drift}d "
+            f"(reported {source_date[:10]}, URL {url_date}); using URL date",
+        )
+    return source_date, None
 
 
 def create_or_refresh_suggestion(
@@ -135,6 +198,16 @@ def _decide_and_apply(
     action_type: str,
     coaching_text: str | None,
 ) -> CreateRefreshResult:
+    # ── Reconcile source_date against Teams URL timestamp (if present).
+    # WorkIQ has been observed misreporting `Date` for old Teams messages;
+    # the URL embeds the originating message's createdTime as ground truth.
+    reconciled_date, reconcile_reason = _reconcile_source_date_with_url(
+        source_date, source_url,
+    )
+    if reconcile_reason:
+        logger.warning(reconcile_reason)
+        source_date = reconciled_date
+
     # ── Dedup search: exact source_id → fuzzy → title similarity ────────
     matched: sqlite3.Row | dict | None = None
     reason: str | None = None
@@ -155,8 +228,14 @@ def _decide_and_apply(
                 reason = "fuzzy source_id"
 
     if matched is None:
+        # Pass 3: title similarity. Include dismissed/completed so the
+        # status-conditional skip-dismissed / skip-completed policy below
+        # also applies to title-only matches (otherwise paraphrased
+        # re-surfaces of a dismissed conversation create ghost duplicates
+        # every refresh).
         title_match = find_similar_by_title(
             conn, title, key_people=key_people, source_id=source_id,
+            include_resolved=True,
         )
         if title_match is not None:
             matched = title_match
