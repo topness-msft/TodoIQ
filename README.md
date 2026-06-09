@@ -10,6 +10,28 @@ TodoNess scans your Teams messages, meetings, and flagged emails to surface acti
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - WorkIQ MCP configured in Claude Code settings
 
+### WorkIQ MCP configuration (headless reliability)
+
+TodoIQ's scheduled scans (`/todo-refresh`, `/suggestion-check`) run as headless
+`copilot -p` subprocesses. Configure the `workiq` MCP server to launch the **local
+bundled binary** rather than `npx`, so it connects before Copilot's MCP handshake
+window closes on a cold start:
+
+```jsonc
+// ~/.copilot/mcp-config.json
+"workiq": {
+  "type": "stdio",
+  "command": "C:\\Users\\<you>\\.copilot\\bin\\workiq.cmd",
+  "args": ["mcp"]
+}
+```
+
+Using `npx -y @microsoft/workiq mcp` adds a registry round-trip that can lose the
+cold-start race in headless runs, producing intermittent
+`WorkIQ MCP not connected in this session` errors. The skills also probe WorkIQ
+with a short retry before scanning and never overwrite task state on a
+connection-level failure, so a missed cold start self-heals on the next cycle.
+
 ## Quick Start
 
 ```bash
