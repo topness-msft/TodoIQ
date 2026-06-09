@@ -40,6 +40,19 @@ else:
 
 Report the sync window: "Scanning the last {days_since} day(s)..."
 
+## Step 1c: WorkIQ connection check (cold-start handling)
+
+The WorkIQ MCP server can take a few seconds to connect on a cold start (especially in headless `copilot -p` runs). A transient "tool not available / not connected" at session start does **not** mean WorkIQ is down — it usually means the MCP server hadn't finished its handshake yet.
+
+Before treating WorkIQ as unavailable:
+
+1. Make a tiny probe call to `ask_work_iq` (e.g. ask "What is the subject of my most recent email?").
+2. If it succeeds, proceed normally to Step 2a.
+3. If it fails with a connection/availability error (tool missing, "not connected", MCP error), **wait ~20 seconds and retry the probe once**. The server is likely still warming up.
+4. If the retry also fails, **abort the refresh cleanly**: do NOT write a `sync_log` success entry, do NOT create or modify any tasks, and do NOT fabricate results. Print a short note that WorkIQ was unreachable so the next scheduled run retries. Leaving state untouched is correct — a missed cold-start scan self-heals on the next cycle.
+
+Only proceed to the scan steps below once a probe call to `ask_work_iq` has actually returned data.
+
 ## Step 2a: WorkIQ scan (Teams + Meetings)
 
 Call `ask_work_iq` with ONE query for Teams messages and meeting action items. WorkIQ returns **structured task suggestions** with resolved names, descriptions, and action types — so Claude does NOT need to interpret raw text.
