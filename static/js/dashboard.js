@@ -228,31 +228,34 @@ function pollParseStatus() {
     });
     if (!pending.length) return;
 
-    // Re-fetch all tasks and update any that changed
-    fetch('/api/tasks')
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            var updated = false;
-            (data.tasks || []).forEach(function(fresh) {
-                var existing = tasks.find(function(t) { return t.id === fresh.id; });
-                if (existing) {
-                    // Check if parse_status changed or other fields updated
-                    if (existing.parse_status !== fresh.parse_status ||
-                        existing.updated_at !== fresh.updated_at) {
-                        Object.assign(existing, fresh);
-                        updated = true;
-                    }
-                }
-            });
-            if (updated) {
-                renderTaskList();
-                if (selectedTaskId) {
-                    var sel = tasks.find(function(t) { return t.id === selectedTaskId; });
-                    if (sel) renderDetailPane(sel);
-                }
+    // Fetch each pending task by id. A list fetch can't be used here: /api/tasks
+    // is capped at 200 rows ordered by priority, so a newly added task often
+    // falls outside the window and would never appear to finish parsing.
+    Promise.all(pending.map(function(t) {
+        return fetch('/api/tasks/' + t.id)
+            .then(function(res) { return res.ok ? res.json() : null; })
+            .catch(function() { return null; });
+    })).then(function(results) {
+        var updated = false;
+        results.forEach(function(data) {
+            var fresh = data && data.task;
+            if (!fresh) return;
+            var existing = tasks.find(function(t) { return t.id === fresh.id; });
+            if (!existing) return;
+            if (existing.parse_status !== fresh.parse_status ||
+                existing.updated_at !== fresh.updated_at) {
+                Object.assign(existing, fresh);
+                updated = true;
             }
-        })
-        .catch(function() {}); // Silent fail on poll
+        });
+        if (updated) {
+            renderTaskList();
+            if (selectedTaskId) {
+                var sel = tasks.find(function(t) { return t.id === selectedTaskId; });
+                if (sel) renderDetailPane(sel);
+            }
+        }
+    });
 }
 
 // ── Input Bar ──────────────────────────────────────────────────────────
