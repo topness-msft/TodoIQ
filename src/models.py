@@ -74,8 +74,27 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
+def _name_to_alias(name: str | None) -> str | None:
+    """Derive a first.last-style alias from a display name.
+
+    'Chitra J' -> 'chitra.j'; 'Simo Slaoui (Cloverbase Limited)' -> 'simo.slaoui'.
+    Returns None when no usable name parts remain.
+    """
+    if not name:
+        return None
+    cleaned = _re.sub(r'\([^)]*\)', ' ', name)
+    parts = [p for p in _re.findall(r"[A-Za-z]+", cleaned) if p]
+    if not parts:
+        return None
+    return '.'.join(p.lower() for p in parts)
+
+
 def _extract_people_aliases(key_people_json: str | None) -> set[str]:
-    """Extract lowercase email-prefix aliases from key_people JSON.
+    """Extract lowercase person aliases from key_people JSON.
+
+    Emits the email-prefix alias AND a name-derived first.last alias, so the
+    same person still matches when WorkIQ resolves them to a different SMTP
+    alias between refreshes (e.g. 'chjaya@' one run, 'chitra.j@' the next).
 
     Given '[{"name": "John Wheat", "email": "john.wheat@microsoft.com"}]',
     returns {'john.wheat'}.
@@ -84,13 +103,21 @@ def _extract_people_aliases(key_people_json: str | None) -> set[str]:
         return set()
     try:
         people = json.loads(key_people_json)
-        return {
-            p["email"].lower().split("@")[0]
-            for p in people
-            if isinstance(p, dict) and p.get("email")
-        }
     except (json.JSONDecodeError, TypeError):
         return set()
+    aliases: set[str] = set()
+    if not isinstance(people, list):
+        return aliases
+    for p in people:
+        if not isinstance(p, dict):
+            continue
+        email = p.get("email")
+        if email and isinstance(email, str):
+            aliases.add(email.lower().split("@")[0])
+        name_alias = _name_to_alias(p.get("name") if isinstance(p.get("name"), str) else None)
+        if name_alias:
+            aliases.add(name_alias)
+    return aliases
 
 
 def _person_match(
