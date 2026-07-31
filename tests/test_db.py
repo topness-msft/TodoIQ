@@ -45,6 +45,8 @@ class TestDatabaseSchema(unittest.TestCase):
             "source_type", "source_id", "source_url", "source_snippet",
             "coaching_text", "key_people", "related_meeting", "user_notes",
             "suggestion_refreshed_at", "created_at", "updated_at",
+            "action_type", "is_quick_hit", "error_message", "cowork_prompt",
+            "snoozed_until", "skill_output", "waiting_activity",
         }
         self.assertEqual(cols, expected)
 

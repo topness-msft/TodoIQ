@@ -404,12 +404,13 @@ def get_last_sync(sync_type: str | None = None) -> dict | None:
     try:
         if sync_type:
             row = conn.execute(
-                "SELECT * FROM sync_log WHERE sync_type = ? ORDER BY synced_at DESC LIMIT 1",
+                "SELECT * FROM sync_log WHERE sync_type = ? "
+                "ORDER BY synced_at DESC, id DESC LIMIT 1",
                 (sync_type,),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT * FROM sync_log ORDER BY synced_at DESC LIMIT 1"
+                "SELECT * FROM sync_log ORDER BY synced_at DESC, id DESC LIMIT 1"
             ).fetchone()
         return _row_to_dict(row)
     finally:
