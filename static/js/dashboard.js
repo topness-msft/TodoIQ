@@ -2755,9 +2755,7 @@ var _cwActions = {};
 var _cwLoading = {};
 var _cwEditing = {};
 var _cwRedo = {};
-var _cwPollTimer = null;
-var _cwPollCount = 0;
-var _cwPollTask = null;
+var _cwPollers = {};
 var _cwStartedAt = {};
 
 var CW_POLL_MS = 3000;
@@ -2853,6 +2851,7 @@ function renderCoworkCard(task) {
     }
 
     if (a && a.state === 'previewing') {
+        if (!_cwPollers[task.id]) startCoworkPoller(task.id);
         return cwShell('is-running', 'read-only', task,
             cwIntentBlock(task, false)
             + '<div class="cw-progress"><span class="cw-spinner"></span>'
@@ -3024,23 +3023,25 @@ function cwDiscard(taskId) {
 // /api/runner-status and terminates on skill_output — neither applies here.
 
 function startCoworkPoller(taskId) {
-    stopCoworkPoller();
-    _cwPollTask = taskId;
-    _cwPollCount = 0;
-    _cwPollTimer = setInterval(function() { pollCoworkStatus(taskId); }, CW_POLL_MS);
+    stopCoworkPoller(taskId);
+    _cwPollers[taskId] = {
+        count: 0,
+        timer: setInterval(function() { pollCoworkStatus(taskId); }, CW_POLL_MS)
+    };
 }
 
-function stopCoworkPoller() {
-    if (_cwPollTimer) {
-        clearInterval(_cwPollTimer);
-        _cwPollTimer = null;
-    }
-    _cwPollTask = null;
+function stopCoworkPoller(taskId) {
+    var poller = _cwPollers[taskId];
+    if (!poller) return;
+    clearInterval(poller.timer);
+    delete _cwPollers[taskId];
 }
 
 function pollCoworkStatus(taskId) {
-    if (++_cwPollCount > CW_POLL_MAX) {
-        stopCoworkPoller();
+    var poller = _cwPollers[taskId];
+    if (!poller) return;
+    if (++poller.count > CW_POLL_MAX) {
+        stopCoworkPoller(taskId);
         return;
     }
 
@@ -3058,7 +3059,7 @@ function pollCoworkStatus(taskId) {
             if (!action) return;
             _cwActions[taskId] = action;
             if (action.state !== 'previewing') {
-                stopCoworkPoller();
+                stopCoworkPoller(taskId);
                 cwRerender(taskId);
             }
         })

@@ -463,8 +463,7 @@ if (typeof doSnooze === 'function') {
 
 const CW_POLL_MS = 3000;
 const CW_POLL_MAX = 235;   // ~700s, just past the runner's 660s timeout
-let _cwPollTimer = null;
-let _cwPollCount = 0;
+const _cwPollers = {};
 let _cwStartedAt = {};
 
 function cwApply(t, action) {
@@ -600,17 +599,24 @@ function cwDiscard(id) {
 }
 
 function cwStartPoller(id) {
-  cwStopPoller();
-  _cwPollCount = 0;
-  _cwPollTimer = setInterval(() => cwPoll(id), CW_POLL_MS);
+  cwStopPoller(id);
+  _cwPollers[id] = {
+    count: 0,
+    timer: setInterval(() => cwPoll(id), CW_POLL_MS)
+  };
 }
 
-function cwStopPoller() {
-  if (_cwPollTimer) { clearInterval(_cwPollTimer); _cwPollTimer = null; }
+function cwStopPoller(id) {
+  const poller = _cwPollers[id];
+  if (!poller) return;
+  clearInterval(poller.timer);
+  delete _cwPollers[id];
 }
 
 async function cwPoll(id) {
-  if (++_cwPollCount > CW_POLL_MAX) return cwStopPoller();
+  const poller = _cwPollers[id];
+  if (!poller) return;
+  if (++poller.count > CW_POLL_MAX) return cwStopPoller(id);
 
   const hb = document.getElementById(`cw-hb-${id}`);
   if (hb) hb.textContent = cwFormatElapsed(id);
@@ -621,10 +627,10 @@ async function cwPoll(id) {
     const data = await res.json();
     if (!data.action) return;
     const t = cwTask(id);
-    if (!t) return cwStopPoller();
+    if (!t) return cwStopPoller(id);
     cwApply(t, data.action);
     if (t.cw_state !== 'previewing') {
-      cwStopPoller();
+      cwStopPoller(id);
       cwRerender(id);
     }
   } catch (e) { /* silent */ }
@@ -637,6 +643,7 @@ async function cwPoll(id) {
     _prev(id);
     const t = cwTask(id);
     if (t && t.action_type && t.status !== 'suggested' && !t.cw_loaded) cwLoad(id);
+    if (t && t.cw_state === 'previewing' && !_cwPollers[id]) cwStartPoller(id);
   };
 })();
 
