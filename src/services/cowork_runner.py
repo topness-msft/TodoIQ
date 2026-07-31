@@ -469,3 +469,282 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
         )
 
     return result
+
+
+# ===========================================================================
+# Preview subprocess runner
+# ===========================================================================
+#
+# SAFETY MODEL — read before changing anything below.
+#
+#   --deny-tools ............. NOT a control. G1 sent a real email with it set.
+#                              It denies tool *approval requests*; M365 write
+#                              tools never raise one. Never reintroduce it.
+#   --tool-callback-config ... The only empirically proven control (G1b).
+#                              static_results returns a canned string *instead
+#                              of* executing the tool.
+#
+# This is DEFENCE IN DEPTH, not a sandbox. G1c enumerated 80 write tools, and
+# among them `graph-CallGraph` ("Direct Graph POST/PUT/PATCH") is a universal
+# bypass, while `host-SetupScheduledPrompt` runs work after this process exits.
+# A denylist over an open set can never be proven complete. The only hard
+# guarantee in Phase 1 is structural: there is no execute endpoint at all.
+#
+# Do NOT treat `tool_trace[].ok` as evidence of what happened. It was True in
+# both G1 (email sent) and G1b (intercepted) — it records the call, not the
+# execution.
+
+import logging
+import os
+import subprocess
+import threading
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+LOG_DIR = PROJECT_ROOT / "data" / "logs"
+WRITE_TOOLS_PATH = Path(__file__).resolve().parent / "cowork_write_tools.json"
+
+# claude_runner's 300s default would kill a live Cowork session mid-flight.
+COWORK_TIMEOUT = 660
+
+_BLOCK_MESSAGE = (
+    "BLOCKED: TodoIQ preview mode intercepted this call. "
+    "Nothing was sent, saved or modified. Do not retry, and do not attempt "
+    "another tool to achieve the same effect. Report the draft instead."
+)
+
+_CALLBACK_TIMEOUT = 30
+
+
+class AlreadyRunning(RuntimeError):
+    """A preview is already in flight for this task."""
+
+
+# label -> {"proc":, "thread":, "result": dict|None}
+_runs: dict = {}
+_runs_lock = threading.Lock()
+
+
+def reset_registry() -> None:
+    """Test hook. Drops all tracked runs without touching live processes."""
+    with _runs_lock:
+        _runs.clear()
+
+
+def preview_label(task_id) -> str:
+    """LOAD-BEARING. Must not start with 'skill:'.
+
+    claude_runner.py:123 guards `if not label.startswith("skill:"): return`, so
+    a 'skill:'-prefixed label would persist this runner's 21KB CLI payload into
+    tasks.skill_output and corrupt the Skill Output card.
+    """
+    return f"cowork:preview:{task_id}"
+
+
+def load_write_tools() -> list:
+    """The 80 write tools enumerated by probe G1c."""
+    return json.loads(WRITE_TOOLS_PATH.read_text(encoding="utf-8"))
+
+
+def _tool_aliases(name: str) -> list:
+    """Qualified name plus its bare suffix.
+
+    G1b's working config carried both qualified ("outlook-SendEmail") and bare
+    ("SendEmail") forms, so we never learned which one the CLI matches on.
+    Including both costs nothing and removes the guess.
+    """
+    out = [name]
+    if "-" in name:
+        bare = name.split("-", 1)[1]
+        if bare and bare not in out:
+            out.append(bare)
+    return out
+
+
+def build_callback_config(task_id, log_dir=None) -> Path:
+    """Write the per-run interception config and return its path."""
+    log_dir = Path(log_dir) if log_dir else LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    names: list = []
+    for tool in load_write_tools():
+        for alias in _tool_aliases(tool):
+            if alias not in names:
+                names.append(alias)
+
+    config = {
+        "tool_names": names,
+        "static_results": {n: _BLOCK_MESSAGE for n in names},
+        "callback_hints": {},
+        "timeout_seconds": _CALLBACK_TIMEOUT,
+    }
+
+    path = log_dir / f"cowork_deny_{task_id}.json"
+    path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    return path
+
+
+def write_prompt_file(task_id, prompt: str, log_dir=None) -> Path:
+    """Prompts go via file, never argv.
+
+    Two reasons: they contain newlines, and 23 real tasks (1.2%) contain
+    characters cp1252 cannot encode. encoding='utf-8' here is not optional.
+    """
+    log_dir = Path(log_dir) if log_dir else LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"cowork_prompt_{task_id}.txt"
+    path.write_text(prompt, encoding="utf-8")
+    return path
+
+
+def build_argv(prompt_path, config_path, refs=None) -> list:
+    argv = [
+        "cowork",
+        "send",
+        "--json",
+        "--tool-callback-config",
+        str(config_path),
+        "--prompt-file",
+        str(prompt_path),
+    ]
+    for ref in refs or []:
+        argv += ["--ref", ref]
+    return argv
+
+
+def _spawn_default(argv, **kwargs):
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.Popen(argv, **kwargs)
+
+
+def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> str:
+    """Spawn a preview run and return its label. Non-blocking."""
+    label = preview_label(task_id)
+
+    with _runs_lock:
+        entry = _runs.get(label)
+        if entry is not None and entry["result"] is None:
+            raise AlreadyRunning(label)
+        _runs[label] = {"proc": None, "thread": None, "result": None}
+
+    config_path = build_callback_config(task_id, log_dir=log_dir)
+    prompt_path = write_prompt_file(task_id, prompt, log_dir=log_dir)
+    argv = build_argv(prompt_path, config_path, refs)
+
+    spawn = spawn or _spawn_default
+    try:
+        proc = spawn(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
+        with _runs_lock:
+            _runs[label]["result"] = _failure(f"Failed to launch Cowork: {exc}")
+        return label
+
+    thread = threading.Thread(
+        target=_collect,
+        args=(label, proc, task_id, Path(log_dir) if log_dir else LOG_DIR),
+        daemon=True,
+        name=f"cowork-{task_id}",
+    )
+
+    with _runs_lock:
+        _runs[label]["proc"] = proc
+        _runs[label]["thread"] = thread
+
+    thread.start()
+    return label
+
+
+def _failure(error: str) -> dict:
+    return {
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "",
+        "error": error,
+        "auth_failed": False,
+    }
+
+
+def _collect(label, proc, task_id, log_dir) -> None:
+    """Drain the child to completion. Runs on a worker thread.
+
+    communicate() — never wait() then read(). The naive pattern deadlocks once
+    the child exceeds the OS pipe buffer, and the spike output was already 21KB.
+    """
+    error = None
+    stdout = stderr = ""
+    try:
+        stdout, stderr = proc.communicate(timeout=COWORK_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+        except Exception:
+            pass
+        error = f"Cowork timed out after {COWORK_TIMEOUT}s."
+    except Exception as exc:
+        error = f"Cowork run failed: {exc}"
+
+    stdout = stdout or ""
+    stderr = stderr or ""
+
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"cowork_preview_{task_id}.log").write_text(
+            stderr, encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.debug("Could not write Cowork stderr log: %s", exc)
+
+    # Auth expires silently: exit 1, EMPTY stdout, hint only on stderr.
+    auth_failed = _AUTH_HINT in stderr
+    if auth_failed and not error:
+        error = "Cowork is not authenticated. Run: cowork auth login"
+
+    with _runs_lock:
+        entry = _runs.get(label)
+        if entry is not None:
+            entry["result"] = {
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "error": error,
+                "auth_failed": auth_failed,
+            }
+
+
+def is_running(label) -> bool:
+    with _runs_lock:
+        entry = _runs.get(label)
+        return entry is not None and entry["result"] is None
+
+
+def get_result(label):
+    with _runs_lock:
+        entry = _runs.get(label)
+        return entry["result"] if entry else None
+
+
+def wait_for(label, timeout=None):
+    """Block until a run finishes. For tests and startup recovery."""
+    with _runs_lock:
+        entry = _runs.get(label)
+    if entry is None:
+        return None
+    thread = entry.get("thread")
+    if thread is not None:
+        thread.join(timeout if timeout is not None else COWORK_TIMEOUT + 30)
+    return get_result(label)
+
+
+def active_labels() -> list:
+    with _runs_lock:
+        return [k for k, v in _runs.items() if v["result"] is None]
