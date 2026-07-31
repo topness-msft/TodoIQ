@@ -402,6 +402,50 @@ body {
 
 /* (alt-picklist removed — Fix 5/7) */
 
+/* ── Cowork Action Card (Phase 1: preview only) ───────────────────────────────── */
+.cw-card { margin: 8px 20px; border-radius: 8px; border: 1px solid var(--ai-border); background: var(--ai-light); overflow: hidden; }
+.cw-card.is-failed { border-color: var(--danger); }
+.cw-card.is-running { border-style: dashed; }
+.cw-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px; font-size: 11px; font-weight: 600; color: var(--ai); }
+.cw-card.is-failed .cw-head { color: var(--danger); }
+.cw-head .cw-type { flex: 1; }
+.cw-badge { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; padding: 1px 7px; border-radius: 10px; background: var(--bg); border: 1px solid currentColor; }
+.cw-body { padding: 0 14px 12px; font-size: 14px; line-height: 1.55; }
+
+.cw-progress { display: flex; align-items: center; gap: 10px; padding: 12px 2px; color: var(--text-secondary); }
+.cw-spinner { width: 14px; height: 14px; border: 2px solid var(--ai-border); border-top-color: var(--ai); border-radius: 50%; animation: cwspin .7s linear infinite; flex-shrink: 0; }
+@keyframes cwspin { to { transform: rotate(360deg); } }
+.cw-progress-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, Consolas, monospace; }
+
+.cw-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; }
+.cw-finding .f-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 5px; }
+
+.cw-draft { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 6px; white-space: pre-wrap; }
+.cw-draft[contenteditable="true"] { outline: 2px solid var(--ai); outline-offset: 1px; }
+
+/* destination line (F9: no thread ref exists, so show the resolved target) */
+.cw-dest { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; padding: 8px 10px; margin: 6px 0 2px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); color: var(--text-secondary); }
+.cw-dest b { color: var(--text); font-weight: 600; }
+.cw-dest.is-risky { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); }
+.cw-dest .d-conv { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+.cw-intent { font-size: 11px; line-height: 1.5; color: var(--text-secondary); padding: 0 0 8px; margin: 0 0 8px; border-bottom: 1px solid var(--border); }
+.cw-intent .i-label { color: var(--text-muted); }
+.cw-intent .i-edit { color: var(--ai); cursor: pointer; margin-left: 5px; white-space: nowrap; }
+.cw-intent .i-edit:hover { text-decoration: underline; }
+.cw-intent-box { width: 100%; box-sizing: border-box; font: inherit; font-size: 11px; line-height: 1.5; color: var(--text); background: var(--bg); border: 1px solid var(--ai); border-radius: 6px; padding: 7px 9px; resize: vertical; }
+
+.cw-foot { display: flex; gap: 6px; align-items: center; padding: 0 14px 12px; flex-wrap: wrap; }
+.cw-btn { padding: 6px 13px; border-radius: 5px; font-size: 11px; font-weight: 600; font-family: inherit; cursor: pointer; border: none; transition: all .12s; }
+.cw-btn-primary { background: var(--ai); color: #fff; }
+.cw-btn-go { background: var(--ready-green); color: #fff; }
+.cw-btn-primary:hover, .cw-btn-go:hover { opacity: .85; }
+.cw-btn-sec { background: transparent; color: var(--ai); border: 1px solid var(--ai-border); }
+.cw-btn-sec:hover { background: var(--ai-light); }
+.cw-btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.cw-btn-ghost:hover { color: var(--text); }
+.cw-foot-note { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.55; color: var(--text); resize: vertical; outline: 2px solid var(--ai); outline-offset: 1px; }
+
 /* ── Overflow Menu ────────────────────────────────────── */
 .overflow-menu {
   position: fixed; background: var(--bg); border: 1px solid var(--border);
@@ -1257,7 +1301,11 @@ function buildLine2(t, isSug) {
   if (t.status==='in_progress') {
     parts.push('<span class="task-hint in-prog">▶ In Progress</span>');
   }
-  if (t.ai_output && !['completed','suggested','snoozed'].includes(t.status)) {
+  if (t.cw_state === 'ready') {
+    parts.push('<span class="task-hint ai-ready">✦ Draft ready to copy</span>');
+  } else if (t.cw_state === 'previewing') {
+    parts.push('<span class="task-hint ai-ready">✦ Cowork working…</span>');
+  } else if (t.ai_output && !['completed','suggested','snoozed'].includes(t.status)) {
     const hint = (t.action_type && ACTION_HINTS[t.action_type]) || '⚡ Ready';
     parts.push(`<span class="task-hint ai-ready">${hint}</span>`);
   }
@@ -1342,42 +1390,7 @@ function selectTask(id) {
     <button class="btn btn-ai" onclick="promoteTask(${t.id})">✨ Add to Tasks</button>
     <button class="btn btn-secondary" onclick="dismissTask(${t.id})">Dismiss</button></div>` : '';
 
-  // AI Action Card
-  let aiCard = '';
-  if (t.ai_output && t.action_type) {
-    const label = ACTION_LABELS[t.action_type] || '⚡ AI Action';
-
-    let body = '';
-    if (t.ai_slots) {
-      body = `<div class="time-slots">${t.ai_slots.map(s =>
-        `<div class="time-slot" onclick="this.querySelector('.slot-pick').textContent='Booking...';this.style.opacity=0.5;toast('📅 Sending invite for ${s.day} ${s.time}...')">
-          <span class="slot-day">${s.day}</span><span class="slot-time">${s.date}, ${s.time}</span>
-          <span style="color:var(--text-muted);font-size:11px">${s.note}</span>
-          <span class="slot-pick">Book ▸</span></div>`).join('')}</div>`;
-    } else {
-      const sentVia = ['respond-email','follow-up','awaiting-response'].includes(t.action_type)
-        ? '<div class="sent-via">Sent via TodoIQ</div>' : '';
-      body = `<div class="draft-block">${esc(t.ai_output)}${sentVia}</div>`;
-    }
-
-    const copyBtn = !t.ai_slots ? `<button class="ai-btn ai-btn-primary" onclick="copyAiOutput();this.textContent='Copied ✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button>` : '';
-    const openBtn = t.action_type==='respond-email' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Outlook</button>`
-      : t.action_type==='follow-up'||t.action_type==='awaiting-response' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Teams</button>` : '';
-
-    aiCard = `<div class="ai-action-card">
-      <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span>
-        <button class="ai-btn ai-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="redoSkill(${t.id},'${t.action_type||'general'}',this)">↻ Redo</button></div>
-      <div class="ai-action-body">${body}</div>
-      <div class="ai-action-footer">${copyBtn}${openBtn}</div></div>`;
-  } else if (t.action_type && !t.ai_output) {
-    const label = ACTION_LABELS[t.action_type] || '⚡ AI Action';
-    aiCard = `<div class="ai-action-card" style="border-style:dashed" id="ai-card-${t.id}">
-      <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span></div>
-      <div class="ai-action-body"><div style="text-align:center;padding:16px;color:var(--text-muted)">
-        No AI draft yet<br>
-        <span style="color:var(--accent);cursor:pointer;font-size:13px" onclick="redoSkill(${t.id},'${t.action_type}')">✦ Generate ${label}</span>
-      </div></div></div>`;
-  }
+  const aiCard = renderCoworkCard(t);
 
   const created = t.created_at ? new Date(t.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
 
@@ -1940,6 +1953,254 @@ function showResizeHandle() {
 function hideResizeHandle() {
   document.getElementById('resize-handle').style.display = 'none';
 }
+
+// ── Cowork Action Card ─────────────────────────────────────────────────
+//
+// PHASE 1 IS PREVIEW ONLY. There is no execute route on the server, so this
+// card must never render a control implying something was or will be sent.
+// The mock's Approve/executing/executed states are Phase 2 and deliberately
+// absent here. The primary action is Copy draft.
+//
+// Render reads t.cw_* fields. In this standalone file the state transitions
+// below are in-memory; on /todo they are overridden by todoiq-api.js, which
+// fills the same fields from /api/tasks/<id>/cowork. Only the render is shared.
+
+const CW_LABELS = {
+  'respond-email': 'Reply',
+  'schedule-meeting': 'Scheduling',
+  'follow-up': 'Follow-up',
+  'awaiting-response': 'Follow-up',
+  'teams-message': 'Message',
+  'prepare': 'Prep',
+  'review-document': 'Review',
+  'general': 'Action',
+};
+
+// Keyed by the destination kinds parse_source_url produces server side.
+const CW_DEST = {
+  one_to_one: { risky: false, label: '1:1 Teams chat',
+                note: 'Linear conversation, so a reply lands in the same thread.' },
+  group:      { risky: true,  label: 'Group Teams chat',
+                note: 'Everyone in the chat would see this.' },
+  meeting:    { risky: true,  label: 'Meeting chat',
+                note: 'Everyone invited to the meeting would see this.' },
+  channel:    { risky: true,  label: 'Team channel',
+                note: 'This would be a public post to the whole team.' },
+  none:       { risky: false, label: 'No linked chat source',
+                note: 'Nothing to reply to. This draft has no destination.' },
+  unknown:    { risky: true,  label: 'Unrecognised source',
+                note: 'The audience could not be determined from the source link.' },
+};
+
+// Fallback only. On /todo the kind comes from the server, where
+// parse_source_url is the single source of truth; this local derivation
+// exists so the file still renders when opened standalone.
+function cwLocalKind(t) {
+  const url = t.source_url || '';
+  if (!url) return 'none';
+  const conv = decodeURIComponent(url).split('/l/message/')[1] || '';
+  if (/unq\.gbl\.spaces/i.test(conv)) return 'one_to_one';
+  if (/thread\.v2/i.test(conv)) return 'group';
+  if (/thread\.skype/i.test(conv)) return 'channel';
+  if (/thread\.tacv2/i.test(conv)) return 'meeting';
+  return 'unknown';
+}
+
+function cwDestBlock(t) {
+  const kind = t.cw_dest_kind || cwLocalKind(t);
+  const d = CW_DEST[kind] || CW_DEST.unknown;
+  const conv = t.cw_conversation_id || '';
+  return `<div class="cw-dest${d.risky ? ' is-risky' : ''}">
+    <span>${d.risky ? '⚠' : '↳'}</span>
+    <span><b>Drafted for:</b> ${d.label}${t.cw_dest_ref ? ' · ' + esc(t.cw_dest_ref) : ''}
+    <br><span style="color:var(--text-muted)">${d.note}</span>
+    ${conv ? `<br><span class="d-conv">${esc(conv)}</span>` : ''}</span></div>`;
+}
+
+// WorkIQ's suggested next action, editable before Cowork runs. This is the
+// only surviving affordance from the retired coaching card.
+function cwIntentBlock(t, editable) {
+  const intent = t.coaching_text || '';
+  if (!intent) return '';
+  if (t.cw_intent_editing) {
+    return `<div class="cw-intent"><textarea class="cw-intent-box" rows="3"
+      id="cw-intent-${t.id}">${esc(intent)}</textarea>
+      <div style="padding-top:6px">
+        <span class="i-edit" onclick="cwSaveIntent(${t.id})">Save</span>
+        <span class="i-edit" style="color:var(--text-muted)"
+          onclick="cwEditIntent(${t.id},false)">Cancel</span></div></div>`;
+  }
+  return `<div class="cw-intent"><span class="i-label">Asking Cowork to:</span>
+    ${esc(intent)}${editable
+      ? `<span class="i-edit" onclick="cwEditIntent(${t.id},true)">Change</span>` : ''}</div>`;
+}
+
+function cwRedoRow(t) {
+  if (!t.cw_redo_open) return '';
+  return `<div class="cw-intent" style="border-bottom:none;padding-top:8px">
+    <input class="cw-intent-box" id="cw-redo-${t.id}" type="text"
+      placeholder="Tell Cowork what to change… (e.g. look for times next week)"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();cwStart(${t.id},true)}">
+    <div style="padding-top:6px">
+      <span class="i-edit" onclick="cwStart(${t.id},true)">Run again</span>
+      <span class="i-edit" style="color:var(--text-muted)"
+        onclick="cwToggleRedo(${t.id},false)">Cancel</span></div></div>`;
+}
+
+function cwRedoBtn(t) {
+  return t.cw_redo_open ? ''
+    : `<button class="cw-btn cw-btn-sec" onclick="cwToggleRedo(${t.id},true)">↻ Redo</button>`;
+}
+
+function cwCard(cls, badge, t, body, foot) {
+  const label = CW_LABELS[t.action_type] || 'Action';
+  return `<div class="cw-card ${cls}">
+    <div class="cw-head"><span>✦</span><span class="cw-type">${label} · Cowork</span>
+      ${badge ? `<span class="cw-badge">${badge}</span>` : ''}</div>
+    <div class="cw-body">${body}</div>
+    ${foot ? `<div class="cw-foot">${foot}</div>` : ''}</div>`;
+}
+
+function renderCoworkCard(t) {
+  if (!t.action_type || t.status === 'suggested') return '';
+  const s = t.cw_state || 'idle';
+
+  if (s === 'loading') return cwCard('', '', t,
+    `<div style="padding:10px 0 2px;color:var(--text-muted)">Checking for a previous Cowork preview…</div>`, '');
+
+  if (s === 'previewing') return cwCard('is-running', 'read-only', t,
+    `${cwIntentBlock(t, false)}
+     <div class="cw-progress"><div class="cw-spinner"></div><div style="flex:1">
+       <div>Cowork is reading M365</div>
+       <div class="cw-progress-sub" id="cw-hb-${t.id}">${esc(t.cw_elapsed || '')}</div></div></div>`,
+    `<span class="cw-foot-note">read-only preview · nothing is sent</span>`);
+
+  if (s === 'failed') return cwCard('is-failed', 'failed', t,
+    `<div style="padding:8px 0 2px"><b>Cowork could not complete this.</b>
+     <div style="font-size:11px;color:var(--text-secondary);margin-top:5px">
+       ${esc(t.cw_error || t.cw_terminal_status || 'Unknown error')}<br>Nothing was sent.</div></div>
+     ${cwRedoRow(t)}`,
+    `<button class="cw-btn cw-btn-primary" onclick="cwStart(${t.id})">Retry</button>
+     ${cwRedoBtn(t)}
+     <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Dismiss</button>`);
+
+  if (s === 'ready') {
+    const draft = t.cw_draft_edited || t.cw_draft || '';
+    if (t.cw_editing) return cwCard('', 'editing', t,
+      `<textarea class="cw-draft" id="cw-edit-${t.id}" rows="8">${esc(draft)}</textarea>
+       ${cwDestBlock(t)}`,
+      `<button class="cw-btn cw-btn-go" onclick="cwSaveDraft(${t.id})">Save edit</button>
+       <button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(${t.id},false)">Cancel</button>`);
+
+    return cwCard('', 'preview', t,
+      `${cwIntentBlock(t, true)}
+       ${t.cw_redirect_text ? `<div class="cw-intent"><span class="i-label">Correction:</span> ${esc(t.cw_redirect_text)}</div>` : ''}
+       ${t.cw_finding ? `<div class="cw-finding"><span class="f-label">What Cowork found</span>${esc(t.cw_finding)}</div>` : ''}
+       <div class="cw-draft">${esc(draft)}</div>
+       ${cwDestBlock(t)}
+       ${cwRedoRow(t)}`,
+      `<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(${t.id})">Copy draft</button>
+       <button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(${t.id},true)">Edit</button>
+       ${cwRedoBtn(t)}
+       <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Hide</button>
+       ${t.cw_draft_edited ? '<span class="cw-foot-note">edited by you</span>' : ''}`);
+  }
+
+  // idle
+  return cwCard('', 'not run', t,
+    `${cwIntentBlock(t, true)}
+     <div style="padding:10px 0 2px;color:var(--text-secondary)">
+       Cowork can check the latest state of this in M365, then draft the action.
+       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+         Preview only — nothing is sent. You copy and send it yourself.</div>
+     </div>`,
+    `<button class="cw-btn cw-btn-primary" onclick="cwStart(${t.id})">Preview with Cowork</button>
+     <span class="cw-foot-note">~45s · read-only</span>`);
+}
+
+// ── State transitions (overridden by todoiq-api.js on /todo) ───────────
+
+function cwTask(id) { return tasks.find(x => x.id === id); }
+function cwRerender(id) { if (selectedId === id) selectTask(id); renderTasks(); }
+
+function cwEditIntent(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_intent_editing = on;
+  cwRerender(id);
+}
+
+function cwSaveIntent(id) {
+  const t = cwTask(id); if (!t) return;
+  const box = document.getElementById(`cw-intent-${id}`);
+  if (box) t.coaching_text = box.value;
+  t.cw_intent_editing = false;
+  cwRerender(id);
+}
+
+function cwToggleEdit(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_editing = on;
+  cwRerender(id);
+}
+
+function cwToggleRedo(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_redo_open = on;
+  cwRerender(id);
+}
+
+function cwSaveDraft(id) {
+  const t = cwTask(id); if (!t) return;
+  const box = document.getElementById(`cw-edit-${id}`);
+  if (box) t.cw_draft_edited = box.value;
+  t.cw_editing = false;
+  cwRerender(id);
+}
+
+function cwCopyDraft(id) {
+  const t = cwTask(id); if (!t) return;
+  const text = t.cw_draft_edited || t.cw_draft || '';
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('Draft copied')).catch(() => {});
+  }
+}
+
+// There is no delete route — hiding is client side only, so the task_actions
+// audit chain stays intact.
+function cwDiscard(id) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_state = 'idle';
+  t.cw_editing = false;
+  t.cw_redo_open = false;
+  cwRerender(id);
+}
+
+function cwStart(id, isRedo) {
+  const t = cwTask(id); if (!t) return;
+  if (isRedo) {
+    const box = document.getElementById(`cw-redo-${id}`);
+    const text = box ? box.value.trim() : '';
+    if (!text) return;
+    t.cw_redirect_text = text;
+  }
+  t.cw_redo_open = false;
+  t.cw_editing = false;
+  t.cw_state = 'previewing';
+  cwRerender(id);
+  // Standalone-mock behaviour only; todoiq-api.js replaces this wholesale.
+  setTimeout(() => {
+    const tt = cwTask(id);
+    if (!tt || tt.cw_state !== 'previewing') return;
+    tt.cw_state = 'ready';
+    if (!tt.cw_draft) {
+      tt.cw_finding = 'Checked Teams and email for recent activity on this task.';
+      tt.cw_draft = '(Cowork would draft the message here, grounded in the live M365 artifact.)';
+    }
+    cwRerender(id);
+  }, 2500);
+}
+
 </script>
 </body>
 </html>
