@@ -5,7 +5,7 @@ These tests never invoke the real `cowork` binary. `start_preview()` takes a
 
 The safety assertions here are the point of the file. G1 proved `--deny-tools`
 does not stop an M365 write; G1b proved `--tool-callback-config` does; G1c
-enumerated the 80 write tools that must appear in it. If any of those
+enumerated the write tools that must appear in it. If any of those
 assertions regress, preview mode is silently unprotected.
 """
 
@@ -87,7 +87,18 @@ class RunnerTestBase(unittest.TestCase):
 class TestWriteToolList(RunnerTestBase):
     def test_list_loads_from_vendored_file(self):
         tools = cr.load_write_tools()
-        self.assertGreaterEqual(len(tools), 80)
+        self.assertGreaterEqual(len(tools), 84)
+
+    def test_cli_1_21_88_write_tools_present(self):
+        """G1c rerun additions must not arrive un-intercepted."""
+        tools = cr.load_write_tools()
+        for tool in (
+            "core-RenderSlide",
+            "core-render_ui",
+            "host-render_ui",
+            "skill",
+        ):
+            self.assertIn(tool, tools)
 
     def test_teams_send_tool_present(self):
         """The G1c headline. Every Phase 1 target is a Teams chat."""
@@ -104,7 +115,12 @@ class TestWriteToolList(RunnerTestBase):
         self.assertIn("host-SetupEventTrigger", tools)
 
     def test_local_execution_tools_present(self):
+        """Retain bash defensively, though G1f proved callbacks do not block it."""
         self.assertIn("bash", cr.load_write_tools())
+
+    def test_fabric_query_retained_as_potential_write(self):
+        """T-SQL/KQL query interfaces can carry mutating statements."""
+        self.assertIn("fabricdocs-execute_query", cr.load_write_tools())
 
     def test_outlook_draft_creation_is_denied(self):
         """Phil's ruling: drafts live in our DB, not in the mailbox."""

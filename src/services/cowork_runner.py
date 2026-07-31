@@ -404,6 +404,13 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
     about whether a write actually happened. G1b showed ``ok=True`` on a send tool
     that was intercepted and never executed, so the flag means "the call returned",
     not "the action occurred".
+
+    Nor is ``tool_name`` the key the denylist matches on. G1d recorded an
+    intercepted Teams post as ``"Post message"`` — a display label absent from all
+    154 names in that probe's config — while ``build_callback_config`` denies the canonical
+    ``m365_teams-PostMessage``/``PostMessage``. Never audit denylist coverage by
+    diffing these names against it; compare against a fresh tool enumeration
+    (G1c) instead.
     """
     result = {
         "terminal_status": None,
@@ -484,11 +491,18 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
 #                              static_results returns a canned string *instead
 #                              of* executing the tool.
 #
-# This is DEFENCE IN DEPTH, not a sandbox. G1c enumerated 80 write tools, and
+# This is DEFENCE IN DEPTH, not a sandbox. G1c enumerates the write tools, and
 # among them `graph-CallGraph` ("Direct Graph POST/PUT/PATCH") is a universal
 # bypass, while `host-SetupScheduledPrompt` runs work after this process exits.
 # A denylist over an open set can never be proven complete. The only hard
 # guarantee in Phase 1 is structural: there is no execute endpoint at all.
+#
+# G1f proved callback interception does not apply to the built-in `bash` tool,
+# even when both `bash` and its displayed `Bash` label are listed. G1h then
+# established that Python urllib in the Cowork shell sandbox could reach
+# neither Graph nor the public internet. Keep `bash` listed in case callback
+# coverage changes, but do not
+# claim that its presence currently blocks shell execution.
 #
 # Do NOT treat `tool_trace[].ok` as evidence of what happened. It was True in
 # both G1 (email sent) and G1b (intercepted) — it records the call, not the
@@ -544,7 +558,7 @@ def preview_label(task_id) -> str:
 
 
 def load_write_tools() -> list:
-    """The 80 write tools enumerated by probe G1c."""
+    """The G1c-1.21.88 denylist: 83 writes plus one retained query tool."""
     return json.loads(WRITE_TOOLS_PATH.read_text(encoding="utf-8"))
 
 

@@ -1,5 +1,6 @@
 [
   "bash",
+  "core-RenderSlide",
   "core-TaskCreate",
   "core-TaskUpdate",
   "core-app_dev_server",
@@ -7,6 +8,7 @@
   "core-edit_dotwork",
   "core-generate_dotwork_docs",
   "core-generate_dotwork_slides",
+  "core-render_ui",
   "create",
   "edit",
   "fabricdocs-execute_query",
@@ -27,6 +29,7 @@
   "host-UpdateProjectInstructions",
   "host-UpdateProjectMemory",
   "host-__canvas_write",
+  "host-render_ui",
   "m365_teams-AddChannelMember",
   "m365_teams-AddChatMember",
   "m365_teams-CreateChannel",
@@ -76,6 +79,7 @@
   "outlook_calendar-UpdateEvent",
   "sharepoint_onedrive-CreateFolder",
   "sharepoint_onedrive-UploadFileContent",
+  "skill",
   "stop_bash",
   "task",
   "write_agent"
