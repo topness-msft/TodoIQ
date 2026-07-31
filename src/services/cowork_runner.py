@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-__all__ = ["parse_source_url"]
+__all__ = ["parse_source_url", "compose_prompt"]
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
 
@@ -140,3 +140,130 @@ def parse_source_url(url: str | None, me: str | None = None) -> dict:
     if kind == "one_to_one":
         result["counterparty_id"] = _counterparty(conv, me)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Prompt composition
+# ---------------------------------------------------------------------------
+
+_WORKIQ_RE = re.compile(r"(?<![\w.])@workiq\b[ \t]*[-:\u2013\u2014]?[ \t]*", re.I)
+
+_SAFETY = (
+    "Produce findings first, then a draft message.\n"
+    "DO NOT SEND, POST, REPLY, OR DELIVER ANYTHING. This is a preview only.\n"
+    "Do not create, modify, or send any email, chat message, meeting or file.\n"
+    "Return the draft as text for a human to review. Nothing you write is delivered."
+)
+
+
+def _get(task, key, default=""):
+    """Read a field from a dict or sqlite3.Row without assuming which."""
+    try:
+        value = task[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else value
+
+
+def _clean(text) -> str:
+    """Normalise user-authored text for inclusion in a prompt.
+
+    Deliberately does NOT attempt mojibake repair: a live-data survey found zero
+    mojibake across 1958 tasks (the 644 em-dashes are genuine U+2014), so any
+    "repair" here would corrupt correct text. The real encoding hazard is the
+    cp1252 default at the subprocess boundary, which is handled by writing the
+    prompt as UTF-8 -- not by mangling characters.
+    """
+    if not text:
+        return ""
+    return str(text).replace("\r\n", "\n").strip()
+
+
+def _strip_workiq(text: str) -> str:
+    """Remove the retired @WorkIQ token, keeping the surrounding prose (F11).
+
+    Notes are already written as instructions ("@WorkIQ pull the subject from my
+    calendar invites"); the token is the only dead part. The lookbehind keeps
+    ``brandon@microsoft.com`` intact.
+    """
+    return _WORKIQ_RE.sub("", text)
+
+
+def compose_prompt(task, destination: dict | None = None,
+                   redirect_text: str | None = None) -> str:
+    """Assemble the Cowork preview prompt from its layers.
+
+    Layer order is semantic, not cosmetic. The correction is emitted after the
+    standing layers so it overrides them, and the safety instruction is emitted
+    last of all so that no user-authored layer -- note or correction -- can talk
+    the run out of preview mode.
+
+    Args:
+        task: mapping or sqlite3.Row of the task's fields.
+        destination: result of parse_source_url; derived from the task if omitted.
+        redirect_text: one-shot steer supplied via Redo (F12).
+
+    Returns:
+        The full prompt. Callers must write it as UTF-8 -- 23 real tasks contain
+        characters cp1252 cannot encode.
+    """
+    if destination is None:
+        destination = parse_source_url(_get(task, "source_url") or None)
+
+    parts: list[str] = []
+
+    parts.append(
+        "[ROLE]\n"
+        "You are helping the user act on one of their tasks. You are running in "
+        "PREVIEW mode: you research and draft, but you never deliver anything."
+    )
+
+    title = _clean(_get(task, "title"))
+    description = _clean(_get(task, "description"))
+    task_block = f"[TASK]\n{title}"
+    if description:
+        task_block += f"\n{description}"
+    parts.append(task_block)
+
+    intent = _clean(_get(task, "coaching_text"))
+    if intent:
+        parts.append("[INTENT]\nThe suggested next action for this task:\n" + intent)
+
+    notes = _clean(_strip_workiq(_clean(_get(task, "user_notes"))))
+    if notes:
+        parts.append(
+            "[NOTES]\nStanding context and instructions the user wrote themselves. "
+            "Treat these as direction:\n" + notes
+        )
+
+    source_lines = []
+    source_type = _clean(_get(task, "source_type"))
+    if source_type:
+        source_lines.append(f"Origin: {source_type}")
+    label = destination.get("audience_label")
+    if label:
+        source_lines.append(f"Conversation: {label}")
+        if destination.get("is_broadcast"):
+            source_lines.append(
+                f"CAUTION: this is a {label} -- more than one person would see a "
+                "reply here. State who the audience is in your findings."
+            )
+    people = _clean(_get(task, "key_people"))
+    if people:
+        source_lines.append(f"Key people: {people}")
+    snippet = _clean(_get(task, "source_snippet"))
+    if snippet:
+        source_lines.append(f"Original message:\n{snippet}")
+    if source_lines:
+        parts.append("[SOURCE]\n" + "\n".join(source_lines))
+
+    correction = _clean(redirect_text)
+    if correction:
+        parts.append(
+            "[CORRECTION]\nThe user reviewed a previous attempt and asked for this "
+            "change. It overrides the intent and notes above:\n" + correction
+        )
+
+    parts.append("[OUTPUT]\n" + _SAFETY)
+
+    return "\n\n".join(parts)
