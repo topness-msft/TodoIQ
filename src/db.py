@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     draft            TEXT,
     draft_edited     TEXT,
     destination_kind TEXT
-                         CHECK (destination_kind IS NULL OR destination_kind IN ('one_to_one','group','none')),
+                         CHECK (destination_kind IS NULL OR destination_kind IN ('one_to_one','group','meeting','channel','unknown','none')),
     destination_ref  TEXT,
     conversation_id  TEXT,
     terminal_status  TEXT,

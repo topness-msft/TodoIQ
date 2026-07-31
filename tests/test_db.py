@@ -181,11 +181,29 @@ class TestTaskActionsSchema(unittest.TestCase):
                     self._insert(state=state)
 
     def test_destination_kind_constrained(self):
-        for kind in ("one_to_one", "group", "none"):
+        # Must accept every kind parse_source_url can emit -- a mismatch here would
+        # only surface at preview time, as an IntegrityError on a real task.
+        for kind in ("one_to_one", "group", "meeting", "channel", "unknown", "none"):
             with self.subTest(kind=kind):
                 self._insert(destination_kind=kind)
         with self.assertRaises(sqlite3.IntegrityError):
             self._insert(destination_kind="broadcast")
+
+    def test_destination_kind_accepts_all_parser_outputs(self):
+        from src.services.cowork_runner import parse_source_url
+        urls = [
+            None,
+            "https://teams.microsoft.com/l/message/19:a_b@unq.gbl.spaces/1",
+            "https://teams.microsoft.com/l/message/19:x@thread.v2/1",
+            "https://teams.microsoft.com/l/message/19:meeting_x@thread.v2/1",
+            "https://teams.microsoft.com/l/message/19:x@thread.skype/1",
+            "https://teams.microsoft.com/l/message/19:x@thread.future/1",
+            "https://outlook.office365.com/owa/?ItemID=abc",
+        ]
+        for u in urls:
+            kind = parse_source_url(u)["kind"]
+            with self.subTest(kind=kind):
+                self._insert(destination_kind=kind)
 
     def test_defaults_state_to_previewing(self):
         self.conn.execute("INSERT INTO task_actions (task_id) VALUES (1)")
