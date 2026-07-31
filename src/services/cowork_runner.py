@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import re
 from urllib.parse import unquote
+import json
 
-__all__ = ["parse_source_url", "compose_prompt"]
+__all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
 
@@ -267,3 +268,204 @@ def compose_prompt(task, destination: dict | None = None,
     parts.append("[OUTPUT]\n" + _SAFETY)
 
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Output parsing
+# ---------------------------------------------------------------------------
+
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.S)
+
+# Wording that introduces a proposed message, as opposed to a quoted excerpt of
+# someone else's. Cowork quotes both, and the quoted original is often the longer
+# of the two -- so length alone picks the wrong one.
+_DRAFT_CUE_RE = re.compile(
+    r"\b(draft|nudge|reply|response|proposed|suggest\w*|"
+    r"you (?:can|could) (?:send|drop|post|use)|here'?s (?:a|the) (?:short )?"
+    r"(?:message|note|reply|nudge|draft))\b",
+    re.I,
+)
+
+# Chat-framing questions Cowork appends after a draft. The UI's approve control
+# answers these, so leaving them in makes the draft look like it needs a reply.
+_OFFER_RE = re.compile(
+    r"^\s*(?:want me to|shall i|should i|would you like me to|let me know if)\b.*$",
+    re.I | re.M,
+)
+
+_AUTH_HINT = "cowork auth login"
+
+
+def _blockquote_blocks(text: str) -> list[tuple[str, bool]]:
+    """Return each contiguous blockquote run as ``(body, introduced_by_draft_cue)``.
+
+    The cue is taken from the nearest preceding non-blank, non-quoted line, which
+    is where Cowork announces what the quote is ("Here's a short Teams nudge you
+    can drop into the chat" vs "Here is what Brandon originally wrote").
+    """
+    blocks: list[tuple[str, bool]] = []
+    current: list[str] = []
+    last_prose = ""
+
+    def flush():
+        if current:
+            body = "\n".join(current).strip()
+            if body:
+                blocks.append((body, bool(_DRAFT_CUE_RE.search(last_prose))))
+            current.clear()
+
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(">"):
+            body = stripped[1:]
+            current.append(body[1:] if body.startswith(" ") else body)
+        else:
+            flush()
+            if stripped:
+                last_prose = stripped
+    flush()
+    return blocks
+
+
+def _extract_draft(text: str) -> tuple[str | None, str]:
+    """Split Cowork's reply into (draft, findings).
+
+    A fenced code block is preferred when present -- it is the least ambiguous
+    signal. Otherwise a blockquote introduced by draft wording wins, and only if
+    no such cue exists does length decide. Picking purely by length hands back the
+    quoted original whenever it is longer than the proposed reply, which is common.
+
+    Returns ``(None, text)`` when nothing draft-shaped is found. Inventing a draft
+    would be worse than showing an empty editor.
+    """
+    fences = _FENCE_RE.findall(text)
+    if fences:
+        draft = max(fences, key=len).strip()
+        return draft, _FENCE_RE.sub("", text)
+
+    blocks = _blockquote_blocks(text)
+    if not blocks:
+        return None, text
+
+    cued = [b for b, is_cued in blocks if is_cued]
+    draft = max(cued, key=len) if cued else max((b for b, _ in blocks), key=len)
+
+    # Remove only the chosen block from the findings, keeping quoted excerpts.
+    findings: list[str] = []
+    current: list[str] = []
+    dropped = False
+
+    def resolve():
+        nonlocal dropped
+        if not current:
+            return
+        body = "\n".join(
+            l.lstrip()[1:].lstrip(" ") for l in current
+        ).strip()
+        if not dropped and body == draft:
+            dropped = True
+        else:
+            findings.extend(current)
+        current.clear()
+
+    for line in text.splitlines():
+        if line.lstrip().startswith(">"):
+            current.append(line)
+            continue
+        resolve()
+        findings.append(line)
+    resolve()
+
+    return draft, "\n".join(findings)
+
+
+def _tidy_finding(text: str) -> str:
+    """Drop trailing chat framing and collapse the gaps it leaves behind."""
+    text = _OFFER_RE.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
+    """Parse one ``cowork send --json`` result into fields for ``task_actions``.
+
+    Args:
+        stdout: raw process stdout.
+        stderr: raw process stderr, used to recognise auth failure.
+
+    Returns a dict with a stable key set regardless of outcome:
+
+        terminal_status, duration_seconds, conversation_id,
+        finding, draft, tool_trace, error, raw_text
+
+    ``error`` is None on success and a human-readable string otherwise.
+
+    Note: ``tool_trace`` entries are preserved verbatim but carry NO information
+    about whether a write actually happened. G1b showed ``ok=True`` on a send tool
+    that was intercepted and never executed, so the flag means "the call returned",
+    not "the action occurred".
+    """
+    result = {
+        "terminal_status": None,
+        "duration_seconds": None,
+        "conversation_id": None,
+        "finding": "",
+        "draft": None,
+        "tool_trace": [],
+        "error": None,
+        "raw_text": "",
+    }
+
+    if _AUTH_HINT in (stderr or ""):
+        result["error"] = (
+            "Cowork is not authenticated. Run `cowork auth login` and try again."
+        )
+        return result
+
+    if not stdout or not stdout.strip():
+        detail = (stderr or "").strip()
+        result["error"] = (
+            f"Cowork produced no output. {detail}" if detail
+            else "Cowork produced no output."
+        )
+        return result
+
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, TypeError) as exc:
+        result["error"] = f"Could not parse Cowork output: {exc}"
+        return result
+
+    if not isinstance(payload, dict):
+        result["error"] = "Cowork output was not a JSON object."
+        return result
+
+    result["terminal_status"] = payload.get("terminal_status")
+    result["duration_seconds"] = payload.get("duration_seconds")
+    result["conversation_id"] = payload.get("conversation_id")
+
+    trace = payload.get("tool_trace") or []
+    result["tool_trace"] = [
+        {
+            "tool_name": t.get("tool_name"),
+            "ok": t.get("ok"),
+            "duration_seconds": t.get("duration_seconds"),
+        }
+        for t in trace
+        if isinstance(t, dict)
+    ]
+
+    text = payload.get("text") or ""
+    result["raw_text"] = text
+
+    draft, findings = _extract_draft(text)
+    result["draft"] = _tidy_finding(draft) if draft else None
+    result["finding"] = _tidy_finding(findings)
+
+    if result["terminal_status"] != "ok":
+        result["error"] = (
+            f"Cowork finished with status "
+            f"{result['terminal_status'] or 'unknown'!s}."
+        )
+
+    return result
