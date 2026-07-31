@@ -267,9 +267,37 @@ CREATE TABLE IF NOT EXISTS sync_log (
     synced_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
+CREATE TABLE IF NOT EXISTS task_actions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    action_type      TEXT DEFAULT 'general',
+    -- Phase 1 ships PREVIEW ONLY. Execute states ('executing','executed','approved')
+    -- are deliberately absent so no code path can claim an M365 write. Phase 2 adds
+    -- them here, additively, only after the G1c write-tool enumeration passes.
+    state            TEXT NOT NULL DEFAULT 'previewing'
+                         CHECK (state IN ('previewing','ready','failed')),
+    intent           TEXT,
+    notes_snapshot   TEXT,
+    redirect_text    TEXT,
+    composed_prompt  TEXT,
+    finding          TEXT,
+    draft            TEXT,
+    draft_edited     TEXT,
+    destination_kind TEXT
+                         CHECK (destination_kind IS NULL OR destination_kind IN ('one_to_one','group','none')),
+    destination_ref  TEXT,
+    conversation_id  TEXT,
+    terminal_status  TEXT,
+    tool_trace       TEXT,
+    error            TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_task_context_task_id ON task_context(task_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_next ON refresh_schedule(next_refresh_at);
+CREATE INDEX IF NOT EXISTS idx_task_actions_task_id ON task_actions(task_id);
 """

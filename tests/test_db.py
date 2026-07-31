@@ -33,7 +33,7 @@ class TestDatabaseSchema(unittest.TestCase):
 
     def test_init_db_creates_all_tables(self):
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log"}
+        expected = {"tasks", "task_context", "refresh_schedule", "sync_log", "task_actions"}
         self.assertEqual(tables, expected)
 
     def test_tasks_table_columns(self):
@@ -121,8 +121,93 @@ class TestDatabaseSchema(unittest.TestCase):
         # Running init_db a second time should not raise
         init_db(self.conn)
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log"}
+        expected = {"tasks", "task_context", "refresh_schedule", "sync_log", "task_actions"}
         self.assertEqual(tables, expected)
+
+
+class TestTaskActionsSchema(unittest.TestCase):
+    """task_actions stores one Cowork preview attempt per row.
+
+    The state CHECK constraint is the Phase 2 gate expressed as schema rather than
+    UI discipline: no execute state may be reachable while Phase 1 ships.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        self.tmp.close()
+        self.conn = sqlite3.connect(self.tmp.name)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        init_db(self.conn)
+        self.conn.execute("INSERT INTO tasks (id, title) VALUES (1, 'Target task')")
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.tmp.name)
+
+    def _insert(self, **kwargs):
+        fields = {"task_id": 1, "action_type": "follow-up", "state": "previewing"}
+        fields.update(kwargs)
+        cols = ", ".join(fields)
+        marks = ", ".join("?" for _ in fields)
+        return self.conn.execute(
+            f"INSERT INTO task_actions ({cols}) VALUES ({marks})", tuple(fields.values())
+        )
+
+    def test_task_actions_columns(self):
+        rows = self.conn.execute("PRAGMA table_info(task_actions)").fetchall()
+        cols = {r["name"] for r in rows}
+        expected = {
+            "id", "task_id", "action_type", "state",
+            "intent", "notes_snapshot", "redirect_text", "composed_prompt",
+            "finding", "draft", "draft_edited",
+            "destination_kind", "destination_ref", "conversation_id",
+            "terminal_status", "tool_trace", "error",
+            "created_at", "updated_at",
+        }
+        self.assertEqual(cols, expected)
+
+    def test_phase1_states_are_accepted(self):
+        for state in ("previewing", "ready", "failed"):
+            with self.subTest(state=state):
+                self._insert(state=state)
+
+    def test_execute_states_are_rejected(self):
+        # Phase 1 ships preview only. If any of these become insertable, a code path
+        # can claim to have executed against M365 -- the gate must be in the DB.
+        for state in ("executing", "executed", "approved", "running"):
+            with self.subTest(state=state):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self._insert(state=state)
+
+    def test_destination_kind_constrained(self):
+        for kind in ("one_to_one", "group", "none"):
+            with self.subTest(kind=kind):
+                self._insert(destination_kind=kind)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(destination_kind="broadcast")
+
+    def test_defaults_state_to_previewing(self):
+        self.conn.execute("INSERT INTO task_actions (task_id) VALUES (1)")
+        row = self.conn.execute("SELECT state FROM task_actions").fetchone()
+        self.assertEqual(row["state"], "previewing")
+
+    def test_deleting_task_cascades_to_actions(self):
+        self._insert()
+        self.conn.execute("DELETE FROM tasks WHERE id = 1")
+        remaining = self.conn.execute("SELECT COUNT(*) c FROM task_actions").fetchone()
+        self.assertEqual(remaining["c"], 0)
+
+    def test_orphan_action_rejected(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(task_id=99999)
+
+    def test_rows_survive_reinit(self):
+        # init_db runs on every server start; an existing preview must not be dropped.
+        self._insert(state="ready", draft="hello")
+        init_db(self.conn)
+        row = self.conn.execute("SELECT draft FROM task_actions").fetchone()
+        self.assertEqual(row["draft"], "hello")
 
 
 if __name__ == "__main__":
