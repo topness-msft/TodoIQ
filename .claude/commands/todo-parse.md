@@ -89,6 +89,8 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
 
 Generate `coaching_text` based on the task's `action_type`, `description`, `key_people`, and `user_notes`. **Always read `user_notes`** and incorporate them into coaching.
 
+`coaching_text` is the task's **intent** — the specific next action, in the imperative, naming the person and the concrete ask. It is handed to the action layer verbatim as its instruction, so it must be *executable*, not advisory. Never derive it from `action_type` alone: `action_type` selects the verb, not the content. Two tasks must never share a `coaching_text` string — if what you wrote would fit any other task of the same `action_type` unchanged, it is too generic. See `/todo-refresh` Step 3b for the full contract and worked good/bad examples; the bar is identical here.
+
 Tailor coaching by action type:
 
 - **schedule-meeting**: Mention calendar availability for key_people (query WorkIQ if helpful), suggest duration/agenda. If `user_notes` contain agenda items → use them. If notes mention a duration → suggest that duration. Note the `/schedule-meeting` skill is available to help.
