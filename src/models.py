@@ -431,3 +431,122 @@ def get_stats() -> dict:
         return stats
     finally:
         conn.close()
+
+
+# -- Cowork task actions -----------------------------------------------------
+#
+# Phase 1 is PREVIEW ONLY: state is constrained by the schema to
+# previewing/ready/failed, so no row here can claim an M365 write.
+
+_ACTION_INSERT_FIELDS = (
+    "action_type", "intent", "notes_snapshot", "redirect_text",
+    "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
+)
+
+# Only the draft the user typed is editable. Everything Cowork produced, and
+# the state machine itself, is off limits from the API.
+ACTION_EDITABLE_FIELDS = frozenset({"draft_edited"})
+
+_ACTION_RESULT_FIELDS = frozenset({
+    "state", "finding", "draft", "terminal_status", "tool_trace", "error",
+    "conversation_id", "destination_kind", "destination_ref",
+})
+
+
+def create_task_action(task_id: int, **fields) -> dict:
+    """Insert a new task_actions row in state 'previewing'."""
+    cols = ["task_id"]
+    vals = [task_id]
+    for name in _ACTION_INSERT_FIELDS:
+        if fields.get(name) is not None:
+            cols.append(name)
+            vals.append(fields[name])
+
+    placeholders = ",".join("?" * len(cols))
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            f"INSERT INTO task_actions ({','.join(cols)}) VALUES ({placeholders})",
+            vals,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def get_latest_task_action(task_id: int) -> dict | None:
+    """Most recent attempt, ordered by id.
+
+    NOT created_at: those are second-precision TEXT and tie, which is exactly
+    the defect found live in get_last_sync. Two Redos inside one second would
+    otherwise return an arbitrary row.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def list_task_actions(task_id: int) -> list[dict]:
+    """Full attempt chain, oldest first. The Redo chain is the audit trail."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_actions WHERE task_id = ? ORDER BY id ASC",
+            (task_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_task_action(action_id: int, allowed: frozenset, **fields) -> dict | None:
+    """Update an action row, restricted to `allowed` field names."""
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return None
+
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"UPDATE task_actions SET {sets}, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+            list(updates.values()) + [action_id],
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def recover_stuck_previews() -> int:
+    """Fail any preview left mid-flight by a restart.
+
+    Without this a browser close or server restart strands the row in
+    'previewing' forever and the task can never be previewed again.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET state = 'failed', "
+            "error = 'Interrupted by a server restart.', "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE state = 'previewing'"
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()

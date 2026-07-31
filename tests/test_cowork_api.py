@@ -1,0 +1,462 @@
+"""Tests for the Cowork preview API.
+
+The real `cowork` binary is never invoked: `cowork_runner.start_preview` takes a
+`spawn` injection point, and these tests patch the handler's spawn hook.
+
+Phase 1 is PREVIEW ONLY. The last class here asserts that structurally — no
+route may exist that could write to M365.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import tornado.testing  # noqa: E402
+
+from src.app import make_app  # noqa: E402
+from src.services import cowork_runner as cr  # noqa: E402
+
+
+class FakeProc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self._out, self._err, self.returncode = stdout, stderr, returncode
+
+    def communicate(self, timeout=None):
+        return self._out, self._err
+
+    def kill(self):
+        self.returncode = -9
+
+    def poll(self):
+        return self.returncode
+
+
+# A minimal payload in the real CLI's shape. The prose key is "text" — verified
+# against tests/fixtures/spike-2076-stdout.json, not guessed.
+GOOD_STDOUT = json.dumps(
+    {
+        "terminal_status": "ok",
+        "conversation_id": "conv-abc",
+        "tool_trace": [{"name": "m365_teams-GetMessages", "ok": True}],
+        "text": (
+            "Sarah asked for the deck on Tuesday and has not had a reply.\n\n"
+            "## Step 2 - Draft nudge (not sent)\n\n"
+            "> Hi Sarah - sorry for the delay, sending the deck today.\n\n"
+            "Want me to send it?"
+        ),
+    }
+)
+
+
+class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
+    def setUp(self):
+        import src.db as db_module
+
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        db_module.DB_PATH = self.tmp.name
+        conn = db_module.get_connection()
+        db_module.init_db(conn)
+        conn.close()
+        cr.reset_registry()
+        self.spawned = []
+        self.log_tmp = tempfile.mkdtemp(prefix="cowork-api-")
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        cr.reset_registry()
+        os.unlink(self.tmp.name)
+
+    def get_app(self):
+        return make_app()
+
+    # ── helpers ──
+
+    def make_task(self, **extra):
+        """Create a task. coaching_text is not accepted by POST /api/tasks, so
+        it is applied with a follow-up PUT rather than widening that route."""
+        coaching = extra.pop("coaching_text", None)
+        body = {"title": "Send Sarah the deck", **extra}
+        resp = self.fetch(
+            "/api/tasks",
+            method="POST",
+            body=json.dumps(body),
+            headers={"Content-Type": "application/json"},
+        )
+        tid = json.loads(resp.body)["task"]["id"]
+        if coaching is not None:
+            self.fetch(
+                f"/api/tasks/{tid}",
+                method="PUT",
+                body=json.dumps({"coaching_text": coaching}),
+                headers={"Content-Type": "application/json"},
+            )
+        return tid
+
+    def spawner(self, proc):
+        def _spawn(argv, **kwargs):
+            self.spawned.append({"argv": argv, "kwargs": kwargs})
+            return proc
+
+        return _spawn
+
+    def start(self, task_id, proc=None, body=None):
+        """POST a preview with a fake process, then wait for the worker."""
+        from src.handlers import cowork as cowork_handler
+
+        proc = proc if proc is not None else FakeProc(stdout=GOOD_STDOUT)
+        cowork_handler.SPAWN = self.spawner(proc)
+        cowork_handler.LOG_DIR_OVERRIDE = self.log_tmp
+        try:
+            resp = self.fetch(
+                f"/api/tasks/{task_id}/cowork",
+                method="POST",
+                body=json.dumps(body or {}),
+                headers={"Content-Type": "application/json"},
+            )
+        finally:
+            pass
+        cr.wait_for(cr.preview_label(task_id), timeout=10)
+        return resp
+
+    def get_preview(self, task_id):
+        resp = self.fetch(f"/api/tasks/{task_id}/cowork")
+        return resp, (json.loads(resp.body) if resp.body else {})
+
+
+# ------------------------------------------------------------------ POST
+
+
+class TestStartPreview(CoworkAPITestBase):
+    def test_returns_202(self):
+        tid = self.make_task()
+        self.assertEqual(self.start(tid).code, 202)
+
+    def test_unknown_task_is_404(self):
+        resp = self.fetch(
+            "/api/tasks/999999/cowork",
+            method="POST",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.code, 404)
+
+    def test_creates_previewing_row(self):
+        tid = self.make_task()
+        self.start(tid, proc=FakeProc(stdout=GOOD_STDOUT))
+        _, data = self.get_preview(tid)
+        self.assertIn(data["action"]["state"], ("previewing", "ready"))
+
+    def test_snapshots_intent_and_notes(self):
+        tid = self.make_task(
+            coaching_text="Nudge Sarah about the deck",
+            user_notes="Keep it short; she is travelling",
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["intent"], "Nudge Sarah about the deck")
+        self.assertEqual(
+            data["action"]["notes_snapshot"], "Keep it short; she is travelling"
+        )
+
+    def test_composed_prompt_persisted(self):
+        tid = self.make_task(coaching_text="Nudge Sarah")
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertIn("Nudge Sarah", data["action"]["composed_prompt"])
+
+    def test_destination_parsed_from_source_url(self):
+        tid = self.make_task(
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:aaaa_bbbb@unq.gbl.spaces/1772052810655"
+            )
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["destination_kind"], "one_to_one")
+
+    def test_broadcast_destination_recorded(self):
+        tid = self.make_task(
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:ccccc@thread.v2/1772052810655"
+            )
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["destination_kind"], "group")
+
+    def test_redirect_text_stored_on_new_row(self):
+        tid = self.make_task()
+        self.start(tid)
+        self.start(tid, body={"redirect_text": "no, look for times next week"})
+        _, data = self.get_preview(tid)
+        self.assertEqual(
+            data["action"]["redirect_text"], "no, look for times next week"
+        )
+
+    def test_redo_creates_a_second_row_not_an_update(self):
+        tid = self.make_task()
+        self.start(tid)
+        self.start(tid, body={"redirect_text": "try again"})
+        resp = self.fetch(f"/api/tasks/{tid}/cowork?history=1")
+        self.assertEqual(len(json.loads(resp.body)["actions"]), 2)
+
+    def test_conflict_while_running(self):
+        """409 must be gated on the in-memory registry, not the DB row."""
+        tid = self.make_task()
+        from src.handlers import cowork as cowork_handler
+
+        never_returns = FakeProc(stdout=GOOD_STDOUT)
+        cowork_handler.SPAWN = self.spawner(never_returns)
+        cowork_handler.LOG_DIR_OVERRIDE = self.log_tmp
+
+        # Seed a run and keep it "in flight" by not draining it.
+        cr.reset_registry()
+        cr._runs[cr.preview_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "result": None,
+        }
+        resp = self.fetch(
+            f"/api/tasks/{tid}/cowork",
+            method="POST",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.code, 409)
+
+
+# ------------------------------------------------------------------- GET
+
+
+class TestGetPreview(CoworkAPITestBase):
+    def test_404_when_never_run(self):
+        tid = self.make_task()
+        resp, _ = self.get_preview(tid)
+        self.assertEqual(resp.code, 404)
+
+    def test_finalises_to_ready(self):
+        tid = self.make_task()
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["state"], "ready")
+
+    def test_draft_extracted(self):
+        tid = self.make_task()
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertIn("sending the deck today", data["action"]["draft"])
+
+    def test_finding_extracted(self):
+        tid = self.make_task()
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        self.assertIn("Sarah asked", data["action"]["finding"])
+
+    def test_sse_events_never_persisted(self):
+        """82 entries and the bulk of a 21KB payload."""
+        noisy = json.dumps(
+            {
+                "terminal_status": "ok",
+                "text": "> draft here",
+                "sse_events": [{"x": i} for i in range(82)],
+            }
+        )
+        tid = self.make_task()
+        self.start(tid, proc=FakeProc(stdout=noisy))
+        _, data = self.get_preview(tid)
+        self.assertNotIn("sse_events", json.dumps(data["action"]))
+
+    def test_latest_row_wins_by_id_not_timestamp(self):
+        """TEXT timestamps are second-precision and tie — the live get_last_sync
+        bug. Two redos inside one second must still order correctly."""
+        tid = self.make_task()
+        self.start(tid)
+        self.start(tid, body={"redirect_text": "second"})
+        self.start(tid, body={"redirect_text": "third"})
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["redirect_text"], "third")
+
+    def test_failure_recorded_as_failed(self):
+        tid = self.make_task()
+        self.start(tid, proc=FakeProc(stdout="", stderr="boom", returncode=1))
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["state"], "failed")
+        self.assertTrue(data["action"]["error"])
+
+    def test_auth_failure_surfaces_actionable_error(self):
+        proc = FakeProc(
+            stdout="", stderr="Not authenticated. Run: cowork auth login", returncode=1
+        )
+        tid = self.make_task()
+        self.start(tid, proc=proc)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["state"], "failed")
+        self.assertIn("cowork auth login", data["action"]["error"])
+
+
+# ------------------------------------------------------------------- PUT
+
+
+class TestEditDraft(CoworkAPITestBase):
+    def _put(self, tid, body):
+        return self.fetch(
+            f"/api/tasks/{tid}/cowork",
+            method="PUT",
+            body=json.dumps(body),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_saves_draft_edited(self):
+        tid = self.make_task()
+        self.start(tid)
+        self.assertEqual(self._put(tid, {"draft_edited": "My own words"}).code, 200)
+        _, data = self.get_preview(tid)
+        self.assertEqual(data["action"]["draft_edited"], "My own words")
+
+    def test_original_draft_preserved(self):
+        tid = self.make_task()
+        self.start(tid)
+        self._put(tid, {"draft_edited": "My own words"})
+        _, data = self.get_preview(tid)
+        self.assertIn("sending the deck today", data["action"]["draft"])
+
+    def test_404_when_no_action(self):
+        tid = self.make_task()
+        self.assertEqual(self._put(tid, {"draft_edited": "x"}).code, 404)
+
+    def test_rejects_unknown_fields(self):
+        """Only draft_edited is editable. state/draft/tool_trace are not."""
+        tid = self.make_task()
+        self.start(tid)
+        self._put(tid, {"state": "ready", "draft": "spoofed"})
+        _, data = self.get_preview(tid)
+        self.assertNotEqual(data["action"]["draft"], "spoofed")
+
+
+# ------------------------------------------------------- Phase 1 safety
+
+
+class TestNoExecutePath(CoworkAPITestBase):
+    def test_no_execute_route(self):
+        tid = self.make_task()
+        resp = self.fetch(
+            f"/api/tasks/{tid}/cowork/execute",
+            method="POST",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.code, 404)
+
+    def test_execute_states_rejected_by_schema(self):
+        import src.db as db_module
+
+        conn = db_module.get_connection()
+        try:
+            tid = self.make_task()
+            with self.assertRaises(Exception):
+                conn.execute(
+                    "INSERT INTO task_actions (task_id, state) VALUES (?, 'executed')",
+                    (tid,),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+    def test_denylist_passed_on_every_run(self):
+        tid = self.make_task()
+        self.start(tid)
+        self.assertIn("--tool-callback-config", self.spawned[0]["argv"])
+
+    def test_deny_tools_flag_never_used(self):
+        tid = self.make_task()
+        self.start(tid)
+        self.assertNotIn("--deny-tools", self.spawned[0]["argv"])
+
+
+# ------------------------------------------------------------------ refs
+
+
+class TestRefs(unittest.TestCase):
+    """--ref values, built from the REAL key_people shape.
+
+    A live sweep found key_people is JSON on 1942 of 1958 tasks, not a comma
+    separated list. A naive split produced refs like
+    `person:[{"name": "Sarah Goodwin"` on essentially every task.
+    """
+
+    def _refs(self, value):
+        from src.handlers.cowork import _refs
+
+        return _refs({"key_people": value})
+
+    def test_json_array_uses_email(self):
+        value = json.dumps(
+            [{"name": "Sarah Goodwin", "email": "Sarah.Goodwin@microsoft.com"}]
+        )
+        self.assertEqual(self._refs(value), ["person:Sarah.Goodwin@microsoft.com"])
+
+    def test_json_array_multiple_people(self):
+        value = json.dumps(
+            [
+                {"name": "Sarah Goodwin", "email": "sarah.goodwin@microsoft.com"},
+                {"name": "Sameer Bhangar", "email": "sameer@microsoft.com"},
+            ]
+        )
+        self.assertEqual(
+            self._refs(value),
+            ["person:sarah.goodwin@microsoft.com", "person:sameer@microsoft.com"],
+        )
+
+    def test_extra_keys_ignored(self):
+        value = json.dumps(
+            [
+                {
+                    "name": "Sarah Goodwin",
+                    "email": "sarah@microsoft.com",
+                    "role": "Principal PM Manager, CAT",
+                }
+            ]
+        )
+        self.assertEqual(self._refs(value), ["person:sarah@microsoft.com"])
+
+    def test_falls_back_to_name_without_email(self):
+        self.assertEqual(
+            self._refs(json.dumps([{"name": "Suzy Agi"}])), ["person:Suzy Agi"]
+        )
+
+    def test_plain_text_still_supported(self):
+        self.assertEqual(
+            self._refs("Sarah Goodwin, Sameer Bhangar"),
+            ["person:Sarah Goodwin", "person:Sameer Bhangar"],
+        )
+
+    def test_empty_is_no_refs(self):
+        self.assertEqual(self._refs(""), [])
+        self.assertEqual(self._refs(None), [])
+
+    def test_no_ref_ever_contains_json_punctuation(self):
+        value = json.dumps([{"name": "A B", "email": "a@b.com"}])
+        for ref in self._refs(value):
+            for ch in '[]{}"':
+                self.assertNotIn(ch, ref)
+
+    def test_malformed_json_does_not_crash(self):
+        self.assertEqual(self._refs('[{"name": '), [])
+
+    def test_duplicates_collapsed(self):
+        value = json.dumps(
+            [{"email": "a@b.com"}, {"email": "a@b.com"}]
+        )
+        self.assertEqual(self._refs(value), ["person:a@b.com"])
+
+
+if __name__ == "__main__":
+    unittest.main()

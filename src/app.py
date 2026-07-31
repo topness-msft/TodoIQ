@@ -18,7 +18,10 @@ from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
-from .models import get_expired_snoozed, unsnooze_task, get_task
+from .handlers.cowork import CoworkHandler
+from .models import (
+    get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
+)
 from .services.claude_runner import run_copilot
 
 logger = logging.getLogger(__name__)
@@ -150,6 +153,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/action", TaskActionHandler),
             (r"/api/tasks/(\d+)/refresh", TaskRefreshHandler),
             (r"/api/tasks/(\d+)/skill", TaskSkillHandler),
+            (r"/api/tasks/(\d+)/cowork", CoworkHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
             (r"/api/runner-status", RunnerStatusHandler),
@@ -213,6 +217,12 @@ def start_server(port=8766):
     conn.close()
 
     _recover_stuck_parses()
+
+    # A preview left mid-flight by a restart would otherwise sit in 'previewing'
+    # forever, and that task could never be previewed again.
+    stranded = recover_stuck_previews()
+    if stranded:
+        logger.info(f"Startup recovery: failed {stranded} interrupted Cowork preview(s)")
 
     app = make_app()
     app.listen(port)
