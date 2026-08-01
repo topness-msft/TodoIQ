@@ -2944,6 +2944,12 @@ function renderCoworkCard(task) {
             : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
               + cwRedoBlock(task.id)
+              + (a.conversation_id
+                  ? '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
+                    + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
+                      + encodeURIComponent(a.conversation_id))
+                    + '" target="_blank" rel="noopener noreferrer">Open in Cowork</a>'
+                  : '')
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
               + editedBadge;
 

@@ -2677,6 +2677,7 @@ html, body {
     color: var(--text-primary);
 }
 .cw-btn:hover { border-color: var(--accent); }
+.cw-btn-link { display: inline-flex; align-items: center; text-decoration: none; }
 .cw-btn-go {
     background: var(--success); border-color: var(--success); color: #fff;
 }
