@@ -96,7 +96,8 @@ class TestOutputFormatting:
                     "destination_kind": "none",
                     "conversation_id": CONVERSATION_ID,
                 })};
-                selectTask({task_id});
+                selectedTaskId = {task_id};
+                renderDetailPane(tasks.find(task => task.id === {task_id}));
                 """
             )
             _assert_formatted_card(page, task_id)
@@ -132,6 +133,7 @@ class TestOutputFormatting:
                     "cw_draft": DRAFT,
                     "cw_dest_kind": "none",
                     "cw_conversation_id": CONVERSATION_ID,
+                    "cw_seen_at": "2026-07-31T19:00:00Z",
                 })});
                 selectTask({task_id});
                 """

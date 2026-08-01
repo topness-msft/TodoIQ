@@ -63,12 +63,17 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         db_module.init_db(conn)
         conn.close()
         cr.reset_registry()
+        self.original_auth_login = cr._auth_login_fn
+        cr._auth_login_fn = lambda *args, **kwargs: type(
+            "Login", (), {"returncode": 1}
+        )()
         self.spawned = []
         self.log_tmp = tempfile.mkdtemp(prefix="cowork-api-")
         super().setUp()
 
     def tearDown(self):
         super().tearDown()
+        cr._auth_login_fn = self.original_auth_login
         cr.reset_registry()
         os.unlink(self.tmp.name)
 
