@@ -176,6 +176,17 @@ def _migrate(conn: sqlite3.Connection):
     if "island_url" not in action_cols:
         conn.execute("ALTER TABLE task_actions ADD COLUMN island_url TEXT")
         conn.commit()
+    # Audience binding. SQLite cannot add a CHECK with ALTER TABLE, so the
+    # allowed delivery_channel values are enforced by the API layer as well.
+    for column in (
+        "delivery_channel",
+        "destination_display",
+        "destination_confirmed_at",
+        "destination_source",
+    ):
+        if column not in action_cols:
+            conn.execute(f"ALTER TABLE task_actions ADD COLUMN {column} TEXT")
+            conn.commit()
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -302,6 +313,11 @@ CREATE TABLE IF NOT EXISTS task_actions (
     error            TEXT,
     seen_at          TEXT,
     island_url       TEXT,
+    delivery_channel TEXT
+                         CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email')),
+    destination_display TEXT,
+    destination_confirmed_at TEXT,
+    destination_source TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

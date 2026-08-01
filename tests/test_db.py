@@ -164,6 +164,8 @@ class TestTaskActionsSchema(unittest.TestCase):
             "destination_kind", "destination_ref", "conversation_id",
             "terminal_status", "tool_trace", "error",
             "seen_at", "island_url", "created_at", "updated_at",
+            "delivery_channel", "destination_display",
+            "destination_confirmed_at", "destination_source",
         }
         self.assertEqual(cols, expected)
 

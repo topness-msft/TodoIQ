@@ -19,7 +19,7 @@ from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
-from .handlers.cowork import CoworkHandler
+from .handlers.cowork import CoworkDestinationHandler, CoworkHandler
 from .models import (
     get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
 )
@@ -157,6 +157,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/refresh", TaskRefreshHandler),
             (r"/api/tasks/(\d+)/skill", TaskSkillHandler),
             (r"/api/tasks/(\d+)/cowork", CoworkHandler),
+            (r"/api/tasks/(\d+)/cowork/destination", CoworkDestinationHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
             (r"/api/runner-status", RunnerStatusHandler),

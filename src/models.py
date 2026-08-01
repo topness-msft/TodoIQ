@@ -449,8 +449,12 @@ def get_stats() -> dict:
 _ACTION_INSERT_FIELDS = (
     "action_type", "intent", "notes_snapshot", "redirect_text",
     "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
-    "island_url",
+    "island_url", "delivery_channel", "destination_display", "destination_source",
 )
+
+# Teams and email are the only transports TodoIQ can describe today. The value
+# is orthogonal to destination_kind, which describes audience size, not channel.
+DELIVERY_CHANNELS = frozenset({"teams", "email"})
 
 # Only the draft the user typed is editable. Everything Cowork produced, and
 # the state machine itself, is off limits from the API.
@@ -519,6 +523,49 @@ def mark_task_action_seen(action_id: int) -> dict | None:
             "SELECT * FROM task_actions WHERE id = ?", (action_id,)
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def confirm_destination(
+    action_id: int,
+    delivery_channel: str,
+    destination_ref: str,
+    destination_display: str,
+    destination_source: str,
+) -> dict | None:
+    """Bind a reviewed audience to a ready action, timestamped by the server.
+
+    The state guard lives in SQL, mirroring mark_task_action_seen, so a caller
+    can never confirm a preview that is still running or has already failed.
+    Confirming records who an action is for; it does not deliver anything.
+    """
+    if delivery_channel not in DELIVERY_CHANNELS:
+        return None
+    ref = (destination_ref or "").strip()
+    display = (destination_display or "").strip()
+    if not ref or not display:
+        return None
+
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET delivery_channel = ?, destination_ref = ?, "
+            "destination_display = ?, destination_source = ?, "
+            "destination_confirmed_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'ready'",
+            (
+                delivery_channel, ref, display, destination_source,
+                _now(), _now(), action_id,
+            ),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
     finally:
         conn.close()
 

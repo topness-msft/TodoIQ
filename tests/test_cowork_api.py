@@ -215,6 +215,42 @@ class TestStartPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertEqual(data["action"]["destination_kind"], "one_to_one")
 
+    def test_linked_teams_thread_is_destination_not_cowork_conversation(self):
+        tid = self.make_task(
+            source_type="chat",
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:aaaa_bbbb@unq.gbl.spaces/1772052810655"
+            ),
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        response = self.start(tid, proc=FakeProc(stdout=GOOD_STDOUT))
+        action = json.loads(response.body)["action"]
+
+        self.assertIsNone(action["conversation_id"])
+        self.assertEqual(
+            action["destination_ref"], "19:aaaa_bbbb@unq.gbl.spaces"
+        )
+        self.assertEqual(action["delivery_channel"], "teams")
+        self.assertIn("Sarah Goodwin", action["destination_display"])
+
+    def test_manual_unique_person_prefills_without_choosing_channel(self):
+        tid = self.make_task(
+            source_type="manual",
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        response = self.start(tid)
+        action = json.loads(response.body)["action"]
+
+        self.assertIsNone(action["delivery_channel"])
+        self.assertEqual(action["destination_ref"], "sarah@microsoft.com")
+        self.assertEqual(action["destination_display"], "Sarah Goodwin")
+        self.assertEqual(action["destination_source"], "auto_key_people")
+
     def test_broadcast_destination_recorded(self):
         tid = self.make_task(
             source_url=(
@@ -335,6 +371,39 @@ class TestGetPreview(CoworkAPITestBase):
         self.assertEqual(data["action"]["state"], "failed")
         self.assertIn("cowork auth login", data["action"]["error"])
 
+    def test_finalise_auto_confirms_safe_teams_one_to_one(self):
+        tid = self.make_task(
+            source_type="chat",
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:aaaa_bbbb@unq.gbl.spaces/1772052810655"
+            ),
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "ready")
+        self.assertIsNotNone(data["action"]["destination_confirmed_at"])
+        self.assertEqual(data["action"]["destination_source"], "auto_source_url")
+
+    def test_finalise_does_not_auto_confirm_broadcast(self):
+        tid = self.make_task(
+            source_type="chat",
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:group@thread.v2/1772052810655"
+            ),
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "ready")
+        self.assertIsNone(data["action"]["destination_confirmed_at"])
+        self.assertTrue(data["action"]["is_broadcast"])
+
 
 # ------------------------------------------------------------- mark seen
 
@@ -378,6 +447,96 @@ class TestMarkSeen(CoworkAPITestBase):
         )
 
         self.assertEqual(response.code, 400)
+
+
+# ------------------------------------------------------ confirm destination
+
+
+class TestConfirmDestination(CoworkAPITestBase):
+    def _confirm(self, tid, body):
+        return self.fetch(
+            f"/api/tasks/{tid}/cowork/destination",
+            method="POST",
+            body=json.dumps(body),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_user_picker_confirms_exact_validated_bundle(self):
+        tid = self.make_task()
+        self.make_action(tid, state="ready")
+        response = self._confirm(
+            tid,
+            {
+                "delivery_channel": "email",
+                "destination_ref": "sarah@microsoft.com",
+                "destination_display": "Sarah Goodwin",
+                "source": "auto_source_url",
+            },
+        )
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(response.code, 200)
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_ref"], "sarah@microsoft.com")
+        self.assertEqual(action["destination_display"], "Sarah Goodwin")
+        self.assertEqual(action["destination_source"], "user_picker")
+        self.assertIsNotNone(action["destination_confirmed_at"])
+
+    def test_rejects_unknown_channel_and_blank_destination(self):
+        tid = self.make_task()
+        self.make_action(tid, state="ready")
+        self.assertEqual(
+            self._confirm(
+                tid,
+                {
+                    "delivery_channel": "sms",
+                    "destination_ref": "x",
+                    "destination_display": "X",
+                },
+            ).code,
+            400,
+        )
+        self.assertEqual(
+            self._confirm(
+                tid,
+                {
+                    "delivery_channel": "teams",
+                    "destination_ref": " ",
+                    "destination_display": " ",
+                },
+            ).code,
+            400,
+        )
+
+    def test_previewing_action_cannot_be_confirmed(self):
+        tid = self.make_task()
+        self.make_action(tid, state="previewing")
+        response = self._confirm(
+            tid,
+            {
+                "delivery_channel": "teams",
+                "destination_ref": "sarah@microsoft.com",
+                "destination_display": "Sarah Goodwin",
+            },
+        )
+        self.assertEqual(response.code, 409)
+
+    def test_history_includes_broadcast_enrichment(self):
+        tid = self.make_task()
+        action_id = self.make_action(tid, state="ready")
+        import src.db as db_module
+
+        conn = db_module.get_connection()
+        conn.execute(
+            "UPDATE task_actions SET destination_kind='group' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.fetch(f"/api/tasks/{tid}/cowork?history=1")
+        action = json.loads(response.body)["actions"][0]
+        self.assertTrue(action["is_broadcast"])
 
 
 # ------------------------------------------------------------------- PUT

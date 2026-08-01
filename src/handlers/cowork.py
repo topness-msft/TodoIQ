@@ -17,6 +17,8 @@ import tornado.web
 
 from ..models import (
     ACTION_EDITABLE_FIELDS,
+    DELIVERY_CHANNELS,
+    confirm_destination,
     create_task_action,
     get_latest_task_action,
     get_task,
@@ -86,6 +88,87 @@ def _refs(task: dict) -> list:
     return refs
 
 
+_CHANNEL_BY_SOURCE = {
+    "email": "email",
+    "chat": "teams",
+    "teams": "teams",
+    "meeting": "teams",
+}
+
+_BROADCAST_KINDS = ("group", "meeting", "channel", "unknown")
+
+
+def _people(task: dict) -> list:
+    """Structured key_people entries, using the same JSON shape as _refs."""
+    raw = (task.get("key_people") or "").strip()
+    if not raw.startswith("[") and not raw.startswith("{"):
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(data, dict):
+        data = [data]
+
+    people = []
+    for person in data:
+        if not isinstance(person, dict):
+            continue
+        email = (person.get("email") or "").strip()
+        name = (person.get("name") or "").strip()
+        if email or name:
+            people.append({"name": name or email, "email": email})
+    return people
+
+
+def _resolve_destination(task: dict, destination: dict) -> dict:
+    """Best-effort audience binding for a new action row.
+
+    A linked Teams thread is the delivery target, so it is stored in
+    destination_ref. The Cowork conversation id is a different identifier and is
+    never reused as an audience. Without a linked thread a single known person
+    can seed the reference, but the channel stays unset so the user still
+    chooses Teams or email.
+    """
+    people = _people(task)
+    source_type = (task.get("source_type") or "").strip().lower()
+    channel = _CHANNEL_BY_SOURCE.get(source_type)
+    person = people[0] if len(people) == 1 else None
+
+    if destination.get("conversation_id"):
+        label = destination.get("audience_label") or "conversation"
+        return {
+            "delivery_channel": channel or "teams",
+            "destination_ref": destination["conversation_id"],
+            "destination_display": (
+                f"{person['name']} ({label})" if person else label
+            ),
+            "destination_source": "auto_source_url",
+        }
+
+    if person:
+        return {
+            "delivery_channel": channel,
+            "destination_ref": person["email"] or person["name"],
+            "destination_display": person["name"],
+            "destination_source": "auto_key_people",
+        }
+
+    return {
+        "delivery_channel": channel,
+        "destination_ref": None,
+        "destination_display": None,
+        "destination_source": None,
+    }
+
+
+def _enrich(action: dict) -> dict:
+    """Add the derived audience risk the UI needs but the row does not store."""
+    if action is not None:
+        action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
+    return action
+
+
 def _finalise(action: dict) -> dict:
     """Fold a finished subprocess result into the action row.
 
@@ -116,7 +199,27 @@ def _finalise(action: dict) -> dict:
         fields["conversation_id"] = parsed["conversation_id"]
 
     updated = update_task_action(action["id"], frozenset(fields), **fields)
-    return updated or action
+    row = updated or action
+
+    # Only an unambiguous 1:1 is safe to confirm without the user looking. Any
+    # broadcast audience stays unconfirmed until it is reviewed in the picker.
+    if (
+        row.get("state") == "ready"
+        and row.get("destination_kind") == "one_to_one"
+        and not row.get("destination_confirmed_at")
+        and row.get("destination_ref")
+        and row.get("destination_display")
+    ):
+        confirmed = confirm_destination(
+            row["id"],
+            row.get("delivery_channel") or "teams",
+            row["destination_ref"],
+            row["destination_display"],
+            row.get("destination_source") or "auto_source_url",
+        )
+        if confirmed:
+            return confirmed
+    return row
 
 
 def _clean(action: dict) -> dict:
@@ -173,9 +276,8 @@ class CoworkHandler(tornado.web.RequestHandler):
             redirect_text=redirect_text,
             composed_prompt=prompt,
             destination_kind=destination.get("kind"),
-            destination_ref=destination.get("counterparty_id"),
-            conversation_id=destination.get("conversation_id"),
             island_url=get_cached_cowork_island(),
+            **_resolve_destination(task, destination),
         )
 
         try:
@@ -198,7 +300,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(500, f"Could not start Cowork: {exc}")
 
         self.set_status(202)
-        self.write(json.dumps({"action": _clean(action)}))
+        self.write(json.dumps({"action": _enrich(_clean(action))}))
 
     # ── GET ──
 
@@ -206,7 +308,9 @@ class CoworkHandler(tornado.web.RequestHandler):
         tid = int(task_id)
         if self.get_argument("history", None):
             return self.write(
-                json.dumps({"actions": [_clean(a) for a in list_task_actions(tid)]})
+                json.dumps(
+                    {"actions": [_enrich(_clean(a)) for a in list_task_actions(tid)]}
+                )
             )
 
         action = get_latest_task_action(tid)
@@ -220,7 +324,7 @@ class CoworkHandler(tornado.web.RequestHandler):
         if self.get_argument("mark_seen", None) and pre_state == "ready":
             action = mark_task_action_seen(action["id"])
 
-        self.write(json.dumps({"action": _clean(action)}))
+        self.write(json.dumps({"action": _enrich(_clean(action))}))
 
     # ── PUT ──
 
@@ -237,4 +341,47 @@ class CoworkHandler(tornado.web.RequestHandler):
         if updated is None:
             return self._fail(400, "No editable fields supplied")
 
-        self.write(json.dumps({"action": _clean(updated)}))
+        self.write(json.dumps({"action": _enrich(_clean(updated))}))
+
+
+class CoworkDestinationHandler(tornado.web.RequestHandler):
+    """Confirm who a ready preview is addressed to. Nothing is delivered here.
+
+    Phase 1 remains preview only: this records a reviewed audience so a future
+    execution path has something exact to bind to, and so the card can warn
+    before a draft is copied to a broadcast conversation.
+    """
+
+    def _fail(self, code, message):
+        self.set_status(code)
+        self.write(json.dumps({"error": message}))
+
+    def post(self, task_id):
+        action = get_latest_task_action(int(task_id))
+        if not action:
+            return self._fail(404, "No Cowork preview for this task")
+
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except (json.JSONDecodeError, TypeError):
+            return self._fail(400, "Invalid JSON")
+
+        channel = (body.get("delivery_channel") or "").strip().lower()
+        ref = (body.get("destination_ref") or "").strip()
+        display = (body.get("destination_display") or "").strip()
+        if channel not in DELIVERY_CHANNELS or not ref or not display:
+            return self._fail(
+                400,
+                "delivery_channel, destination_ref and destination_display "
+                "are required",
+            )
+
+        # Provenance is server owned: anything arriving over HTTP is a picker
+        # confirmation, never an automatic resolution.
+        confirmed = confirm_destination(
+            action["id"], channel, ref, display, "user_picker"
+        )
+        if not confirmed:
+            return self._fail(409, "Only a ready preview can be confirmed")
+
+        self.write(json.dumps({"action": _enrich(_clean(confirmed))}))
