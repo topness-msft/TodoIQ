@@ -481,6 +481,7 @@ function cwApply(t, action) {
   t.cw_dest_kind = action.destination_kind || '';
   t.cw_dest_ref = action.destination_ref || '';
   t.cw_conversation_id = action.conversation_id || '';
+  t.cw_seen_at = action.seen_at || null;
   t.cw_error = action.error || '';
   t.cw_terminal_status = action.terminal_status || '';
   if (action.created_at && !_cwStartedAt[t.id]) {
@@ -497,13 +498,14 @@ function cwFormatElapsed(id) {
   return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') + ' elapsed';
 }
 
-async function cwLoad(id) {
+async function cwLoad(id, markSeen) {
   const t = cwTask(id);
-  if (!t || t.cw_loaded) return;
+  if (!t || (t.cw_loaded && !markSeen)) return;
+  const firstLoad = !t.cw_loaded;
   t.cw_loaded = true;          // guard before the await, so the re-render
-  t.cw_state = 'loading';      // triggered by selectTask cannot re-enter
+  if (firstLoad) t.cw_state = 'loading';
   try {
-    const res = await fetch(`/api/tasks/${id}/cowork`);
+    const res = await fetch(`/api/tasks/${id}/cowork${markSeen ? '?mark_seen=1' : ''}`);
     const data = res.status === 404 ? { action: null } : await res.json();
     cwApply(t, data.action);
     if (t.cw_state === 'previewing') cwStartPoller(id);
@@ -642,7 +644,8 @@ async function cwPoll(id) {
   selectTask = function(id) {
     _prev(id);
     const t = cwTask(id);
-    if (t && t.action_type && t.status !== 'suggested' && !t.cw_loaded) cwLoad(id);
+    if (t && t.action_type && t.status !== 'suggested' &&
+        (!t.cw_loaded || (t.cw_state === 'ready' && !t.cw_seen_at))) cwLoad(id, true);
     if (t && t.cw_state === 'previewing' && !_cwPollers[id]) cwStartPoller(id);
   };
 })();

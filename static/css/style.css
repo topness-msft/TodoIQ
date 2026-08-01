@@ -2625,6 +2625,20 @@ html, body {
     border: 2px solid var(--border-primary); border-top-color: var(--accent);
     border-radius: 50%; animation: cw-spin .8s linear infinite;
 }
+.cw-status-indicator {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; flex: 0 0 18px;
+    color: var(--accent); font-size: 14px;
+}
+.cw-status-running { animation: cw-status-pulse 1.2s ease-in-out infinite; }
+.cw-status-unread {
+    border-radius: 50%; background: var(--accent-bg);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+@keyframes cw-status-pulse {
+    0%, 100% { opacity: .35; transform: scale(.8); }
+    50% { opacity: 1; transform: scale(1); }
+}
 @keyframes cw-spin { to { transform: rotate(360deg); } }
 
 /* receipt */
@@ -2670,4 +2684,3 @@ html, body {
 .cw-btn-sec { color: var(--accent); border-color: var(--accent); background: transparent; }
 .cw-btn-ghost { color: var(--text-secondary); border-color: transparent; background: transparent; }
 .cw-foot-note { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
-

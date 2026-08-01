@@ -566,7 +566,14 @@ function renderSection(sectionId, sectionTasks) {
             }
         }
         var parseHtml = parseStatusIcon(task.parse_status);
-        var enrichedHtml = task.skill_output ? '<span class="enriched-icon" title="Skill enriched">\u26A1</span>' : '';
+        var enrichedHtml = '';
+        if (task.cw_state === 'previewing') {
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working">\u2726</span>';
+        } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
+            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">\u2726</span>';
+        } else if (task.skill_output) {
+            enrichedHtml = '<span class="enriched-icon" title="Skill enriched">\u26A1</span>';
+        }
         var waitingIconHtml = waitingActivityIcon(task);
         var suggestionBadgeHtml = suggestionCheckBadge(task);
 
@@ -632,6 +639,7 @@ function renderSection(sectionId, sectionTasks) {
 // ── Select Task ────────────────────────────────────────────────────────
 function selectTask(taskId) {
     selectedTaskId = taskId;
+    cwLoad(taskId, true);
 
     var rows = document.querySelectorAll('.task-row');
     rows.forEach(function(row) {
@@ -760,6 +768,8 @@ function renderDetailPane(task) {
         html += renderSuggestionCheckCard(task);
     }
 
+    html += renderCoworkCard(task);
+
     // User Notes
     html += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
@@ -773,8 +783,6 @@ function renderDetailPane(task) {
         + escapeHtml(task.user_notes || '')
         + '</textarea>'
         + '</div>';
-
-    html += renderCoworkCard(task);
 
     // Error message box
     if (task.error_message && task.parse_status === 'error') {
@@ -2961,10 +2969,17 @@ function cwRerender(taskId) {
     if (task && selectedTaskId === taskId) renderDetailPane(task);
 }
 
-function cwLoad(taskId) {
+function cwSyncTaskState(taskId, action) {
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    if (!task) return;
+    task.cw_state = action ? action.state : null;
+    task.cw_seen_at = action ? action.seen_at : null;
+}
+
+function cwLoad(taskId, markSeen) {
     if (_cwLoading[taskId]) return;
     _cwLoading[taskId] = true;
-    fetch('/api/tasks/' + taskId + '/cowork')
+    fetch('/api/tasks/' + taskId + '/cowork' + (markSeen ? '?mark_seen=1' : ''))
         .then(function(res) {
             if (res.status === 404) return { action: null };
             return res.json();
@@ -2972,7 +2987,9 @@ function cwLoad(taskId) {
         .then(function(data) {
             delete _cwLoading[taskId];
             _cwActions[taskId] = data.action || null;
+            cwSyncTaskState(taskId, data.action || null);
             if (data.action && data.action.state === 'previewing') startCoworkPoller(taskId);
+            renderTaskList();
             cwRerender(taskId);
         })
         .catch(function() {
@@ -3003,6 +3020,8 @@ function cwStart(taskId, isRedo) {
     .then(function(data) {
         if (data.action) {
             _cwActions[taskId] = data.action;
+            cwSyncTaskState(taskId, data.action);
+            renderTaskList();
             startCoworkPoller(taskId);
         }
         cwRerender(taskId);
@@ -3097,6 +3116,8 @@ function pollCoworkStatus(taskId) {
             var action = data.action || null;
             if (!action) return;
             _cwActions[taskId] = action;
+            cwSyncTaskState(taskId, action);
+            renderTaskList();
             if (action.state !== 'previewing') {
                 stopCoworkPoller(taskId);
                 cwRerender(taskId);

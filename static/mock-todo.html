@@ -414,7 +414,11 @@ body {
 
 .cw-progress { display: flex; align-items: center; gap: 10px; padding: 12px 2px; color: var(--text-secondary); }
 .cw-spinner { width: 14px; height: 14px; border: 2px solid var(--ai-border); border-top-color: var(--ai); border-radius: 50%; animation: cwspin .7s linear infinite; flex-shrink: 0; }
-@keyframes cwspin { to { transform: rotate(360deg); } }
+@keyframes cwspin { to { transform:rotate(360deg); } }
+.cw-status-indicator { display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex:0 0 18px;color:var(--ai);font-size:14px; }
+.cw-status-running { animation:cwstatus 1.2s ease-in-out infinite; }
+.cw-status-unread { border-radius:50%;background:var(--ai-bg);box-shadow:0 0 0 1px var(--ai); }
+@keyframes cwstatus { 0%,100%{opacity:.35;transform:scale(.8)} 50%{opacity:1;transform:scale(1)} }
 .cw-progress-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, Consolas, monospace; }
 
 .cw-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; }
@@ -1270,12 +1274,17 @@ function renderRow(t, compact) {
     else if (t.status === 'suggested' && t._wa_status === 'unclear') statusPill = '<span class="status-pill unclear">Unclear</span>';
     else if (t.status === 'suggested' && t.suggestion_refreshed_at) statusPill = '<span class="status-pill checked">Checked</span>';
 
+    const cwIndicator = t.cw_state === 'previewing'
+      ? '<span class="cw-status-indicator cw-status-running" title="Cowork is working">✦</span>'
+      : (t.cw_state === 'ready' && !t.cw_seen_at
+        ? '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">✦</span>' : '');
     return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})" title="Task #${t.id}">
       ${chk}<div class="task-body">
         <div class="task-line1">${priDot}<div class="task-title">${esc(t.title)}</div>${statusPill}${dueHtml}</div>
         ${line2?`<div class="task-line2">${line2}</div>`:''}${ghost}
       </div>
       <div class="task-right">
+        ${cwIndicator}
         ${!isSug?`<span class="task-star${starred?' starred':''}" onclick="event.stopPropagation();toggleStar(${t.id})">${starred?'★':'☆'}</span>`:''}
         <button class="task-overflow" onclick="event.stopPropagation();showTaskOverflow(event,${t.id})">⋯</button>
       </div></div>`;
