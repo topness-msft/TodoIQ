@@ -62,6 +62,33 @@ class TestModels(unittest.TestCase):
         self.assertEqual(len(suggested), 1)
         self.assertEqual(suggested[0]["title"], "Task C")
 
+    def test_list_tasks_includes_latest_cowork_state_and_seen_at(self):
+        from src.models import create_task, create_task_action, list_tasks
+
+        task = create_task(title="Cowork state")
+        first = create_task_action(task["id"], action_type="follow-up")
+        conn = self.db_module.get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='ready', seen_at='2026-07-31T12:00:00Z' "
+            "WHERE id=?",
+            (first["id"],),
+        )
+        conn.commit()
+        conn.close()
+        create_task_action(task["id"], action_type="follow-up")
+
+        listed = next(item for item in list_tasks() if item["id"] == task["id"])
+        self.assertEqual(listed["cw_state"], "previewing")
+        self.assertIsNone(listed["cw_seen_at"])
+
+    def test_list_tasks_cowork_fields_are_none_without_action(self):
+        from src.models import create_task, list_tasks
+
+        task = create_task(title="No Cowork action")
+        listed = next(item for item in list_tasks() if item["id"] == task["id"])
+        self.assertIsNone(listed["cw_state"])
+        self.assertIsNone(listed["cw_seen_at"])
+
     def test_update_task(self):
         from src.models import create_task, update_task
         task = create_task(title="Original")

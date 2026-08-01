@@ -21,6 +21,7 @@ from ..models import (
     get_latest_task_action,
     get_task,
     list_task_actions,
+    mark_task_action_seen,
     update_task_action,
 )
 from ..services.cowork_runner import (
@@ -210,8 +211,12 @@ class CoworkHandler(tornado.web.RequestHandler):
         if not action:
             return self._fail(404, "No Cowork preview for this task")
 
+        pre_state = action["state"]
         if action["state"] == "previewing":
             action = _finalise(action)
+
+        if self.get_argument("mark_seen", None) and pre_state == "ready":
+            action = mark_task_action_seen(action["id"])
 
         self.write(json.dumps({"action": _clean(action)}))
 

@@ -217,7 +217,15 @@ def list_tasks(
             params.extend(exclude_statuses)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
-            f"SELECT * FROM tasks {where} ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?",
+            f"""
+            SELECT t.*,
+              (SELECT state FROM task_actions
+               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_state,
+              (SELECT seen_at FROM task_actions
+               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_seen_at
+            FROM tasks t {where}
+            ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?
+            """,
             (*params, limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -492,6 +500,24 @@ def get_latest_task_action(task_id: int) -> dict | None:
             (task_id,),
         ).fetchone()
         return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def mark_task_action_seen(action_id: int) -> dict | None:
+    """Mark a ready Cowork action as seen using a server-generated timestamp."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE task_actions SET seen_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'ready' AND seen_at IS NULL",
+            (_now(), _now(), action_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 

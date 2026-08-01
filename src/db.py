@@ -167,6 +167,13 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE tasks ADD COLUMN is_quick_hit INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
+    action_cols = [
+        r[1] for r in conn.execute("PRAGMA table_info(task_actions)").fetchall()
+    ]
+    if "seen_at" not in action_cols:
+        conn.execute("ALTER TABLE task_actions ADD COLUMN seen_at TEXT")
+        conn.commit()
+
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
         r[0] for r in conn.execute(
@@ -290,6 +297,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     terminal_status  TEXT,
     tool_trace       TEXT,
     error            TEXT,
+    seen_at          TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

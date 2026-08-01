@@ -163,7 +163,7 @@ class TestTaskActionsSchema(unittest.TestCase):
             "finding", "draft", "draft_edited",
             "destination_kind", "destination_ref", "conversation_id",
             "terminal_status", "tool_trace", "error",
-            "created_at", "updated_at",
+            "seen_at", "created_at", "updated_at",
         }
         self.assertEqual(cols, expected)
 

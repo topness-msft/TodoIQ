@@ -98,6 +98,20 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
             )
         return tid
 
+    def make_action(self, task_id, state="ready", seen_at=None):
+        from src.models import create_task_action
+        from src.db import get_connection
+
+        action = create_task_action(task_id, action_type="follow-up")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state=?, seen_at=? WHERE id=?",
+            (state, seen_at, action["id"]),
+        )
+        conn.commit()
+        conn.close()
+        return action["id"]
+
     def spawner(self, proc):
         def _spawn(argv, **kwargs):
             self.spawned.append({"argv": argv, "kwargs": kwargs})
@@ -300,6 +314,50 @@ class TestGetPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertEqual(data["action"]["state"], "failed")
         self.assertIn("cowork auth login", data["action"]["error"])
+
+
+# ------------------------------------------------------------- mark seen
+
+
+class TestMarkSeen(CoworkAPITestBase):
+    def test_mark_seen_sets_timestamp_on_already_ready_action(self):
+        tid = self.make_task()
+        self.make_action(tid, state="ready")
+
+        response = self.fetch(f"/api/tasks/{tid}/cowork?mark_seen=1")
+        action = json.loads(response.body)["action"]
+
+        self.assertIsNotNone(action["seen_at"])
+
+    def test_mark_seen_does_not_mark_action_that_finalises_in_same_get(self):
+        tid = self.make_task()
+        self.start(tid)
+
+        response = self.fetch(f"/api/tasks/{tid}/cowork?mark_seen=1")
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(action["state"], "ready")
+        self.assertIsNone(action["seen_at"])
+
+    def test_plain_get_does_not_mark_ready_action(self):
+        tid = self.make_task()
+        self.make_action(tid, state="ready")
+
+        _, data = self.get_preview(tid)
+
+        self.assertIsNone(data["action"]["seen_at"])
+
+    def test_client_cannot_set_seen_timestamp_through_put(self):
+        tid = self.make_task()
+        self.make_action(tid, state="ready")
+        response = self.fetch(
+            f"/api/tasks/{tid}/cowork",
+            method="PUT",
+            body=json.dumps({"seen_at": "1999-01-01T00:00:00Z"}),
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.code, 400)
 
 
 # ------------------------------------------------------------------- PUT
