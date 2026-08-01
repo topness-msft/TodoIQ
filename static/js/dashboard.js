@@ -2818,17 +2818,104 @@ function cwIntentBlock(task, editable) {
         + '</div>';
 }
 
+// The audience a draft is written for. This is deliberately separate from the
+// Cowork conversation id: one is who would receive the message, the other is
+// which research session produced it.
 function cwDestBlock(action) {
     var d = CW_DEST[action.destination_kind] || CW_DEST['unknown'];
     var conv = action.conversation_id || '';
-    return '<div class="cw-dest' + (d.risky ? ' is-risky' : '') + '">'
-        + '<span class="d-icon">' + (d.risky ? '&#9888;' : '&#8627;') + '</span>'
-        + '<span><b>Drafted for:</b> ' + escapeHtml(d.label)
-        + (action.destination_ref ? ' &middot; ' + escapeHtml(action.destination_ref) : '')
+    var risky = d.risky || !!action.is_broadcast;
+    var confirmed = !!action.destination_confirmed_at;
+    var display = action.destination_display || action.destination_ref || d.label;
+    return '<div class="cw-dest' + (risky ? ' is-risky' : '') + '">'
+        + '<span class="d-icon">' + (risky ? '&#9888;' : '&#8627;') + '</span>'
+        + '<span><b>Drafted for:</b> '
+        + '<span data-testid="' + (risky ? 'dest-risky' : 'dest-safe') + '">'
+        + '<span data-testid="dest-status">' + escapeHtml(display) + '</span></span>'
         + '<span class="d-note">' + escapeHtml(d.note) + '</span>'
+        + '<span class="cw-dest-actions">'
+        + (confirmed
+            ? '<span class="cw-dest-badge" data-testid="dest-confirmed">&#10003; audience confirmed</span>'
+            : '')
+        + '<button class="cw-dest-btn" type="button" data-testid="dest-change-btn" '
+        + 'onclick="cwOpenDestPicker(' + action.task_id + ')">'
+        + (confirmed ? 'Change' : 'Set destination') + '</button>'
+        + '</span>'
         + (conv ? '<button class="cw-debug-id" type="button" title="'
           + cwEscapeAttr(conv) + '" aria-label="Cowork troubleshooting ID">&#9432;</button>' : '')
         + '</span></div>';
+}
+
+function cwOpenDestPicker(taskId) {
+    var a = _cwActions[taskId];
+    if (!a) return;
+    cwCloseDestPicker();
+
+    var channel = a.delivery_channel || 'teams';
+    var ref = a.destination_ref || '';
+    var overlay = document.createElement('div');
+    overlay.id = 'dest-modal';
+    overlay.className = 'source-modal-overlay';
+    overlay.innerHTML = '<div class="source-modal" data-testid="dest-picker">'
+        + '<div class="source-modal-header">Confirm destination</div>'
+        + '<label class="source-modal-label">Channel</label>'
+        + '<select id="dest-modal-channel" class="source-modal-input" data-testid="dest-channel">'
+        + '<option value="teams"' + (channel === 'teams' ? ' selected' : '') + '>Teams</option>'
+        + '<option value="email"' + (channel === 'email' ? ' selected' : '') + '>Email</option>'
+        + '</select>'
+        + '<label class="source-modal-label">Recipient or conversation</label>'
+        + '<input type="text" id="dest-modal-ref" class="source-modal-input" '
+        + 'data-testid="dest-ref" value="' + cwEscapeAttr(ref) + '">'
+        + (ref.indexOf('19:') === 0
+            ? '<div class="cw-dest-hint">Linked Teams conversation \u2014 leave as-is to reply in the original thread.</div>'
+            : '')
+        + '<label class="source-modal-label">Shown as</label>'
+        + '<input type="text" id="dest-modal-display" class="source-modal-input" '
+        + 'data-testid="dest-display" value="' + cwEscapeAttr(a.destination_display || '') + '">'
+        + '<div class="source-modal-buttons">'
+        + '<button class="btn-source-modal btn-source-cancel" onclick="cwCloseDestPicker()">Cancel</button>'
+        + '<button class="btn-source-modal btn-source-save" data-testid="dest-confirm-btn" '
+        + 'onclick="cwConfirmDest(' + taskId + ')">Confirm</button>'
+        + '</div></div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(event) {
+        if (event.target === overlay) cwCloseDestPicker();
+    });
+}
+
+function cwCloseDestPicker() {
+    var existing = document.getElementById('dest-modal');
+    if (existing) existing.remove();
+}
+
+function cwConfirmDest(taskId) {
+    var channel = document.getElementById('dest-modal-channel');
+    var ref = document.getElementById('dest-modal-ref');
+    var display = document.getElementById('dest-modal-display');
+    if (!channel || !ref || !display) return;
+
+    var body = {
+        delivery_channel: channel.value,
+        destination_ref: ref.value.trim(),
+        destination_display: display.value.trim()
+    };
+    if (!body.destination_ref || !body.destination_display) return;
+
+    fetch('/api/tasks/' + taskId + '/cowork/destination', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.action) {
+            _cwActions[taskId] = data.action;
+            cwSyncTaskState(taskId, data.action);
+        }
+        cwCloseDestPicker();
+        cwRerender(taskId);
+    })
+    .catch(function(err) { console.error('Failed to confirm destination:', err); });
 }
 
 var _cwFindingExpanded = {};

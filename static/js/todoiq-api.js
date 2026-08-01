@@ -480,6 +480,10 @@ function cwApply(t, action) {
   t.cw_redirect_text = action.redirect_text || '';
   t.cw_dest_kind = action.destination_kind || '';
   t.cw_dest_ref = action.destination_ref || '';
+  t.cw_dest_display = action.destination_display || '';
+  t.cw_dest_confirmed_at = action.destination_confirmed_at || null;
+  t.cw_delivery_channel = action.delivery_channel || '';
+  t.cw_is_broadcast = Boolean(action.is_broadcast);
   t.cw_conversation_id = action.conversation_id || '';
   t.cw_seen_at = action.seen_at || null;
   t.cw_error = action.error || '';
@@ -636,6 +640,29 @@ async function cwPoll(id) {
     }
   } catch (e) { /* silent */ }
 }
+
+// Destination confirmation is server owned: the API decides provenance and the
+// timestamp, so the client only submits the reviewed audience.
+cwConfirmDest = async function(id) {
+  const t = cwTask(id);
+  const values = cwDestPickerValues();
+  if (!t || !values) return;
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork/destination`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.action) cwApply(t, data.action);
+    }
+  } catch (e) {
+    /* leave the previous destination in place */
+  }
+  cwCloseDestPicker();
+  cwRerender(id);
+};
 
 // Load the preview lazily when a task is opened.
 (function wrapSelectTaskForCowork() {

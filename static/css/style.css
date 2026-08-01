@@ -2611,6 +2611,14 @@ html, body {
 .cw-dest .d-icon { color: var(--text-secondary); }
 .cw-dest.is-risky .d-icon { color: var(--warning); }
 .cw-dest .d-note { display: block; margin-top: 3px; }
+.cw-dest-actions { display: inline-flex; align-items: center; gap: 8px; margin-top: 5px; }
+.cw-dest-badge { font-size: 11px; color: var(--success); }
+.cw-dest-btn {
+    font: inherit; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--border-primary); border-radius: 4px;
+    background: transparent; color: var(--accent); padding: 2px 8px;
+}
+.cw-dest-hint { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
 .cw-debug-id {
     border: 0; background: transparent; color: var(--text-secondary);
     cursor: help; margin-left: 5px; padding: 0; font-size: 12px;

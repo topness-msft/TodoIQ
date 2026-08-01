@@ -440,6 +440,16 @@ body {
 .cw-dest b { color: var(--text); font-weight: 600; }
 .cw-dest.is-risky { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); }
 .cw-debug-id { border: 0; background: transparent; color: var(--text-muted); cursor: help; margin-left: 5px; padding: 0; font-size: 12px; }
+.cw-dest-actions { display:inline-flex;align-items:center;gap:8px;margin-top:6px; }
+.cw-dest-badge { font-size:11px;color:var(--ready-green); }
+.cw-dest-btn { font:inherit;font-size:11px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--ai);padding:2px 8px; }
+.cw-dest-hint { font-size:11px;color:var(--text-muted);margin-top:4px; }
+.dest-modal-overlay { position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:2000; }
+.dest-modal { background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:18px;min-width:340px;box-shadow:var(--shadow); }
+.dest-modal-header { font-size:14px;font-weight:600;margin-bottom:12px;color:var(--text); }
+.dest-modal-label { display:block;font-size:11px;color:var(--text-muted);margin:10px 0 4px; }
+.dest-modal-input { width:100%;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--text); }
+.dest-modal-buttons { display:flex;justify-content:flex-end;gap:8px;margin-top:16px; }
 .cw-intent { font-size: 11px; line-height: 1.5; color: var(--text-secondary); padding: 0 0 8px; margin: 0 0 8px; border-bottom: 1px solid var(--border); }
 .cw-intent .i-label { color: var(--text-muted); }
 .cw-intent .i-edit { color: var(--ai); cursor: pointer; margin-left: 5px; white-space: nowrap; }
@@ -2026,15 +2036,89 @@ function cwLocalKind(t) {
   return 'unknown';
 }
 
+// Audience binding. The Cowork conversation id identifies the research
+// session and is never treated as a delivery target.
 function cwDestBlock(t) {
   const kind = t.cw_dest_kind || cwLocalKind(t);
   const d = CW_DEST[kind] || CW_DEST.unknown;
   const conv = t.cw_conversation_id || '';
-  return `<div class="cw-dest${d.risky ? ' is-risky' : ''}">
-    <span>${d.risky ? '⚠' : '↳'}</span>
-    <span><b>Drafted for:</b> ${d.label}${t.cw_dest_ref ? ' · ' + esc(t.cw_dest_ref) : ''}
+  const risky = d.risky || !!t.cw_is_broadcast;
+  const confirmed = !!t.cw_dest_confirmed_at;
+  const display = t.cw_dest_display || t.cw_dest_ref || d.label;
+  return `<div class="cw-dest${risky ? ' is-risky' : ''}">
+    <span>${risky ? '⚠' : '↳'}</span>
+    <span><b>Drafted for:</b>
+    <span data-testid="${risky ? 'dest-risky' : 'dest-safe'}"><span data-testid="dest-status">${esc(display)}</span></span>
     <br><span style="color:var(--text-muted)">${d.note}</span>
+    <span class="cw-dest-actions">
+      ${confirmed ? '<span class="cw-dest-badge" data-testid="dest-confirmed">✓ audience confirmed</span>' : ''}
+      <button class="cw-dest-btn" type="button" data-testid="dest-change-btn"
+        onclick="cwOpenDestPicker(${t.id})">${confirmed ? 'Change' : 'Set destination'}</button>
+    </span>
     ${conv ? `<button class="cw-debug-id" type="button" title="${cwEscapeAttr(conv)}" aria-label="Cowork troubleshooting ID">ⓘ</button>` : ''}</span></div>`;
+}
+
+function cwOpenDestPicker(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  cwCloseDestPicker();
+
+  const channel = t.cw_delivery_channel || 'teams';
+  const ref = t.cw_dest_ref || '';
+  const overlay = document.createElement('div');
+  overlay.id = 'dest-modal';
+  overlay.className = 'dest-modal-overlay';
+  overlay.innerHTML = `<div class="dest-modal" data-testid="dest-picker">
+    <div class="dest-modal-header">Confirm destination</div>
+    <label class="dest-modal-label">Channel</label>
+    <select id="dest-modal-channel" class="dest-modal-input" data-testid="dest-channel">
+      <option value="teams"${channel === 'teams' ? ' selected' : ''}>Teams</option>
+      <option value="email"${channel === 'email' ? ' selected' : ''}>Email</option>
+    </select>
+    <label class="dest-modal-label">Recipient or conversation</label>
+    <input type="text" id="dest-modal-ref" class="dest-modal-input" data-testid="dest-ref" value="${cwEscapeAttr(ref)}">
+    ${ref.indexOf('19:') === 0 ? '<div class="cw-dest-hint">Linked Teams conversation — leave as-is to reply in the original thread.</div>' : ''}
+    <label class="dest-modal-label">Shown as</label>
+    <input type="text" id="dest-modal-display" class="dest-modal-input" data-testid="dest-display" value="${cwEscapeAttr(t.cw_dest_display || '')}">
+    <div class="dest-modal-buttons">
+      <button class="cw-btn cw-btn-ghost" onclick="cwCloseDestPicker()">Cancel</button>
+      <button class="cw-btn cw-btn-go" data-testid="dest-confirm-btn" onclick="cwConfirmDest(${id})">Confirm</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) cwCloseDestPicker();
+  });
+}
+
+function cwCloseDestPicker() {
+  const existing = document.getElementById('dest-modal');
+  if (existing) existing.remove();
+}
+
+function cwDestPickerValues() {
+  const channel = document.getElementById('dest-modal-channel');
+  const ref = document.getElementById('dest-modal-ref');
+  const display = document.getElementById('dest-modal-display');
+  if (!channel || !ref || !display) return null;
+  const values = {
+    delivery_channel: channel.value,
+    destination_ref: ref.value.trim(),
+    destination_display: display.value.trim()
+  };
+  return (values.destination_ref && values.destination_display) ? values : null;
+}
+
+// Standalone behaviour. On /todo this is replaced by the API-backed version.
+function cwConfirmDest(id) {
+  const t = cwTask(id);
+  const values = cwDestPickerValues();
+  if (!t || !values) return;
+  t.cw_delivery_channel = values.delivery_channel;
+  t.cw_dest_ref = values.destination_ref;
+  t.cw_dest_display = values.destination_display;
+  t.cw_dest_confirmed_at = new Date().toISOString();
+  cwCloseDestPicker();
+  cwRerender(id);
 }
 
 const _cwFindingExpanded = {};
