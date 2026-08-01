@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 import tornado.ioloop
 import tornado.web
@@ -23,6 +24,8 @@ from .models import (
     get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
 )
 from .services.claude_runner import run_copilot
+from .services.cowork_runner import resolve_cowork_island
+from .services.workspace_settings import get_workspace_settings
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,22 @@ def start_server(port=8766):
     app = make_app()
     app.listen(port)
     logger.info(f"TodoNess running at http://localhost:{port}")
+
+    workspace = get_workspace_settings()
+    if workspace.get("root"):
+        logger.info(
+            "Task workspace configured%s: %s",
+            "" if workspace.get("enabled") else " (disabled)",
+            workspace["root"],
+        )
+
+    # CMP resolution may make a network call. Warm it away from Tornado's
+    # IOLoop; request handlers only read the eventually-consistent cache.
+    threading.Thread(
+        target=resolve_cowork_island,
+        daemon=True,
+        name="cowork-island-warmup",
+    ).start()
 
     # Auto-sync every 30 minutes
     sync_callback = tornado.ioloop.PeriodicCallback(_periodic_sync, SYNC_INTERVAL_MS)

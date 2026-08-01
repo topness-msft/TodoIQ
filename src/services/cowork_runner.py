@@ -541,12 +541,56 @@ _runs: dict = {}
 _runs_lock = threading.Lock()
 _auth_recovery_lock = threading.Lock()
 _auth_login_fn = subprocess.run
+_island_probe_lock = threading.Lock()
+_island_probe_attempted = False
+_cached_island_url = None
+_ISLAND_PROBE_FN = None
 
 
 def reset_registry() -> None:
     """Test hook. Drops all tracked runs without touching live processes."""
+    global _island_probe_attempted, _cached_island_url
     with _runs_lock:
         _runs.clear()
+    with _island_probe_lock:
+        _island_probe_attempted = False
+        _cached_island_url = None
+
+
+def _default_island_probe():
+    """Resolve CMP routing through the installed Cowork client, if available."""
+    try:
+        from cowork_cli.auth.manager import AuthManager
+        from cowork_cli.config.settings import get_settings
+        from cowork_cli.services.session import SessionManager
+
+        settings = get_settings(None)
+        return SessionManager(settings, AuthManager(settings)).base_url
+    except Exception as exc:
+        logger.warning("Could not resolve Cowork island: %s", exc)
+        return None
+
+
+def resolve_cowork_island():
+    """Probe once and cache the resolved runtime URL, including failed probes."""
+    global _island_probe_attempted, _cached_island_url
+    with _island_probe_lock:
+        if _island_probe_attempted:
+            return _cached_island_url
+        probe = _ISLAND_PROBE_FN or _default_island_probe
+        try:
+            resolved = probe()
+        except Exception as exc:
+            logger.warning("Cowork island probe failed: %s", exc)
+            resolved = None
+        _cached_island_url = resolved or None
+        _island_probe_attempted = True
+        return _cached_island_url
+
+
+def get_cached_cowork_island():
+    """Return the current cache without waiting for an in-flight network probe."""
+    return _cached_island_url
 
 
 def preview_label(task_id) -> str:

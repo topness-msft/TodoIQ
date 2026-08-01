@@ -457,5 +457,69 @@ class TestAuthRecovery(RunnerTestBase):
         self.assertEqual(max_active, 1)
 
 
+class TestIslandResolver(RunnerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.original_probe = getattr(cr, "_ISLAND_PROBE_FN", None)
+
+    def tearDown(self):
+        cr._ISLAND_PROBE_FN = self.original_probe
+        super().tearDown()
+
+    def test_successful_probe_is_cached_once(self):
+        calls = []
+        cr._ISLAND_PROBE_FN = lambda: (
+            calls.append(True) or "https://ia302.example"
+        )
+
+        assert cr.resolve_cowork_island() == "https://ia302.example"
+        assert cr.resolve_cowork_island() == "https://ia302.example"
+        assert len(calls) == 1
+
+    def test_failed_probe_is_attempted_only_once(self):
+        calls = []
+        cr._ISLAND_PROBE_FN = lambda: calls.append(True) or None
+
+        assert cr.resolve_cowork_island() is None
+        assert cr.resolve_cowork_island() is None
+        assert len(calls) == 1
+
+    def test_concurrent_callers_probe_once(self):
+        import threading
+        import time
+
+        calls = []
+        barrier = threading.Barrier(8)
+
+        def probe():
+            calls.append(True)
+            time.sleep(0.05)
+            return "https://ia302.example"
+
+        cr._ISLAND_PROBE_FN = probe
+        results = []
+
+        def worker():
+            barrier.wait()
+            results.append(cr.resolve_cowork_island())
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert calls == [True]
+        assert results == ["https://ia302.example"] * 8
+
+    def test_reset_registry_clears_island_cache(self):
+        values = iter(["https://first.example", "https://second.example"])
+        cr._ISLAND_PROBE_FN = lambda: next(values)
+
+        assert cr.resolve_cowork_island() == "https://first.example"
+        cr.reset_registry()
+        assert cr.resolve_cowork_island() == "https://second.example"
+
+
 if __name__ == "__main__":
     unittest.main()

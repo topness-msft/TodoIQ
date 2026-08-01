@@ -171,6 +171,21 @@ class TestStartPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertIn(data["action"]["state"], ("previewing", "ready"))
 
+    def test_persists_cached_island_url_at_action_creation(self):
+        original = cr._ISLAND_PROBE_FN
+        try:
+            cr._ISLAND_PROBE_FN = lambda: "https://ia302.example"
+            cr.resolve_cowork_island()
+            tid = self.make_task()
+            self.start(tid)
+            _, data = self.get_preview(tid)
+            self.assertEqual(
+                data["action"]["island_url"], "https://ia302.example"
+            )
+        finally:
+            cr._ISLAND_PROBE_FN = original
+            cr.reset_registry()
+
     def test_snapshots_intent_and_notes(self):
         tid = self.make_task(
             coaching_text="Nudge Sarah about the deck",
@@ -399,9 +414,17 @@ class TestEditDraft(CoworkAPITestBase):
         """Only draft_edited is editable. state/draft/tool_trace are not."""
         tid = self.make_task()
         self.start(tid)
-        self._put(tid, {"state": "ready", "draft": "spoofed"})
+        self._put(
+            tid,
+            {
+                "state": "ready",
+                "draft": "spoofed",
+                "island_url": "https://evil.example",
+            },
+        )
         _, data = self.get_preview(tid)
         self.assertNotEqual(data["action"]["draft"], "spoofed")
+        self.assertNotEqual(data["action"]["island_url"], "https://evil.example")
 
 
 # ------------------------------------------------------- Phase 1 safety

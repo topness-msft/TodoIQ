@@ -173,6 +173,9 @@ def _migrate(conn: sqlite3.Connection):
     if "seen_at" not in action_cols:
         conn.execute("ALTER TABLE task_actions ADD COLUMN seen_at TEXT")
         conn.commit()
+    if "island_url" not in action_cols:
+        conn.execute("ALTER TABLE task_actions ADD COLUMN island_url TEXT")
+        conn.commit()
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -298,6 +301,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     tool_trace       TEXT,
     error            TEXT,
     seen_at          TEXT,
+    island_url       TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

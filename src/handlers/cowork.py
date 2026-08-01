@@ -28,6 +28,7 @@ from ..services.cowork_runner import (
     AlreadyRunning,
     compose_prompt,
     get_result,
+    get_cached_cowork_island,
     is_running,
     parse_cowork_output,
     parse_source_url,
@@ -174,6 +175,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             destination_kind=destination.get("kind"),
             destination_ref=destination.get("counterparty_id"),
             conversation_id=destination.get("conversation_id"),
+            island_url=get_cached_cowork_island(),
         )
 
         try:

@@ -449,6 +449,7 @@ def get_stats() -> dict:
 _ACTION_INSERT_FIELDS = (
     "action_type", "intent", "notes_snapshot", "redirect_text",
     "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
+    "island_url",
 )
 
 # Only the draft the user typed is editable. Everything Cowork produced, and
