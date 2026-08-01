@@ -2759,6 +2759,18 @@ var CW_DEST = {
                     note: 'The audience could not be determined from the source link.' }
 };
 
+// Transport, not audience shape. Kept deliberately orthogonal to CW_DEST.
+var CW_CHANNEL = {
+    'teams': { label: 'Teams', note: 'Direct Teams message to this recipient.' },
+    'email': { label: 'Email', note: 'Email to this recipient.' }
+};
+
+// Kinds derived from a Teams source already imply the Teams transport, so their
+// own note stays accurate. Anything else needs the transport spelled out.
+var CW_KIND_CHANNEL = {
+    'one_to_one': 'teams', 'group': 'teams', 'meeting': 'teams', 'channel': 'teams'
+};
+
 // taskId -> action row, or null once we know there is no preview yet.
 var _cwActions = {};
 var _cwLoading = {};
@@ -2827,12 +2839,19 @@ function cwDestBlock(action) {
     var risky = d.risky || !!action.is_broadcast;
     var confirmed = !!action.destination_confirmed_at;
     var display = action.destination_display || action.destination_ref || d.label;
+    var chan = CW_CHANNEL[action.delivery_channel] || null;
+    // A broadcast warning outranks any transport note — never trade it away.
+    var note = (!risky && chan
+        && action.delivery_channel !== CW_KIND_CHANNEL[action.destination_kind])
+        ? chan.note : d.note;
     return '<div class="cw-dest' + (risky ? ' is-risky' : '') + '">'
         + '<span class="d-icon">' + (risky ? '&#9888;' : '&#8627;') + '</span>'
         + '<span><b>Drafted for:</b> '
         + '<span data-testid="' + (risky ? 'dest-risky' : 'dest-safe') + '">'
         + '<span data-testid="dest-status">' + escapeHtml(display) + '</span></span>'
-        + '<span class="d-note">' + escapeHtml(d.note) + '</span>'
+        + (chan ? '<span class="cw-dest-chan" data-testid="dest-channel-chip">'
+            + escapeHtml(chan.label) + '</span>' : '')
+        + '<span class="d-note">' + escapeHtml(note) + '</span>'
         + '<span class="cw-dest-actions">'
         + (confirmed
             ? '<span class="cw-dest-badge" data-testid="dest-confirmed">&#10003; audience confirmed</span>'

@@ -278,6 +278,96 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+    def test_dashboard_shows_channel_and_drops_the_stale_choose_note(
+        self, page: Page, base_url
+    ):
+        """A bound channel must be visible, and must silence the 'pick one' nag."""
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_dashboard(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="none",
+                    destination_ref="chjaya@microsoft.com",
+                    destination_display="Chitra J",
+                    delivery_channel="teams",
+                    destination_source="user_picker",
+                ),
+            )
+            expect(page.get_by_test_id("dest-channel-chip")).to_have_text("Teams")
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "Choose Teams or email" not in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_dashboard_channel_overrides_a_mismatched_shape_note(
+        self, page: Page, base_url
+    ):
+        """Emailing a Teams-sourced task must not claim it lands in the thread."""
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_dashboard(
+                page,
+                base_url,
+                task_id,
+                _action(task_id, delivery_channel="email"),
+            )
+            expect(page.get_by_test_id("dest-channel-chip")).to_have_text("Email")
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "same thread" not in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_dashboard_broadcast_note_survives_channel_binding(
+        self, page: Page, base_url
+    ):
+        """A broadcast warning outranks any transport note."""
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_dashboard(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="channel",
+                    destination_display="Copilot CAT channel",
+                    delivery_channel="email",
+                    is_broadcast=True,
+                ),
+            )
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "public post to the whole team" in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_todoiq_shows_channel_and_drops_the_stale_choose_note(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_todo(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="none",
+                    destination_ref="chjaya@microsoft.com",
+                    destination_display="Chitra J",
+                    delivery_channel="teams",
+                    destination_source="user_picker",
+                ),
+            )
+            expect(page.get_by_test_id("dest-channel-chip")).to_have_text("Teams")
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "Choose Teams or email" not in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_no_send_or_execute_control_exists(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         try:
