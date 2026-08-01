@@ -539,6 +539,8 @@ class AlreadyRunning(RuntimeError):
 # label -> {"proc":, "thread":, "result": dict|None}
 _runs: dict = {}
 _runs_lock = threading.Lock()
+_auth_recovery_lock = threading.Lock()
+_auth_login_fn = subprocess.run
 
 
 def reset_registry() -> None:
@@ -664,7 +666,14 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
 
     thread = threading.Thread(
         target=_collect,
-        args=(label, proc, task_id, Path(log_dir) if log_dir else LOG_DIR),
+        args=(
+            label,
+            proc,
+            task_id,
+            Path(log_dir) if log_dir else LOG_DIR,
+            argv,
+            spawn,
+        ),
         daemon=True,
         name=f"cowork-{task_id}",
     )
@@ -687,7 +696,7 @@ def _failure(error: str) -> dict:
     }
 
 
-def _collect(label, proc, task_id, log_dir) -> None:
+def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
     """Drain the child to completion. Runs on a worker thread.
 
     communicate() — never wait() then read(). The naive pattern deadlocks once
@@ -710,6 +719,54 @@ def _collect(label, proc, task_id, log_dir) -> None:
     stdout = stdout or ""
     stderr = stderr or ""
 
+    # Auth expires silently: exit 1, EMPTY stdout, hint only on stderr.
+    auth_failed = _AUTH_HINT in stderr
+    auth_error = "Cowork is not authenticated. Run: cowork auth login"
+    if auth_failed and error is None:
+        with _auth_recovery_lock:
+            try:
+                login_kwargs = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": 120,
+                }
+                if os.name == "nt":
+                    login_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                login = _auth_login_fn(["cowork", "auth", "login"], **login_kwargs)
+            except Exception:
+                login = None
+
+        if login is not None and login.returncode == 0:
+            try:
+                retry_proc = spawn_fn(
+                    argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                with _runs_lock:
+                    entry = _runs.get(label)
+                    if entry is not None:
+                        entry["proc"] = retry_proc
+                stdout, stderr = retry_proc.communicate(timeout=COWORK_TIMEOUT)
+                proc = retry_proc
+                stdout = stdout or ""
+                stderr = stderr or ""
+                auth_failed = _AUTH_HINT in stderr
+                error = auth_error if auth_failed else None
+            except subprocess.TimeoutExpired:
+                retry_proc.kill()
+                error = f"Cowork timed out after {COWORK_TIMEOUT}s."
+                auth_failed = False
+            except Exception as exc:
+                error = f"Cowork run failed: {exc}"
+                auth_failed = False
+        else:
+            error = auth_error
+
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"cowork_preview_{task_id}.log").write_text(
@@ -717,11 +774,6 @@ def _collect(label, proc, task_id, log_dir) -> None:
         )
     except Exception as exc:
         logger.debug("Could not write Cowork stderr log: %s", exc)
-
-    # Auth expires silently: exit 1, EMPTY stdout, hint only on stderr.
-    auth_failed = _AUTH_HINT in stderr
-    if auth_failed and not error:
-        error = "Cowork is not authenticated. Run: cowork auth login"
 
     with _runs_lock:
         entry = _runs.get(label)

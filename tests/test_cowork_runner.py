@@ -12,6 +12,8 @@ assertions regress, preview mode is silently unprotected.
 import json
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -54,8 +56,13 @@ class RunnerTestBase(unittest.TestCase):
     def setUp(self):
         cr.reset_registry()
         self.calls = []
+        self._base_auth_login = cr._auth_login_fn
+        cr._auth_login_fn = lambda *args, **kwargs: type(
+            "Login", (), {"returncode": 1}
+        )()
 
     def tearDown(self):
+        cr._auth_login_fn = self._base_auth_login
         cr.reset_registry()
 
     def spawner(self, proc):
@@ -328,6 +335,126 @@ class TestResults(RunnerTestBase):
 
     def test_unknown_label_returns_none(self):
         self.assertIsNone(cr.get_result("cowork:preview:99999"))
+
+
+class TestAuthRecovery(RunnerTestBase):
+    AUTH_ERROR = "Not authenticated. Run: cowork auth login"
+
+    def setUp(self):
+        super().setUp()
+        self.original_login = cr._auth_login_fn
+
+    def tearDown(self):
+        cr._auth_login_fn = self.original_login
+        super().tearDown()
+
+    def multi_spawner(self, procs):
+        remaining = iter(procs)
+
+        def _spawn(argv, **kwargs):
+            self.calls.append({"argv": argv, "kwargs": kwargs})
+            return next(remaining)
+
+        return _spawn
+
+    def test_silent_login_success_then_retry_success(self):
+        cr._auth_login_fn = lambda *args, **kwargs: type(
+            "Login", (), {"returncode": 0}
+        )()
+        spawn = self.multi_spawner(
+            [
+                FakeProc(stderr=self.AUTH_ERROR, returncode=1),
+                FakeProc(stdout="{}", returncode=0),
+            ]
+        )
+
+        label = cr.start_preview(2076, "hello", spawn=spawn, log_dir=self.log_dir())
+        cr.wait_for(label, timeout=10)
+        result = cr.get_result(label)
+
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(result["auth_failed"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIsNone(result["error"])
+
+    def test_login_failure_preserves_original_error_without_retry(self):
+        cr._auth_login_fn = lambda *args, **kwargs: type(
+            "Login", (), {"returncode": 1}
+        )()
+        spawn = self.multi_spawner(
+            [FakeProc(stderr=self.AUTH_ERROR, returncode=1)]
+        )
+
+        label = cr.start_preview(2076, "hello", spawn=spawn, log_dir=self.log_dir())
+        cr.wait_for(label, timeout=10)
+        result = cr.get_result(label)
+
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(result["auth_failed"])
+        self.assertIn("cowork auth login", result["error"])
+
+    def test_retry_auth_failure_does_not_attempt_third_preview(self):
+        cr._auth_login_fn = lambda *args, **kwargs: type(
+            "Login", (), {"returncode": 0}
+        )()
+        spawn = self.multi_spawner(
+            [
+                FakeProc(stderr=self.AUTH_ERROR, returncode=1),
+                FakeProc(stderr=self.AUTH_ERROR, returncode=1),
+            ]
+        )
+
+        label = cr.start_preview(2076, "hello", spawn=spawn, log_dir=self.log_dir())
+        cr.wait_for(label, timeout=10)
+        result = cr.get_result(label)
+
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(result["auth_failed"])
+        self.assertEqual(result["exit_code"], 1)
+
+    def test_non_auth_failure_never_runs_login_or_retry(self):
+        login_calls = []
+        cr._auth_login_fn = lambda *args, **kwargs: login_calls.append(True)
+        spawn = self.multi_spawner([FakeProc(stderr="boom", returncode=1)])
+
+        label = cr.start_preview(2076, "hello", spawn=spawn, log_dir=self.log_dir())
+        cr.wait_for(label, timeout=10)
+
+        self.assertEqual(login_calls, [])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_concurrent_auth_recovery_is_serialized(self):
+        active = 0
+        max_active = 0
+        state_lock = threading.Lock()
+
+        def login(*args, **kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+            return type("Login", (), {"returncode": 1})()
+
+        cr._auth_login_fn = login
+        cr.start_preview(
+            1,
+            "one",
+            spawn=self.spawner(FakeProc(stderr=self.AUTH_ERROR, returncode=1)),
+            log_dir=self.log_dir(),
+        )
+        cr.start_preview(
+            2,
+            "two",
+            spawn=self.spawner(FakeProc(stderr=self.AUTH_ERROR, returncode=1)),
+            log_dir=self.log_dir(),
+        )
+        cr.wait_for(cr.preview_label(1), timeout=10)
+        cr.wait_for(cr.preview_label(2), timeout=10)
+
+        self.assertEqual(max_active, 1)
 
 
 if __name__ == "__main__":
