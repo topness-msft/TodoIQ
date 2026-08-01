@@ -522,8 +522,7 @@ async function cwStart(id, isRedo) {
   if (isRedo) {
     const box = document.getElementById(`cw-redo-${id}`);
     const text = box ? box.value.trim() : '';
-    if (!text) return;
-    body.redirect_text = text;
+    if (text) body.redirect_text = text;
   }
   t.cw_redo_open = false;
   t.cw_editing = false;

@@ -3004,8 +3004,7 @@ function cwStart(taskId, isRedo) {
     if (isRedo) {
         var input = document.getElementById('cw-redo-' + taskId);
         var text = input ? input.value.trim() : '';
-        if (!text) return;
-        body.redirect_text = text;
+        if (text) body.redirect_text = text;
     }
     delete _cwRedo[taskId];
     delete _cwEditing[taskId];

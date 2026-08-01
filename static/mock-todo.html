@@ -2240,7 +2240,6 @@ function cwStart(id, isRedo) {
   if (isRedo) {
     const box = document.getElementById(`cw-redo-${id}`);
     const text = box ? box.value.trim() : '';
-    if (!text) return;
     t.cw_redirect_text = text;
   }
   t.cw_redo_open = false;
