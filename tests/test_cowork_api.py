@@ -481,6 +481,7 @@ class TestConfirmDestination(CoworkAPITestBase):
         self.assertEqual(action["destination_display"], "Sarah Goodwin")
         self.assertEqual(action["destination_source"], "user_picker")
         self.assertIsNotNone(action["destination_confirmed_at"])
+        self.assertIn("is_broadcast", action)
 
     def test_rejects_unknown_channel_and_blank_destination(self):
         tid = self.make_task()

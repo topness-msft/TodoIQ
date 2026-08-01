@@ -43,6 +43,9 @@ def _action(task_id: int, **overrides) -> dict:
         "delivery_channel": "teams",
         "conversation_id": CONV_ID,
         "is_broadcast": False,
+        # A real ready row is already marked seen by the time the card is open;
+        # without it the /todo adapter re-fetches and discards the fixture.
+        "seen_at": "2026-08-01T12:00:00Z",
     }
     action.update(overrides)
     return action
@@ -215,6 +218,63 @@ class TestDestinationBinding:
                 path=os.path.join(SCREENSHOTS_DIR, "todo-confirmed-dark.png"),
                 full_page=True,
             )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_todoiq_picker_posts_validated_bundle(self, page: Page, base_url):
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_todo(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="none",
+                    destination_ref="",
+                    destination_display="",
+                    destination_confirmed_at=None,
+                    delivery_channel=None,
+                ),
+            )
+            page.route(
+                f"**/api/tasks/{task_id}/cowork/destination",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "action": _action(
+                                task_id,
+                                destination_kind="none",
+                                destination_ref="sarah@microsoft.com",
+                                destination_display="Sarah Goodwin",
+                                delivery_channel="email",
+                                destination_source="user_picker",
+                            )
+                        }
+                    ),
+                ),
+            )
+            page.get_by_test_id("dest-change-btn").click()
+            expect(page.get_by_test_id("dest-picker")).to_be_visible()
+            page.select_option('[data-testid="dest-channel"]', "email")
+            page.fill('[data-testid="dest-ref"]', "sarah@microsoft.com")
+            page.fill('[data-testid="dest-display"]', "Sarah Goodwin")
+
+            with page.expect_request(
+                lambda request: request.method == "POST"
+                and f"/api/tasks/{task_id}/cowork/destination" in request.url
+            ) as request_info:
+                page.get_by_test_id("dest-confirm-btn").click()
+
+            body = request_info.value.post_data_json
+            assert body["delivery_channel"] == "email"
+            assert body["destination_ref"] == "sarah@microsoft.com"
+            assert "source" not in body
+            expect(page.get_by_test_id("dest-picker")).to_have_count(0)
+            expect(page.get_by_test_id("dest-confirmed")).to_be_visible()
+            expect(page.get_by_role("link", name="Open in Cowork")).to_be_visible()
         finally:
             _delete_task(page, base_url, task_id)
 

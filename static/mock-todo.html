@@ -2049,7 +2049,7 @@ function cwDestBlock(t) {
     <span>${risky ? '⚠' : '↳'}</span>
     <span><b>Drafted for:</b>
     <span data-testid="${risky ? 'dest-risky' : 'dest-safe'}"><span data-testid="dest-status">${esc(display)}</span></span>
-    <br><span style="color:var(--text-muted)">${d.note}</span>
+    <br><span style="color:var(--text-muted)">${esc(d.note)}</span>
     <span class="cw-dest-actions">
       ${confirmed ? '<span class="cw-dest-badge" data-testid="dest-confirmed">✓ audience confirmed</span>' : ''}
       <button class="cw-dest-btn" type="button" data-testid="dest-change-btn"
