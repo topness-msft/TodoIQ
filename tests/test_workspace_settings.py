@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 class TestWorkspaceSettings:
     def test_missing_file_is_disabled(self, tmp_path, monkeypatch):
@@ -40,6 +42,7 @@ class TestWorkspaceSettings:
         assert validate_workspace_root("relative/path") is None
         assert validate_workspace_root(str(tmp_path / "missing")) is None
         assert validate_workspace_root(r"\\server\share") is None
+        assert validate_workspace_root("//server/share") is None
 
     def test_onedrive_root_is_accepted_when_present(self):
         from src.services.workspace_settings import validate_workspace_root
@@ -48,5 +51,5 @@ class TestWorkspaceSettings:
             r"C:\Users\phtopnes\OneDrive - Microsoft\Documents\__TodoIq"
         )
         if not root.exists():
-            return
+            pytest.skip("OneDrive root not present on this machine")
         assert validate_workspace_root(str(root)) == root.resolve()

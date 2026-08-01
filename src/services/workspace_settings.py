@@ -15,7 +15,7 @@ SETTINGS_PATH = PROJECT_ROOT / "data" / "settings.json"
 
 def validate_workspace_root(value: str | None) -> Path | None:
     """Return a resolved existing local directory, or None when unsafe."""
-    if not value or value.startswith("\\\\"):
+    if not value or value.startswith("\\\\") or value.startswith("//"):
         return None
     path = Path(value)
     if not path.is_absolute() or not path.exists() or not path.is_dir():
