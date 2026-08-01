@@ -808,6 +808,7 @@ function renderDetailPane(task) {
         + '</div>';
 
     pane.innerHTML = html;
+    cwInitFindingToggle(task.id);
 }
 
 function clearDetailPane() {
@@ -2744,8 +2745,8 @@ var CW_DEST = {
                     note: 'Everyone invited to the meeting would see this.' },
     'channel':    { risky: true,  label: 'Team channel',
                     note: 'This would be a public post to the whole team.' },
-    'none':       { risky: false, label: 'No linked chat source',
-                    note: 'Nothing to reply to. This draft has no destination.' },
+    'none':       { risky: false, label: 'No delivery destination selected',
+                    note: 'Choose Teams or email before any future send action.' },
     'unknown':    { risky: true,  label: 'Unrecognised source',
                     note: 'The audience could not be determined from the source link.' }
 };
@@ -2817,8 +2818,49 @@ function cwDestBlock(action) {
         + '<span><b>Drafted for:</b> ' + escapeHtml(d.label)
         + (action.destination_ref ? ' &middot; ' + escapeHtml(action.destination_ref) : '')
         + '<span class="d-note">' + escapeHtml(d.note) + '</span>'
-        + (conv ? '<span class="d-conv">' + escapeHtml(conv) + '</span>' : '')
+        + (conv ? '<button class="cw-debug-id" type="button" title="'
+          + cwEscapeAttr(conv) + '" aria-label="Cowork troubleshooting ID">&#9432;</button>' : '')
         + '</span></div>';
+}
+
+var _cwFindingExpanded = {};
+
+function cwEscapeAttr(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function cwFindingBlock(finding, taskId) {
+    if (!finding) return '';
+    var expanded = Boolean(_cwFindingExpanded[taskId]);
+    return '<div class="cw-finding"><div class="cw-finding-label">What Cowork found</div>'
+        + '<div class="cw-finding-body' + (expanded ? '' : ' cw-finding-clamped')
+        + '" id="cw-finding-' + taskId + '">'
+        + renderCoworkMarkdown(_stripContextRefs(finding)) + '</div>'
+        + '<button class="cw-finding-toggle" id="cw-finding-toggle-' + taskId
+        + '" onclick="cwToggleFinding(' + taskId + ')" style="display:none">'
+        + (expanded ? 'Show less' : 'Show more') + '</button></div>';
+}
+
+function cwToggleFinding(taskId) {
+    var body = document.getElementById('cw-finding-' + taskId);
+    var button = document.getElementById('cw-finding-toggle-' + taskId);
+    if (!body || !button) return;
+    _cwFindingExpanded[taskId] = !_cwFindingExpanded[taskId];
+    body.classList.toggle('cw-finding-clamped', !_cwFindingExpanded[taskId]);
+    button.textContent = _cwFindingExpanded[taskId] ? 'Show less' : 'Show more';
+}
+
+function cwInitFindingToggle(taskId) {
+    var body = document.getElementById('cw-finding-' + taskId);
+    var button = document.getElementById('cw-finding-toggle-' + taskId);
+    if (!body || !button) return;
+    if (_cwFindingExpanded[taskId]) {
+        button.style.display = '';
+        button.textContent = 'Show less';
+        return;
+    }
+    button.style.display = body.scrollHeight > body.clientHeight + 1 ? '' : 'none';
 }
 
 function cwRedoBlock(taskId) {
@@ -2876,14 +2918,11 @@ function renderCoworkCard(task) {
     if (a && a.state === 'ready') {
         var editing = !!_cwEditing[task.id];
         var draft = cwCurrentDraft(a);
-        var findingHtml = a.finding
-            ? '<div class="cw-finding"><div class="cw-finding-label">What Cowork found</div>'
-              + renderRichText(a.finding, task.key_people) + '</div>'
-            : '';
+        var findingHtml = cwFindingBlock(a.finding, task.id);
         var draftHtml = editing
             ? '<textarea class="cw-draft is-editing" id="cw-draft-' + task.id + '" rows="8">'
               + escapeHtml(draft) + '</textarea>'
-            : '<div class="cw-draft">' + escapeHtml(draft) + '</div>';
+            : '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(draft) + '</div>';
         var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
             ? '<span class="cw-foot-note">edited by you</span>' : '';
         var correction = a.redirect_text

@@ -1,0 +1,9 @@
+Alice sent an update earlier this week. I reviewed the notes from [alice@example.com](context:person?name=alice%40example.com&email=alice%40example.com) and the items are still open.
+
+The original discussion happened in [Alice/Bob 1:1 (biweekly)](context:meeting?eventId=AAMkADFk00000000000000AAAAAAAAAA%3D&name=Alice%2FBob%201%3A1%20%28biweekly%29) on Monday.
+
+For background see https://example.com/roadmap and [the project document](https://example.com/doc).
+
+## The email chain
+
+**Alice** asked about the deadline on June 3rd.

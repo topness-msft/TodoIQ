@@ -419,6 +419,14 @@ body {
 
 .cw-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; }
 .cw-finding .f-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 5px; }
+.cw-finding-clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.cw-finding-toggle { border: 0; background: transparent; color: var(--ai); padding: 5px 0 0; cursor: pointer; font: inherit; font-size: 11px; }
+.cw-markdown { white-space: normal; }
+.cw-markdown p, .cw-finding-body p { margin: 0 0 7px; }
+.cw-markdown p:last-child, .cw-finding-body p:last-child { margin-bottom: 0; }
+.cw-markdown h2, .cw-finding-body h2 { font-size: 13px; margin: 8px 0 5px; }
+.cw-markdown ul, .cw-finding-body ul { margin: 4px 0 7px; padding-left: 20px; }
+.cw-markdown a, .cw-finding-body a { color: var(--ai); }
 
 .cw-draft { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 6px; white-space: pre-wrap; }
 .cw-draft[contenteditable="true"] { outline: 2px solid var(--ai); outline-offset: 1px; }
@@ -427,7 +435,7 @@ body {
 .cw-dest { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; padding: 8px 10px; margin: 6px 0 2px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); color: var(--text-secondary); }
 .cw-dest b { color: var(--text); font-weight: 600; }
 .cw-dest.is-risky { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); }
-.cw-dest .d-conv { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+.cw-debug-id { border: 0; background: transparent; color: var(--text-muted); cursor: help; margin-left: 5px; padding: 0; font-size: 12px; }
 .cw-intent { font-size: 11px; line-height: 1.5; color: var(--text-secondary); padding: 0 0 8px; margin: 0 0 8px; border-bottom: 1px solid var(--border); }
 .cw-intent .i-label { color: var(--text-muted); }
 .cw-intent .i-edit { color: var(--ai); cursor: pointer; margin-left: 5px; white-space: nowrap; }
@@ -823,6 +831,7 @@ textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.
 <div class="overflow-menu" id="overflow-menu"></div>
 <div class="toast-container" id="toast-container"></div>
 
+<script src="/static/js/markdown-utils.js"></script>
 <script>
 // ── Mock Data ──────────────────────────────────────────────
 const ACTION_LABELS = {
@@ -1437,6 +1446,7 @@ function selectTask(id) {
     <div class="detail-notes"><textarea placeholder="Add a note" oninput="updateNotes(${t.id},this.value)">${esc(t.notes||'')}</textarea></div>
     <div class="detail-footer"><span>Created ${created}</span>
       <button class="detail-footer icon-btn" onclick="showDetailOverflow(event,${t.id})">⋯</button></div>`;
+  cwInitFindingToggle(t.id);
   renderTasks();
 }
 
@@ -1986,8 +1996,8 @@ const CW_DEST = {
                 note: 'Everyone invited to the meeting would see this.' },
   channel:    { risky: true,  label: 'Team channel',
                 note: 'This would be a public post to the whole team.' },
-  none:       { risky: false, label: 'No linked chat source',
-                note: 'Nothing to reply to. This draft has no destination.' },
+  none:       { risky: false, label: 'No delivery destination selected',
+                note: 'Choose Teams or email before any future send action.' },
   unknown:    { risky: true,  label: 'Unrecognised source',
                 note: 'The audience could not be determined from the source link.' },
 };
@@ -2014,7 +2024,47 @@ function cwDestBlock(t) {
     <span>${d.risky ? '⚠' : '↳'}</span>
     <span><b>Drafted for:</b> ${d.label}${t.cw_dest_ref ? ' · ' + esc(t.cw_dest_ref) : ''}
     <br><span style="color:var(--text-muted)">${d.note}</span>
-    ${conv ? `<br><span class="d-conv">${esc(conv)}</span>` : ''}</span></div>`;
+    ${conv ? `<button class="cw-debug-id" type="button" title="${cwEscapeAttr(conv)}" aria-label="Cowork troubleshooting ID">ⓘ</button>` : ''}</span></div>`;
+}
+
+const _cwFindingExpanded = {};
+
+function cwEscapeAttr(value) {
+  return String(value || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function cwFindingBlock(finding, taskId) {
+  if (!finding) return '';
+  const expanded = Boolean(_cwFindingExpanded[taskId]);
+  return `<div class="cw-finding"><span class="f-label">What Cowork found</span>
+    <div class="cw-finding-body${expanded ? '' : ' cw-finding-clamped'}" id="cw-finding-${taskId}">
+      ${renderCoworkMarkdown(_stripContextRefs(finding))}
+    </div>
+    <button class="cw-finding-toggle" id="cw-finding-toggle-${taskId}"
+      onclick="cwToggleFinding(${taskId})" style="display:none">${expanded ? 'Show less' : 'Show more'}</button>
+  </div>`;
+}
+
+function cwToggleFinding(taskId) {
+  const body = document.getElementById(`cw-finding-${taskId}`);
+  const button = document.getElementById(`cw-finding-toggle-${taskId}`);
+  if (!body || !button) return;
+  _cwFindingExpanded[taskId] = !_cwFindingExpanded[taskId];
+  body.classList.toggle('cw-finding-clamped', !_cwFindingExpanded[taskId]);
+  button.textContent = _cwFindingExpanded[taskId] ? 'Show less' : 'Show more';
+}
+
+function cwInitFindingToggle(taskId) {
+  const body = document.getElementById(`cw-finding-${taskId}`);
+  const button = document.getElementById(`cw-finding-toggle-${taskId}`);
+  if (!body || !button) return;
+  if (_cwFindingExpanded[taskId]) {
+    button.style.display = '';
+    button.textContent = 'Show less';
+    return;
+  }
+  button.style.display = body.scrollHeight > body.clientHeight + 1 ? '' : 'none';
 }
 
 // WorkIQ's suggested next action, editable before Cowork runs. This is the
@@ -2095,8 +2145,8 @@ function renderCoworkCard(t) {
     return cwCard('', 'preview', t,
       `${cwIntentBlock(t, true)}
        ${t.cw_redirect_text ? `<div class="cw-intent"><span class="i-label">Correction:</span> ${esc(t.cw_redirect_text)}</div>` : ''}
-       ${t.cw_finding ? `<div class="cw-finding"><span class="f-label">What Cowork found</span>${esc(t.cw_finding)}</div>` : ''}
-       <div class="cw-draft">${esc(draft)}</div>
+       ${cwFindingBlock(t.cw_finding, t.id)}
+       <div class="cw-draft cw-markdown">${renderCoworkMarkdown(draft)}</div>
        ${cwDestBlock(t)}
        ${cwRedoRow(t)}`,
       `<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(${t.id})">Copy draft</button>

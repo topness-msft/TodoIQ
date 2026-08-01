@@ -2570,6 +2570,20 @@ html, body {
     font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
     color: var(--text-secondary); margin-bottom: 6px;
 }
+.cw-finding-clamped {
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.cw-finding-toggle {
+    border: 0; background: transparent; color: var(--accent);
+    padding: 5px 0 0; cursor: pointer; font: inherit; font-size: 11px;
+}
+.cw-markdown { white-space: normal; }
+.cw-markdown p, .cw-finding-body p { margin: 0 0 7px; }
+.cw-markdown p:last-child, .cw-finding-body p:last-child { margin-bottom: 0; }
+.cw-markdown h2, .cw-finding-body h2 { font-size: 13px; margin: 8px 0 5px; }
+.cw-markdown ul, .cw-finding-body ul { margin: 4px 0 7px; padding-left: 20px; }
+.cw-markdown a, .cw-finding-body a { color: var(--accent); }
 
 /* draft */
 .cw-draft {
@@ -2597,10 +2611,9 @@ html, body {
 .cw-dest .d-icon { color: var(--text-secondary); }
 .cw-dest.is-risky .d-icon { color: var(--warning); }
 .cw-dest .d-note { display: block; margin-top: 3px; }
-.cw-dest .d-conv {
-    display: block; margin-top: 5px;
-    font-family: ui-monospace, Consolas, monospace; font-size: 11px;
-    color: var(--text-secondary); opacity: .75; word-break: break-all;
+.cw-debug-id {
+    border: 0; background: transparent; color: var(--text-secondary);
+    cursor: help; margin-left: 5px; padding: 0; font-size: 12px;
 }
 
 /* progress */
@@ -2657,5 +2670,4 @@ html, body {
 .cw-btn-sec { color: var(--accent); border-color: var(--accent); background: transparent; }
 .cw-btn-ghost { color: var(--text-secondary); border-color: transparent; background: transparent; }
 .cw-foot-note { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
-
 
