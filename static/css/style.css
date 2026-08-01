@@ -2628,7 +2628,7 @@ html, body {
 .cw-status-indicator {
     display: inline-flex; align-items: center; justify-content: center;
     width: 18px; height: 18px; flex: 0 0 18px;
-    color: var(--accent); font-size: 14px;
+    color: var(--accent); font-size: 14px; margin-top: 4px;
 }
 .cw-status-running { animation: cw-status-pulse 1.2s ease-in-out infinite; }
 .cw-status-unread {

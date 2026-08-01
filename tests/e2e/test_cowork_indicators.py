@@ -41,6 +41,7 @@ class TestCoworkIndicators:
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
                 task.skill_output = 'Existing enrichment';
+                task.parse_status = 'parsed';
                 task.cw_state = 'previewing';
                 task.cw_seen_at = null;
                 renderTaskList();
@@ -62,6 +63,12 @@ class TestCoworkIndicators:
             expect(row.locator(".enriched-icon")).to_have_count(0)
             box = row.locator(".cw-status-unread").bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
+            parsed_box = row.locator(".parse-icon").bounding_box()
+            assert parsed_box
+            assert abs(
+                (box["y"] + box["height"] / 2)
+                - (parsed_box["y"] + parsed_box["height"] / 2)
+            ) <= 1
             page.screenshot(
                 path=os.path.join(SCREENSHOTS_DIR, "dashboard-unread-light.png"),
                 full_page=True,
