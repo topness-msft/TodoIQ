@@ -278,6 +278,66 @@ class TestStartPreview(CoworkAPITestBase):
         resp = self.fetch(f"/api/tasks/{tid}/cowork?history=1")
         self.assertEqual(len(json.loads(resp.body)["actions"]), 2)
 
+    def test_prompt_voice_follows_the_bound_channel(self):
+        tid = self.make_task(
+            source_type="email",
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        self.start(tid)
+        _, data = self.get_preview(tid)
+        prompt = data["action"]["composed_prompt"]
+        self.assertIn("[VOICE]", prompt)
+        self.assertIn("Subject", prompt.split("[VOICE]")[1])
+
+    def test_redo_keeps_a_user_confirmed_destination(self):
+        """A picker choice is explicit intent; re-deriving it would discard it."""
+        tid = self.make_task(
+            source_type="chat",
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        self.start(tid)
+        # Confirming requires a ready row, and finalisation happens on GET.
+        self.get_preview(tid)
+        confirm = self.fetch(
+            f"/api/tasks/{tid}/cowork/destination",
+            method="POST",
+            body=json.dumps(
+                {
+                    "delivery_channel": "email",
+                    "destination_ref": "sarah@microsoft.com",
+                    "destination_display": "Sarah Goodwin",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(confirm.code, 200)
+
+        response = self.start(tid, body={"redirect_text": "try again"})
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_ref"], "sarah@microsoft.com")
+        self.assertEqual(action["destination_source"], "user_picker")
+        self.assertIn("Subject", action["composed_prompt"].split("[VOICE]")[1])
+
+    def test_redo_rederives_an_unconfirmed_destination(self):
+        tid = self.make_task(
+            source_type="chat",
+            key_people=json.dumps(
+                [{"name": "Sarah Goodwin", "email": "sarah@microsoft.com"}]
+            ),
+        )
+        self.start(tid)
+        response = self.start(tid, body={"redirect_text": "try again"})
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(action["delivery_channel"], "teams")
+        self.assertEqual(action["destination_source"], "auto_key_people")
+
     def test_conflict_while_running(self):
         """409 must be gated on the in-memory registry, not the DB row."""
         tid = self.make_task()

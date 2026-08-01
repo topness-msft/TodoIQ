@@ -70,7 +70,7 @@ class TestSectionOrdering(unittest.TestCase):
                            redirect_text="No, look for times next week")
         order = sections(p)
         expected = ["[ROLE]", "[TASK]", "[INTENT]", "[NOTES]", "[SOURCE]",
-                    "[CORRECTION]", "[OUTPUT]"]
+                    "[VOICE]", "[CORRECTION]", "[OUTPUT]"]
         self.assertEqual(order, expected)
 
     def test_correction_outranks_intent_and_notes(self):
@@ -84,6 +84,75 @@ class TestSectionOrdering(unittest.TestCase):
     def test_output_is_last(self):
         p = compose_prompt(make_task(), redirect_text="change it")
         self.assertEqual(sections(p)[-1], "[OUTPUT]")
+
+
+class TestVoiceLayer(unittest.TestCase):
+    """The draft has to sound like Phil, and the register follows the transport.
+
+    Voice is a standing layer, so it sits with the other standing layers: after
+    [SOURCE], but before [CORRECTION] so a redirect can still overrule it, and
+    well before [OUTPUT] so it can never displace the safety instruction.
+    """
+
+    def test_voice_section_present_for_a_bound_channel(self):
+        p = compose_prompt(make_task(), delivery_channel="teams")
+        self.assertIn("[VOICE]", p)
+
+    def test_voice_sits_between_source_and_correction(self):
+        p = compose_prompt(make_task(user_notes="Keep it short."),
+                           redirect_text="try next week",
+                           delivery_channel="email")
+        order = sections(p)
+        self.assertEqual(
+            order,
+            ["[ROLE]", "[TASK]", "[INTENT]", "[NOTES]", "[SOURCE]", "[VOICE]",
+             "[CORRECTION]", "[OUTPUT]"],
+        )
+
+    def test_output_still_last_with_voice(self):
+        p = compose_prompt(make_task(), delivery_channel="email")
+        self.assertEqual(sections(p)[-1], "[OUTPUT]")
+
+    def test_email_voice_carries_email_mechanics(self):
+        p = compose_prompt(make_task(), delivery_channel="email")
+        voice = p.split("[VOICE]")[1]
+        self.assertIn("Subject", voice)
+        self.assertIn("Phil", voice)
+
+    def test_teams_voice_omits_email_mechanics(self):
+        # Chat has no subject line and no sign-off; borrowing them is the exact
+        # mistake an email-derived voice guide invites.
+        p = compose_prompt(make_task(), delivery_channel="teams")
+        voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
+        self.assertNotIn("Subject line", voice)
+        self.assertIn("Teams", voice)
+
+    def test_unbound_channel_still_gets_the_shared_voice(self):
+        p = compose_prompt(make_task(), delivery_channel=None)
+        self.assertIn("[VOICE]", p)
+        voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
+        self.assertNotIn("Subject line", voice)
+
+    def test_shared_invariants_apply_to_every_channel(self):
+        for channel in ("email", "teams", None):
+            with self.subTest(channel=channel):
+                voice = compose_prompt(
+                    make_task(), delivery_channel=channel
+                ).split("[VOICE]")[1].split("[OUTPUT]")[0]
+                self.assertIn("em-dash", voice)
+                self.assertIn("contractions", voice.lower())
+
+    def test_unknown_channel_falls_back_instead_of_crashing(self):
+        p = compose_prompt(make_task(), delivery_channel="carrier-pigeon")
+        voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
+        self.assertNotIn("Subject line", voice)
+
+    def test_voice_never_contradicts_preview_mode(self):
+        p = compose_prompt(make_task(), delivery_channel="email")
+        voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
+        for banned in ("send it", "Send the", "deliver it"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, voice)
 
 
 class TestEmptySections(unittest.TestCase):

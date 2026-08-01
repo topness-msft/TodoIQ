@@ -156,6 +156,62 @@ _SAFETY = (
     "Return the draft as text for a human to review. Nothing you write is delivered."
 )
 
+# Voice. Condensed from ~/.copilot/skills/work-email-voice/SKILL.md, which is a
+# ~9KB Copilot CLI skill; the median composed prompt is ~1.6KB, so injecting the
+# document wholesale would drown the task and drag in CLI-only meta (trigger
+# phrases, "show the draft in chat") that means nothing inside Cowork. Only the
+# stable core is mirrored here. Keep in sync by hand if the skill's mechanics
+# change -- prompt composition must never depend on a file outside the repo.
+_VOICE_SHARED = (
+    "Write it as the user would write it themselves, so the draft is paste-ready.\n"
+    "- Use contractions throughout: I'm, I'll, it's, we're, here's.\n"
+    "- Never use em-dashes. Use a comma, a period, parentheses or a colon.\n"
+    "- No corporate filler: no \"I hope this finds you well\", \"circling back\", "
+    "\"per my last email\", \"leverage\", \"synergy\".\n"
+    "- Lead with the context and the why, then the detail or the ask.\n"
+    "- Be specific when recognising someone: name them and say what it changed.\n"
+    "- Close by moving the work forward, with a next step, a question or an offer."
+)
+
+_VOICE_EMAIL = (
+    "This draft is an Outlook email from the user's Microsoft work account, "
+    "signed Phil Topness | Copilot Acceleration Team | CAT.\n"
+    + _VOICE_SHARED + "\n"
+    "- Subject line: short, specific and plain. No hype.\n"
+    "- Open \"Hi {First},\" for peers and external contacts. For a leader or an "
+    "active thread use just \"{First},\" and go straight in. Never \"Dear\", "
+    "\"Hello,\" or \"Team,\".\n"
+    "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" as "
+    "a closing line; gratitude belongs in the body. The signature block "
+    "auto-appends, so do not retype it.\n"
+    "- Length: 1-3 sentences for a quick reply, 3-8 for collaboration, denser and "
+    "structured with bullets for leadership. Exec mail is denser, not more formal.\n"
+    "- Exclamation points sparingly, never in status or exec mail. No emojis in "
+    "program, status or exec mail."
+)
+
+_VOICE_TEAMS = (
+    "This draft is a Teams chat message, not an email. Match chat register.\n"
+    + _VOICE_SHARED + "\n"
+    "- No subject, no greeting block and no sign-off. Lead with the person's first "
+    "name only if the thread needs it.\n"
+    "- Keep it to 1-4 sentences. If the ask is long, use one line plus bullets "
+    "rather than a paragraph.\n"
+    "- Conversational and direct. A single emoji can soften a nudge, but never in "
+    "a status update or an escalation."
+)
+
+# No bound channel means the transport is genuinely unknown, so only the
+# invariants apply. Guessing email mechanics here is how a chat reply ends up
+# with a subject line and a sign-off.
+_VOICE_NEUTRAL = (
+    "The delivery channel is not chosen yet, so keep the draft usable as either a "
+    "short email or a Teams message: no subject line and no sign-off.\n"
+    + _VOICE_SHARED
+)
+
+_VOICE_BY_CHANNEL = {"email": _VOICE_EMAIL, "teams": _VOICE_TEAMS}
+
 
 def _get(task, key, default=""):
     """Read a field from a dict or sqlite3.Row without assuming which."""
@@ -191,7 +247,8 @@ def _strip_workiq(text: str) -> str:
 
 
 def compose_prompt(task, destination: dict | None = None,
-                   redirect_text: str | None = None) -> str:
+                   redirect_text: str | None = None,
+                   delivery_channel: str | None = None) -> str:
     """Assemble the Cowork preview prompt from its layers.
 
     Layer order is semantic, not cosmetic. The correction is emitted after the
@@ -203,6 +260,9 @@ def compose_prompt(task, destination: dict | None = None,
         task: mapping or sqlite3.Row of the task's fields.
         destination: result of parse_source_url; derived from the task if omitted.
         redirect_text: one-shot steer supplied via Redo (F12).
+        delivery_channel: bound transport ("teams" or "email"). Selects the voice
+            register. Anything unrecognised falls back to the neutral voice, so a
+            future channel cannot silently inherit email mechanics.
 
     Returns:
         The full prompt. Callers must write it as UTF-8 -- 23 real tasks contain
@@ -257,6 +317,9 @@ def compose_prompt(task, destination: dict | None = None,
         source_lines.append(f"Original message:\n{snippet}")
     if source_lines:
         parts.append("[SOURCE]\n" + "\n".join(source_lines))
+
+    parts.append("[VOICE]\n" + _VOICE_BY_CHANNEL.get(
+        (delivery_channel or "").strip().lower(), _VOICE_NEUTRAL))
 
     correction = _clean(redirect_text)
     if correction:

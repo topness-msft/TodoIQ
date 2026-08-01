@@ -162,6 +162,25 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     }
 
 
+def _carry_forward_destination(task_id: int, resolved: dict) -> dict:
+    """Keep a picker choice across a Redo.
+
+    Auto-derived bindings are cheap to recompute, but a user_picker binding is
+    explicit intent. A Redo builds a new row, so without this the user's chosen
+    audience -- and the voice register that follows from it -- would silently
+    revert to whatever the source URL implies.
+    """
+    previous = get_latest_task_action(task_id)
+    if not previous or previous.get("destination_source") != "user_picker":
+        return resolved
+    return {
+        "delivery_channel": previous.get("delivery_channel"),
+        "destination_ref": previous.get("destination_ref"),
+        "destination_display": previous.get("destination_display"),
+        "destination_source": "user_picker",
+    }
+
+
 def _enrich(action: dict) -> dict:
     """Add the derived audience risk the UI needs but the row does not store."""
     if action is not None:
@@ -263,8 +282,16 @@ class CoworkHandler(tornado.web.RequestHandler):
 
         redirect_text = (body.get("redirect_text") or "").strip() or None
         destination = parse_source_url(task.get("source_url"))
+        resolved = _carry_forward_destination(
+            tid, _resolve_destination(task, destination)
+        )
 
-        prompt = compose_prompt(task, destination, redirect_text=redirect_text)
+        prompt = compose_prompt(
+            task,
+            destination,
+            redirect_text=redirect_text,
+            delivery_channel=resolved.get("delivery_channel"),
+        )
 
         # A Redo is a NEW row, never an update: the original intent survives and
         # the correction chain stays auditable.
@@ -277,7 +304,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             composed_prompt=prompt,
             destination_kind=destination.get("kind"),
             island_url=get_cached_cowork_island(),
-            **_resolve_destination(task, destination),
+            **resolved,
         )
 
         try:
