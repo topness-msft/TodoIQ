@@ -338,6 +338,104 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["delivery_channel"], "teams")
         self.assertEqual(action["destination_source"], "auto_key_people")
 
+
+class TestChannelInferredFromTaskText(CoworkAPITestBase):
+    """A manual task often states its own channel; reading it beats guessing.
+
+    Derived from a sweep of all 1,967 live tasks. The Teams phrasing is explicit
+    and scored 174 true / 0 false against source-derived labels. Email phrasing
+    is NOT inferred: it conflates "email as background context" with "email as
+    delivery target", and the failure is asymmetric - a wrong "email" puts a
+    subject line and a sign-off on a Teams message, while falling back to the
+    neutral voice is harmless.
+    """
+
+    def test_manual_task_stating_teams_binds_teams(self):
+        tid = self.make_task(
+            title="Ask Mehdi about the Copilot Kit",
+            description="Send Mehdi a short Teams message asking about FinOps.",
+            source_type="manual",
+        )
+        action = json.loads(self.start(tid).body)["action"]
+        self.assertEqual(action["delivery_channel"], "teams")
+        self.assertEqual(action["destination_source"], "auto_task_text")
+
+    def test_ping_counts_as_teams(self):
+        tid = self.make_task(
+            title="Ping Kristina for a checkpoint",
+            source_type="manual",
+        )
+        self.assertEqual(
+            json.loads(self.start(tid).body)["action"]["delivery_channel"], "teams"
+        )
+
+    def test_mentioning_both_channels_is_ambiguous_and_infers_nothing(self):
+        # "Send a Teams message or email" is a genuine choice, not a signal.
+        tid = self.make_task(
+            title="Reach out to Audrie Gordon",
+            description="Send a Teams message or email outlining what she owns.",
+            source_type="manual",
+        )
+        action = json.loads(self.start(tid).body)["action"]
+        self.assertIsNone(action["delivery_channel"])
+        self.assertNotEqual(action["destination_source"], "auto_task_text")
+
+    def test_email_is_never_inferred_from_text(self):
+        tid = self.make_task(
+            title="Follow up with Iliyas",
+            description="Reply to his email about the Power Up naming.",
+            source_type="manual",
+        )
+        self.assertIsNone(
+            json.loads(self.start(tid).body)["action"]["delivery_channel"]
+        )
+
+    def test_text_never_overrides_a_source_derived_channel(self):
+        # An email-sourced task that happens to say "ping" stays email.
+        tid = self.make_task(
+            title="Follow up on the budget thread",
+            description="Ping him about the numbers.",
+            source_type="email",
+        )
+        self.assertEqual(
+            json.loads(self.start(tid).body)["action"]["delivery_channel"], "email"
+        )
+
+    def test_inferred_channel_selects_the_teams_voice_skill(self):
+        tid = self.make_task(
+            title="Ping Brenda about scheduling",
+            source_type="manual",
+        )
+        prompt = json.loads(self.start(tid).body)["action"]["composed_prompt"]
+        self.assertIn("work-teams-voice", prompt)
+        self.assertNotIn("work-email-voice", prompt)
+
+    def test_text_inference_never_overrides_a_confirmed_destination(self):
+        tid = self.make_task(
+            title="Ping Sarah about the deck",
+            source_type="manual",
+        )
+        self.start(tid)
+        self.get_preview(tid)
+        confirm = self.fetch(
+            f"/api/tasks/{tid}/cowork/destination",
+            method="POST",
+            body=json.dumps(
+                {
+                    "delivery_channel": "email",
+                    "destination_ref": "sarah@microsoft.com",
+                    "destination_display": "Sarah Goodwin",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(confirm.code, 200)
+        action = json.loads(
+            self.start(tid, body={"redirect_text": "try again"}).body
+        )["action"]
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_source"], "user_picker")
+
     def test_conflict_while_running(self):
         """409 must be gated on the in-memory registry, not the DB row."""
         tid = self.make_task()

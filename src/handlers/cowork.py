@@ -12,6 +12,7 @@ Routes:
 """
 
 import json
+import re
 
 import tornado.web
 
@@ -97,6 +98,35 @@ _CHANNEL_BY_SOURCE = {
 
 _BROADCAST_KINDS = ("group", "meeting", "channel", "unknown")
 
+# Channel inference from the task's own words, for tasks with no source URL and
+# no channel-bearing source_type. Derived from a sweep of all 1,967 live tasks,
+# not invented: these Teams phrasings scored 174 true / 0 false against
+# source-derived labels.
+#
+# Email is deliberately NOT inferred. The same sweep showed email wording is
+# usually background context ("review the email thread", "so Aamer can send an
+# email") rather than a delivery instruction, and it scored 20%. The failure is
+# also asymmetric: a wrong "email" puts a subject line and a sign-off on a Teams
+# message, while no channel simply falls back to the neutral voice.
+_TEAMS_TEXT_RE = re.compile(
+    r"\bteams (?:message|note|chat|dm)\b|\bon teams\b|\bping\b", re.I
+)
+# Any mention of mail makes the instruction ambiguous ("send a Teams message or
+# email"), so infer nothing rather than pick a side.
+_MAIL_TEXT_RE = re.compile(r"\bemail\b|\bmail\b|\boutlook\b", re.I)
+
+
+def _infer_channel_from_text(task: dict) -> str | None:
+    """Read an explicit delivery channel out of the task's own text."""
+    blob = " ".join(
+        (task.get(field) or "")
+        for field in ("title", "description", "coaching_text")
+    )
+    if not _TEAMS_TEXT_RE.search(blob) or _MAIL_TEXT_RE.search(blob):
+        return None
+    return "teams"
+
+
 
 def _people(task: dict) -> list:
     """Structured key_people entries, using the same JSON shape as _refs."""
@@ -127,8 +157,9 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     A linked Teams thread is the delivery target, so it is stored in
     destination_ref. The Cowork conversation id is a different identifier and is
     never reused as an audience. Without a linked thread a single known person
-    can seed the reference, but the channel stays unset so the user still
-    chooses Teams or email.
+    can seed the reference. If the source type carries no channel, the task's own
+    wording is read as a last resort; failing that the channel stays unset so the
+    user still chooses Teams or email.
     """
     people = _people(task)
     source_type = (task.get("source_type") or "").strip().lower()
@@ -146,19 +177,25 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
             "destination_source": "auto_source_url",
         }
 
+    # Only ever a fallback: a channel-bearing source_type is stronger evidence
+    # than prose, so it is never overridden here.
+    inferred = _infer_channel_from_text(task) if channel is None else None
+
     if person:
         return {
-            "delivery_channel": channel,
+            "delivery_channel": channel or inferred,
             "destination_ref": person["email"] or person["name"],
             "destination_display": person["name"],
             "destination_source": "auto_key_people",
         }
 
     return {
-        "delivery_channel": channel,
+        "delivery_channel": channel or inferred,
         "destination_ref": None,
         "destination_display": None,
-        "destination_source": None,
+        # Only claim text provenance when nothing else determined the binding,
+        # so the audit trail never overstates what was read.
+        "destination_source": "auto_task_text" if inferred else None,
     }
 
 
