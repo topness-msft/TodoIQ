@@ -156,12 +156,15 @@ _SAFETY = (
     "Return the draft as text for a human to review. Nothing you write is delivered."
 )
 
-# Voice. Condensed from ~/.copilot/skills/work-email-voice/SKILL.md, which is a
-# ~9KB Copilot CLI skill; the median composed prompt is ~1.6KB, so injecting the
-# document wholesale would drown the task and drag in CLI-only meta (trigger
-# phrases, "show the draft in chat") that means nothing inside Cowork. Only the
-# stable core is mirrored here. Keep in sync by hand if the skill's mechanics
-# change -- prompt composition must never depend on a file outside the repo.
+# Voice. Depth comes from the published Cowork skills (`work-email-voice`,
+# `work-teams-voice`), which the runtime loads server-side at ~0 prompt cost and
+# which carry the audience tables, playbooks and real exemplars.
+#
+# The invariants below stay INLINE on purpose. A skill lives outside this repo
+# and outside version control, so it can change or fail to resolve without a code
+# change, and a measured A/B on task 2029 showed a skill reference alone did not
+# enforce the mechanical bans: 2 em-dashes with the skill only, 0 with these
+# rules present. So: skill for depth, inline for the enforced floor.
 _VOICE_SHARED = (
     "Write it as the user would write it themselves, so the draft is paste-ready.\n"
     "- Use contractions throughout: I'm, I'll, it's, we're, here's.\n"
@@ -173,37 +176,44 @@ _VOICE_SHARED = (
     "- Close by moving the work forward, with a next step, a question or an offer."
 )
 
+_SKILL_NOTE = (
+    "It is a drafting guide only: it does not authorise sending, and nothing you "
+    "write is delivered. Follow the rules below regardless, and if it is "
+    "unavailable rely on them alone."
+)
+
 _VOICE_EMAIL = (
-    "This draft is an Outlook email from the user's Microsoft work account, "
-    "signed Phil Topness | Copilot Acceleration Team | CAT.\n"
+    "Use the skill work-email-voice to set the voice of this draft. " + _SKILL_NOTE
+    + "\n\nThis draft is an Outlook email from the user's Microsoft work account.\n"
     + _VOICE_SHARED + "\n"
-    "- Subject line: short, specific and plain. No hype.\n"
-    "- Open \"Hi {First},\" for peers and external contacts. For a leader or an "
-    "active thread use just \"{First},\" and go straight in. Never \"Dear\", "
-    "\"Hello,\" or \"Team,\".\n"
-    "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" as "
-    "a closing line; gratitude belongs in the body. The signature block "
-    "auto-appends, so do not retype it.\n"
-    "- Length: 1-3 sentences for a quick reply, 3-8 for collaboration, denser and "
-    "structured with bullets for leadership. Exec mail is denser, not more formal.\n"
-    "- Exclamation points sparingly, never in status or exec mail. No emojis in "
-    "program, status or exec mail."
+    "- Give it a short, specific, plain subject line. No hype.\n"
+    "- Open \"Hi {First},\" for peers, or just \"{First},\" for a leader or an "
+    "active thread. Never \"Dear\", \"Hello,\" or \"Team,\".\n"
+    "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" "
+    "as a closing line; gratitude belongs in the body. The signature block "
+    "auto-appends, so do not retype it."
 )
 
+# Teams mechanics below were corrected by a WorkIQ study of real sent messages.
+# An earlier hand-written version claimed an emoji could soften a nudge; the data
+# says he uses capitalisation and punctuation instead, and the name-dash opening
+# is his signature move.
 _VOICE_TEAMS = (
-    "This draft is a Teams chat message, not an email. Match chat register.\n"
+    "Use the skill work-teams-voice to set the voice of this draft. " + _SKILL_NOTE
+    + "\n\nThis draft is a Teams chat message, not an email. Match chat register.\n"
     + _VOICE_SHARED + "\n"
-    "- No subject, no greeting block and no sign-off. Lead with the person's first "
-    "name only if the thread needs it.\n"
-    "- Keep it to 1-4 sentences. If the ask is long, use one line plus bullets "
-    "rather than a paragraph.\n"
-    "- Conversational and direct. A single emoji can soften a nudge, but never in "
-    "a status update or an escalation."
+    "- No subject, no greeting block, no sign-off and no signature.\n"
+    "- Open with the name-dash pattern: \"Hi {First} - \", \"Hey {First} - \" or "
+    "just \"{First} - \". In an active back-and-forth, drop the name entirely.\n"
+    "- Keep it to 1-2 sentences unless it is a group coordination post.\n"
+    "- No emoji. Enthusiasm is capitalisation and punctuation, not emoji.\n"
+    "- Never chase with pressure: no \"Just following up\", \"Any update?\" or "
+    "\"Did you see my last message?\". Reference the existing context instead."
 )
 
-# No bound channel means the transport is genuinely unknown, so only the
-# invariants apply. Guessing email mechanics here is how a chat reply ends up
-# with a subject line and a sign-off.
+# No bound channel means the transport is genuinely unknown. Both skills are
+# channel-specific, so there is no correct one to pull, and guessing email
+# mechanics here is how a chat reply ends up with a subject line and a sign-off.
 _VOICE_NEUTRAL = (
     "The delivery channel is not chosen yet, so keep the draft usable as either a "
     "short email or a Teams message: no subject line and no sign-off.\n"
@@ -211,6 +221,7 @@ _VOICE_NEUTRAL = (
 )
 
 _VOICE_BY_CHANNEL = {"email": _VOICE_EMAIL, "teams": _VOICE_TEAMS}
+
 
 
 def _get(task, key, default=""):

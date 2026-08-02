@@ -115,23 +115,24 @@ class TestVoiceLayer(unittest.TestCase):
 
     def test_email_voice_carries_email_mechanics(self):
         p = compose_prompt(make_task(), delivery_channel="email")
-        voice = p.split("[VOICE]")[1]
-        self.assertIn("Subject", voice)
-        self.assertIn("Phil", voice)
+        voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
+        self.assertIn("subject line", voice.lower())
+        self.assertIn("Sign off with just", voice)
 
     def test_teams_voice_omits_email_mechanics(self):
         # Chat has no subject line and no sign-off; borrowing them is the exact
         # mistake an email-derived voice guide invites.
         p = compose_prompt(make_task(), delivery_channel="teams")
         voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
-        self.assertNotIn("Subject line", voice)
+        self.assertNotIn("Sign off with just", voice)
+        self.assertIn("No subject", voice)
         self.assertIn("Teams", voice)
 
     def test_unbound_channel_still_gets_the_shared_voice(self):
         p = compose_prompt(make_task(), delivery_channel=None)
         self.assertIn("[VOICE]", p)
         voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
-        self.assertNotIn("Subject line", voice)
+        self.assertNotIn("Sign off with just", voice)
 
     def test_shared_invariants_apply_to_every_channel(self):
         for channel in ("email", "teams", None):
@@ -145,7 +146,7 @@ class TestVoiceLayer(unittest.TestCase):
     def test_unknown_channel_falls_back_instead_of_crashing(self):
         p = compose_prompt(make_task(), delivery_channel="carrier-pigeon")
         voice = p.split("[VOICE]")[1].split("[OUTPUT]")[0]
-        self.assertNotIn("Subject line", voice)
+        self.assertNotIn("Sign off with just", voice)
 
     def test_voice_never_contradicts_preview_mode(self):
         p = compose_prompt(make_task(), delivery_channel="email")
@@ -153,6 +154,59 @@ class TestVoiceLayer(unittest.TestCase):
         for banned in ("send it", "Send the", "deliver it"):
             with self.subTest(banned=banned):
                 self.assertNotIn(banned, voice)
+
+
+class TestVoiceSkillBinding(unittest.TestCase):
+    """The published Cowork skills carry the depth; the inline rules are the floor.
+
+    A skill lives server-side, outside this repo and outside version control, so
+    it can change or fail to resolve without a code change. The invariants stay
+    inline both as a fallback and because a skill reference alone did not
+    reliably enforce them: the same prompt produced 2 em-dashes with only the
+    skill, and 0 with the inline rules.
+    """
+
+    def voice(self, channel):
+        return compose_prompt(
+            make_task(), delivery_channel=channel
+        ).split("[VOICE]")[1].split("[OUTPUT]")[0]
+
+    def test_email_binds_the_email_skill(self):
+        self.assertIn("work-email-voice", self.voice("email"))
+
+    def test_teams_binds_the_teams_skill(self):
+        self.assertIn("work-teams-voice", self.voice("teams"))
+
+    def test_channels_do_not_cross_bind(self):
+        self.assertNotIn("work-teams-voice", self.voice("email"))
+        self.assertNotIn("work-email-voice", self.voice("teams"))
+
+    def test_unbound_channel_binds_no_skill(self):
+        # Both skills are channel-specific, so with no transport chosen there is
+        # no correct one to pull.
+        for channel in (None, "carrier-pigeon"):
+            with self.subTest(channel=channel):
+                voice = self.voice(channel)
+                self.assertNotIn("work-email-voice", voice)
+                self.assertNotIn("work-teams-voice", voice)
+
+    def test_invariants_survive_skill_binding(self):
+        for channel in ("email", "teams"):
+            with self.subTest(channel=channel):
+                voice = self.voice(channel)
+                self.assertIn("em-dash", voice)
+                self.assertIn("contractions", voice.lower())
+
+    def test_skill_is_declared_optional_so_a_failure_degrades_safely(self):
+        for channel in ("email", "teams"):
+            with self.subTest(channel=channel):
+                self.assertIn("if it is unavailable", self.voice(channel))
+
+    def test_skill_binding_is_not_an_execution_grant(self):
+        # The skills are drafting guides. Neither may be read as authorisation.
+        for channel in ("email", "teams"):
+            with self.subTest(channel=channel):
+                self.assertIn("does not authorise sending", self.voice(channel))
 
 
 class TestEmptySections(unittest.TestCase):

@@ -289,7 +289,7 @@ class TestStartPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         prompt = data["action"]["composed_prompt"]
         self.assertIn("[VOICE]", prompt)
-        self.assertIn("Subject", prompt.split("[VOICE]")[1])
+        self.assertIn("work-email-voice", prompt.split("[VOICE]")[1])
 
     def test_redo_keeps_a_user_confirmed_destination(self):
         """A picker choice is explicit intent; re-deriving it would discard it."""
@@ -322,7 +322,7 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["delivery_channel"], "email")
         self.assertEqual(action["destination_ref"], "sarah@microsoft.com")
         self.assertEqual(action["destination_source"], "user_picker")
-        self.assertIn("Subject", action["composed_prompt"].split("[VOICE]")[1])
+        self.assertIn("work-email-voice", action["composed_prompt"].split("[VOICE]")[1])
 
     def test_redo_rederives_an_unconfirmed_destination(self):
         tid = self.make_task(
