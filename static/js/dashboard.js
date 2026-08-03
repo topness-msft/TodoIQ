@@ -1463,7 +1463,9 @@ function doAction(taskId, action, status) {
     var body = { action: action };
     if (status) body.status = status;
 
-    fetch('/api/tasks/' + taskId + '/action', {
+    // Returned so callers can sequence follow-up work, such as advancing the
+    // keyboard selection once the list has re-rendered.
+    return fetch('/api/tasks/' + taskId + '/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -3325,6 +3327,10 @@ function handleKeyboardShortcut(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
     var key = e.key;
+    // Shift+D arrives as 'D'. Action shortcuts are matched case-insensitively so
+    // a held Shift does not silently swallow them. Named keys (Escape, Tab,
+    // ArrowUp) are longer than one character and pass through untouched.
+    var actionKey = key.length === 1 ? key.toLowerCase() : key;
 
     // Shortcuts overlay
     if (key === '?') {
@@ -3350,7 +3356,7 @@ function handleKeyboardShortcut(e) {
     }
 
     // Focus quick-add
-    if (key === '/' || key === 'n') {
+    if (actionKey === '/' || actionKey === 'n') {
         e.preventDefault();
         var input = document.getElementById('task-input');
         if (input) input.focus();
@@ -3358,12 +3364,12 @@ function handleKeyboardShortcut(e) {
     }
 
     // Navigation: j/k or arrows
-    if (key === 'j' || key === 'ArrowDown') {
+    if (actionKey === 'j' || key === 'ArrowDown') {
         e.preventDefault();
         _kbNavigate(1);
         return;
     }
-    if (key === 'k' || key === 'ArrowUp') {
+    if (actionKey === 'k' || key === 'ArrowUp') {
         e.preventDefault();
         _kbNavigate(-1);
         return;
@@ -3392,17 +3398,17 @@ function handleKeyboardShortcut(e) {
     var task = tasks.find(function(t) { return t.id === selectedTaskId; });
     if (!task) return;
 
-    if (key === 'c') {
+    if (actionKey === 'c') {
         var allowedC = VALID_TRANSITIONS[task.status];
         if (allowedC && allowedC.indexOf('completed') !== -1) {
-            doAction(task.id, 'complete');
+            _kbActThenAdvance(task.id, 'complete');
         }
-    } else if (key === 'd') {
+    } else if (actionKey === 'd') {
         var allowedD = VALID_TRANSITIONS[task.status];
         if (allowedD && allowedD.indexOf('dismissed') !== -1) {
-            doAction(task.id, 'dismiss');
+            _kbActThenAdvance(task.id, 'dismiss');
         }
-    } else if (key === 's') {
+    } else if (actionKey === 's') {
         if (task.status === 'suggested') {
             doAction(task.id, 'promote');
         } else {
@@ -3411,17 +3417,64 @@ function handleKeyboardShortcut(e) {
                 doAction(task.id, 'start');
             }
         }
-    } else if (key === 'p') {
+    } else if (actionKey === 'p') {
         if (task.status === 'suggested') {
             doAction(task.id, 'promote');
         }
-    } else if (key === 'r') {
+    } else if (actionKey === 'r') {
         refreshTask(task.id);
     }
 }
 
 function _getVisibleRows() {
     return Array.prototype.slice.call(document.querySelectorAll('.task-row'));
+}
+
+function _rowTaskId(row) {
+    return parseInt(row.getAttribute('data-id'));
+}
+
+function _kbActThenAdvance(taskId, action) {
+    // Complete and dismiss move the task out of the section being triaged. The
+    // selection used to stay on it, and since neither is a legal transition out
+    // of the new status, every following keypress became a silent no-op -- the
+    // shortcut looked broken. Work out the successor BEFORE acting, because the
+    // list re-renders and the row moves to another section.
+    var rows = _getVisibleRows();
+    var successorId = null;
+    for (var i = 0; i < rows.length; i++) {
+        if (_rowTaskId(rows[i]) !== taskId) continue;
+        for (var j = i + 1; j < rows.length; j++) {
+            var candidate = _rowTaskId(rows[j]);
+            if (candidate && candidate !== taskId) {
+                successorId = candidate;
+                break;
+            }
+        }
+        break;
+    }
+
+    var pending = doAction(taskId, action);
+    if (!pending || typeof pending.then !== 'function') return;
+    pending.then(function() {
+        _kbSelectAfterRemoval(successorId);
+    });
+}
+
+function _kbSelectAfterRemoval(successorId) {
+    var rows = _getVisibleRows();
+    var idx = -1;
+    for (var i = 0; i < rows.length; i++) {
+        if (_rowTaskId(rows[i]) === successorId) { idx = i; break; }
+    }
+    if (idx === -1) {
+        clearDetailPane();
+        _clearKeyboardSelection();
+        return;
+    }
+    _kbSelectedIdx = idx;
+    _applyKeyboardSelection(rows);
+    selectTask(successorId);
 }
 
 function _kbNavigate(direction) {
