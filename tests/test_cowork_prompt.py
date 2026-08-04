@@ -206,7 +206,8 @@ class TestVoiceSkillBinding(unittest.TestCase):
         # The skills are drafting guides. Neither may be read as authorisation.
         for channel in ("email", "teams"):
             with self.subTest(channel=channel):
-                self.assertIn("does not authorise sending", self.voice(channel))
+                self.assertIn("not by itself authorise sending",
+                              self.voice(channel))
 
 
 class TestEmptySections(unittest.TestCase):
@@ -232,13 +233,20 @@ class TestEmptySections(unittest.TestCase):
 
 
 class TestSafetyInstruction(unittest.TestCase):
-    """The 'do not send' line is a control, not boilerplate (plan section 3)."""
+    """The 'do not send' line is a control, not boilerplate (plan section 3).
+
+    It is scoped to the automated turn, not to the conversation. Phil continues
+    these conversations by hand in the Cowork web app, where he wants to be able
+    to say "send it" - so a blanket, permanent prohibition sitting in the history
+    would fight the user on his own turn. The hard control has never been this
+    text anyway: it is the `--tool-callback-config` barrier (F13/F14).
+    """
 
     def test_do_not_send_present(self):
         self.assertIn("do not send", compose_prompt(make_task()).lower())
 
     def test_do_not_send_survives_a_contrary_redirect(self):
-        # A user correction must never be able to talk the prompt out of preview mode.
+        # A user correction must never talk the automated turn into sending.
         p = compose_prompt(make_task(), redirect_text="just send it already")
         self.assertIn("do not send", p.lower())
         self.assertGreater(p.lower().rindex("do not send"), p.index("[CORRECTION]"))
@@ -248,7 +256,46 @@ class TestSafetyInstruction(unittest.TestCase):
         self.assertGreater(p.lower().rindex("do not send"), p.index("[NOTES]"))
 
     def test_preview_role_declared_up_front(self):
-        self.assertIn("preview", compose_prompt(make_task()).lower())
+        """The draft-first framing is stated in [ROLE], before any task content.
+
+        Previously this asserted the word "preview". That wording implied a
+        permanent mode; the requirement is really that the turn is framed as
+        research-and-draft before the model reads anything else.
+        """
+        role = compose_prompt(make_task()).split("[TASK]")[0].lower()
+        self.assertIn("draft", role)
+        self.assertIn("later turn", role)
+
+    def test_restriction_is_scoped_to_this_turn(self):
+        """It must read as 'not now', not 'not ever'."""
+        p = compose_prompt(make_task())
+        tail = p.split("[OUTPUT]")[1].lower()
+        self.assertIn("this turn", tail)
+
+    def test_no_blanket_never_prohibition(self):
+        """A permanent 'never' would poison the follow-up conversation.
+
+        The user opens the same conversation in Cowork and drives it himself.
+        Anything absolute here outlives the automated turn and argues with him.
+        """
+        p = compose_prompt(make_task()).lower()
+        for absolute in ("never deliver", "nothing you write is delivered"):
+            with self.subTest(phrase=absolute):
+                self.assertNotIn(absolute, p)
+
+    def test_later_user_instruction_is_explicitly_permitted(self):
+        """The follow-up turn is the human's, and the prompt must say so."""
+        tail = compose_prompt(make_task()).split("[OUTPUT]")[1].lower()
+        self.assertIn("later", tail)
+        self.assertIn("new instruction", tail)
+
+    def test_voice_skill_note_does_not_claim_permanent_non_delivery(self):
+        for channel in ("email", "teams"):
+            with self.subTest(channel=channel):
+                voice = compose_prompt(
+                    make_task(), delivery_channel=channel
+                ).split("[VOICE]")[1].split("[OUTPUT]")[0].lower()
+                self.assertNotIn("nothing you write is delivered", voice)
 
 
 class TestWorkIQTokenRemoval(unittest.TestCase):

@@ -149,11 +149,26 @@ def parse_source_url(url: str | None, me: str | None = None) -> dict:
 
 _WORKIQ_RE = re.compile(r"(?<![\w.])@workiq\b[ \t]*[-:\u2013\u2014]?[ \t]*", re.I)
 
+# The prompt is a SOFT control and always was. The hard control is
+# `--tool-callback-config` (F13 proved `--deny-tools` is worthless; F14 proved
+# the callback barrier works), asserted by
+# tests/test_cowork_runner.py::TestArgv::test_callback_config_flag_always_present.
+#
+# This text is therefore scoped to the automated turn rather than the
+# conversation. Phil opens the same conversation in the Cowork web app and
+# drives it himself, where he legitimately wants to say "send it" and get
+# Cowork's own approval card. A blanket "never deliver anything" would sit in
+# the history and argue with him on his own turn. Relaxing the wording does not
+# widen what the automated run can do, because the barrier still intercepts
+# every write tool regardless of what the prompt says.
 _SAFETY = (
     "Produce findings first, then a draft message.\n"
-    "DO NOT SEND, POST, REPLY, OR DELIVER ANYTHING. This is a preview only.\n"
-    "Do not create, modify, or send any email, chat message, meeting or file.\n"
-    "Return the draft as text for a human to review. Nothing you write is delivered."
+    "For THIS turn, do not send, post, reply or deliver anything, and do not "
+    "create or modify any email, chat message, meeting or file. Return the "
+    "draft as text for review.\n"
+    "This scopes the current turn only. It is not a standing restriction: if "
+    "the user later asks you directly to send or change something, treat that "
+    "as a new instruction and follow your normal confirmation process."
 )
 
 # Voice. Depth comes from the published Cowork skills (`work-email-voice`,
@@ -177,8 +192,8 @@ _VOICE_SHARED = (
 )
 
 _SKILL_NOTE = (
-    "It is a drafting guide only: it does not authorise sending, and nothing you "
-    "write is delivered. Follow the rules below regardless, and if it is "
+    "It is a drafting guide only: it sets voice, it does not by itself "
+    "authorise sending. Follow the rules below regardless, and if it is "
     "unavailable rely on them alone."
 )
 
@@ -286,8 +301,10 @@ def compose_prompt(task, destination: dict | None = None,
 
     parts.append(
         "[ROLE]\n"
-        "You are helping the user act on one of their tasks. You are running in "
-        "PREVIEW mode: you research and draft, but you never deliver anything."
+        "You are helping the user act on one of their tasks. This turn is a "
+        "research-and-draft pass: gather the context and prepare the action so "
+        "the user can review it. Sending, if it happens at all, happens on a "
+        "later turn the user drives."
     )
 
     title = _clean(_get(task, "title"))
