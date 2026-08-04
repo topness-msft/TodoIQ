@@ -216,6 +216,35 @@ def _signal_handler(signum, frame):
 def main():
     global _tray_icon
 
+    # Guards run before anything binds a port or writes state. Both fail open:
+    # a guard must never be the reason TodoNess will not start.
+    try:
+        from src.services.instance_guard import (
+            checkout_mismatch,
+            port_owner_message,
+            registered_tray_script,
+        )
+
+        mismatch = checkout_mismatch(Path(__file__).resolve(),
+                                     registered_tray_script())
+        if mismatch:
+            logger.warning("Checkout mismatch: %s", mismatch.replace("\n", " "))
+            # MB_YESNO | MB_ICONWARNING — default to not starting the wrong copy.
+            if ctypes.windll.user32.MessageBoxW(
+                0, mismatch + "\n\nStart this copy anyway?", "TodoNess", 0x34
+            ) != 6:  # IDYES
+                sys.exit(0)
+
+        busy = port_owner_message(8766)
+        if busy:
+            logger.warning("Port 8766 already in use")
+            ctypes.windll.user32.MessageBoxW(0, busy, "TodoNess", 0x30)
+            sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Instance guard failed; continuing")
+
     # Single-instance check
     if check_already_running():
         ctypes.windll.user32.MessageBoxW(
@@ -227,6 +256,10 @@ def main():
     atexit.register(cleanup_pid)
 
     logger.info("TodoNess tray launcher starting")
+    # Log what this instance actually serves, so a wrong checkout is diagnosable
+    # from the log alone rather than only from a live database comparison.
+    logger.info("Serving project root: %s", PROJECT_ROOT)
+    logger.info("Serving database:     %s", DATA_DIR / "claudetodo.db")
 
     # Start Tornado in a background thread
     t = threading.Thread(target=server_thread, daemon=True)
