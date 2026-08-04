@@ -3032,7 +3032,7 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            '<span class="cw-foot-note">read-only preview &middot; nothing is sent</span>');
+            '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
     }
 
     if (a && a.state === 'failed') {
@@ -3086,7 +3086,8 @@ function renderCoworkCard(task) {
     return cwShell('', 'not run', task,
         cwIntentBlock(task, true)
         + '<div class="cw-idle">Cowork can check the latest state of this in M365, then draft the action.'
-        + '<span class="cw-idle-sub">Preview only \u2014 nothing is sent. You copy and send it yourself.</span></div>',
+        + '<span class="cw-idle-sub">Nothing is sent from here. Open the draft in '
+        + 'Cowork if you want to act on it.</span></div>',
         '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with Cowork</button>'
         + '<span class="cw-foot-note">~45s &middot; read-only</span>');
 }

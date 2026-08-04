@@ -2235,7 +2235,7 @@ function renderCoworkCard(t) {
      <div class="cw-progress"><div class="cw-spinner"></div><div style="flex:1">
        <div>Cowork is reading M365</div>
        <div class="cw-progress-sub" id="cw-hb-${t.id}">${esc(t.cw_elapsed || '')}</div></div></div>`,
-    `<span class="cw-foot-note">read-only preview · nothing is sent</span>`);
+    `<span class="cw-foot-note">read-only preview · nothing is sent from here</span>`);
 
   if (s === 'failed') return cwCard('is-failed', 'failed', t,
     `<div style="padding:8px 0 2px"><b>Cowork could not complete this.</b>
@@ -2277,7 +2277,7 @@ function renderCoworkCard(t) {
      <div style="padding:10px 0 2px;color:var(--text-secondary)">
        Cowork can check the latest state of this in M365, then draft the action.
        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-         Preview only — nothing is sent. You copy and send it yourself.</div>
+         Nothing is sent from here. Open the draft in Cowork if you want to act on it.</div>
      </div>`,
     `<button class="cw-btn cw-btn-primary" onclick="cwStart(${t.id})">Preview with Cowork</button>
      <span class="cw-foot-note">~45s · read-only</span>`);
