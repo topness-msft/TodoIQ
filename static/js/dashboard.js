@@ -661,14 +661,29 @@ function selectTask(taskId) {
         .catch(function(err) { console.error('Failed to fetch task detail:', err); });
 }
 
+// Any field the user could be mid-edit in. Deliberately behavioural rather than
+// a list of ids and classes: the previous version checked for a `coaching-edit`
+// class that no markup actually carried, so the guard silently stopped covering
+// the intent textarea and background polling threw the user out of edit mode
+// every few seconds. A shape test cannot rot the same way.
+function _isTextEntry(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    var type = (el.getAttribute('type') || 'text').toLowerCase();
+    return ['text', 'search', 'url', 'email', 'tel', 'number', 'password',
+            'date', 'datetime-local', 'time'].indexOf(type) !== -1;
+}
+
 // ── Render Detail Pane ─────────────────────────────────────────────────
 function renderDetailPane(task) {
     var pane = document.getElementById('detail-pane');
 
-    // Skip re-render if user is typing in notes or editing title — avoids focus loss
+    // Skip re-render while the user is typing in this pane, then catch up on
+    // blur so the deferral never silently drops an update.
     var activeEl = document.activeElement;
-    if (activeEl && pane && pane.contains(activeEl) &&
-        (activeEl.id === 'notes-textarea' || activeEl.id === 'notes-add-input' || activeEl.classList.contains('title-edit-input') || activeEl.classList.contains('coaching-edit'))) {
+    if (activeEl && pane && pane.contains(activeEl) && _isTextEntry(activeEl)) {
         // Stash the task for a deferred re-render after blur
         pane._pendingTask = task;
         if (!pane._deferredRender) {
