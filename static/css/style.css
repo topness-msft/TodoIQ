@@ -2595,6 +2595,14 @@ html, body {
     white-space: pre-wrap;
 }
 .cw-draft.is-editing { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* .cw-draft styles both the rendered draft (a div, which fills its container)
+   and the editor (a textarea, which otherwise falls back to its ~20-character
+   cols default). Without this the edit box collapsed to a narrow column. */
+textarea.cw-draft {
+    width: 100%; box-sizing: border-box;
+    font: inherit; font-size: 13px; line-height: 1.55;
+    resize: vertical;
+}
 .cw-draft.is-dim { opacity: .55; }
 .cw-card.is-executed .cw-draft { background: var(--skill-output-bg); border-color: var(--success); }
 

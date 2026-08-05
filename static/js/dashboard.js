@@ -3014,6 +3014,23 @@ function cwRedoRow(taskId) {
         + '</div></div>';
 }
 
+// Every preview run spawns a brand-new Cowork conversation (nothing passes
+// --resume), so "start over" needs no new machinery - only a control that says
+// so. Redo is framed as "tell Cowork what to change", which reads as steering
+// the existing conversation; a user asking for a clean slate had no way to
+// express it except by typing the request into the correction box.
+function cwStartOver(taskId) {
+    var ok = window.confirm(
+        'Start a new Cowork conversation for this task?\n\n'
+        + 'The current draft is abandoned and research begins again from '
+        + 'scratch, with no correction carried over. The previous run stays in '
+        + 'history, and the audience you confirmed is kept.');
+    if (!ok) return;
+    delete _cwRedo[taskId];
+    delete _cwEditing[taskId];
+    cwStart(taskId);
+}
+
 function renderCoworkCard(task) {
     var a = _cwActions[task.id];
 
@@ -3067,6 +3084,9 @@ function renderCoworkCard(task) {
             : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
               + cwRedoBlock(task.id)
+              + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
+              + 'title="Abandon this conversation and research again from scratch" '
+              + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
               + (a.conversation_id
                   ? '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
                     + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'

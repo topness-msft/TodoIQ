@@ -2264,6 +2264,9 @@ function renderCoworkCard(t) {
       `<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(${t.id})">Copy draft</button>
        <button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(${t.id},true)">Edit</button>
        ${cwRedoBtn(t)}
+       <button class="cw-btn cw-btn-sec" data-testid="cw-start-over"
+         title="Abandon this conversation and research again from scratch"
+         onclick="cwStartOver(${t.id})">Start over</button>
        ${t.cw_conversation_id ? `<a class="cw-btn cw-btn-sec cw-btn-link"
          href="${esc('https://m365.cloud.microsoft/agents/cowork#/task/' + encodeURIComponent(t.cw_conversation_id))}"
          target="_blank" rel="noopener noreferrer">Open in Cowork</a>` : ''}
@@ -2312,6 +2315,22 @@ function cwToggleRedo(id, on) {
   const t = cwTask(id); if (!t) return;
   t.cw_redo_open = on;
   cwRerender(id);
+}
+
+// Each preview run spawns a fresh Cowork conversation, so starting over needs
+// no new machinery - only a control that says so. Redo reads as steering the
+// existing conversation, which left a clean restart inexpressible.
+function cwStartOver(id) {
+  const t = cwTask(id); if (!t) return;
+  const ok = window.confirm(
+    'Start a new Cowork conversation for this task?\n\n'
+    + 'The current draft is abandoned and research begins again from scratch, '
+    + 'with no correction carried over. The previous run stays in history, and '
+    + 'the audience you confirmed is kept.');
+  if (!ok) return;
+  t.cw_redo_open = false;
+  t.cw_editing = false;
+  cwStart(id);
 }
 
 function cwSaveDraft(id) {
