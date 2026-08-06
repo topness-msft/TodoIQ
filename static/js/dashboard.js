@@ -655,10 +655,36 @@ function selectTask(taskId) {
         .then(function(data) {
             if (data.task) {
                 data.task._contexts = data.contexts || [];
+                // Reconcile the list with what the server actually has. Parsing
+                // happens in an external process writing straight to SQLite, so
+                // no task_updated broadcast fires and pollParseStatus only runs
+                // while the LOCAL array still thinks something is pending. Once
+                // it drifts it never self-corrects, and this fetch used to feed
+                // the detail pane alone -- so a parsed task showed its new title
+                // in the pane beside its pre-parse title in the list.
+                var existing = tasks.find(function(t) { return t.id === taskId; });
+                if (existing && _listFieldsDiffer(existing, data.task)) {
+                    Object.assign(existing, data.task);
+                    renderTaskList();   // re-applies .selected from selectedTaskId
+                }
                 renderDetailPane(data.task);
             }
         })
         .catch(function(err) { console.error('Failed to fetch task detail:', err); });
+}
+
+// Only the fields a row actually shows. Re-rendering the whole list on every
+// click would churn the DOM and lose scroll position for no visible gain.
+var _LIST_FIELDS = ['title', 'description', 'status', 'priority', 'due_date',
+                    'parse_status', 'action_type', 'skill_output', 'snooze_until',
+                    'error_message'];
+
+function _listFieldsDiffer(a, b) {
+    for (var i = 0; i < _LIST_FIELDS.length; i++) {
+        var k = _LIST_FIELDS[i];
+        if ((a[k] || '') !== (b[k] || '')) return true;
+    }
+    return false;
 }
 
 // Any field the user could be mid-edit in. Deliberately behavioural rather than
