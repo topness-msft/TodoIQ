@@ -36,6 +36,9 @@
 }
 
 .dark {
+  /* Chromium otherwise paints native date/time controls in light mode on a
+     dark field, hiding the picker affordance. */
+  color-scheme: dark;
   --accent: #4a98f7; --accent-light: #1a3050; --accent-hover: #6aafff;
   --header-bg: #1a3a6a;
   --bg: #1f1f1f; --bg-sidebar: #2b2b2b; --bg-hover: #383838;
@@ -1543,6 +1546,39 @@ function snoozeTask(id) {
   t.status='snoozed'; toast('😴 Snoozed');
   if(selectedId===id) closeDetail(); refresh();
 }
+function nextWeekdaySnoozeDays(now, count) {
+  // The next `count` weekdays after `now`. Weekends are skipped - these are
+  // 9 AM work reminders. Dates are formatted from local parts, never via
+  // toISOString(), which shifts a day west of UTC after ~5pm.
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const out = [];
+  const cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let offset = 0;
+  while (out.length < count && offset < 14) {
+    offset++;
+    cursor.setDate(cursor.getDate() + 1);
+    const dow = cursor.getDay();
+    if (dow === 0 || dow === 6) continue;
+    const y = cursor.getFullYear();
+    const m = String(cursor.getMonth() + 1).padStart(2, '0');
+    const d = String(cursor.getDate()).padStart(2, '0');
+    out.push({
+      offset,
+      label: dayNames[dow],
+      value: `${y}-${m}-${d}`,
+      title: cursor.toLocaleDateString('en-US',
+        { weekday: 'long', month: 'short', day: 'numeric' })
+    });
+  }
+  return out;
+}
+function openNativePicker(el) {
+  // <input type="date"> only drops its calendar when the small icon is hit;
+  // clicking the text just puts a caret in mm/dd/yyyy. Typing still works if
+  // showPicker is missing or the click is not treated as user activation.
+  try { if (el && typeof el.showPicker === 'function') el.showPicker(); }
+  catch (err) { /* fall back to typing */ }
+}
 function showSnoozePicker(e, id) {
   e.stopPropagation();
   const t = tasks.find(t=>t.id===id); if(!t) return;
@@ -1552,19 +1588,17 @@ function showSnoozePicker(e, id) {
   const picker = document.createElement('div');
   picker.className = 'snooze-picker';
   picker.id = 'snooze-picker';
-  // Build weekday buttons (remaining days this week)
-  const today = new Date();
-  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const todayDay = today.getDay();
+  // Build weekday buttons: always the next four weekdays, never a stub.
+  // The old loop was `for i in 1..5 if i > today.getDay()`, which shrank as the
+  // week wore on and rendered "No more weekdays" from Friday onward. It also
+  // derived its date string via toISOString(), which rolls forward a day when
+  // run in the evening west of UTC.
+  const snoozeDays = nextWeekdaySnoozeDays(new Date(), 4);
   let weekdayBtns = '';
-  for (let i = 1; i <= 5; i++) { // Mon-Fri
-    if (i > todayDay) {
-      const d = new Date(today); d.setDate(d.getDate() + (i - todayDay));
-      const isTomorrow = (i - todayDay) === 1;
-      const dateStr = d.toISOString().split('T')[0];
-      weekdayBtns += `<button class="sp-weekday${isTomorrow?' tomorrow':''}" onclick="doSnooze(${id},'${dateStr}','09:00')">${dayNames[i]}${isTomorrow?' ★':''}</button>`;
-    }
-  }
+  snoozeDays.forEach((d, i) => {
+    const lead = i === 0;
+    weekdayBtns += `<button class="sp-weekday${lead?' tomorrow':''}" title="${d.title}" onclick="doSnooze(${id},'${d.value}','09:00')">${d.label}${lead?' ★':''}</button>`;
+  });
   // OOF option
   let oofOption = '';
   if (t.key_people?.length) {
@@ -1574,20 +1608,19 @@ function showSnoozePicker(e, id) {
       oofOption = `<div class="sp-oof" onclick="doSnooze(${id},'${oofPerson.oof_until}','09:00')">💤 Until ${oofPerson.name.split(' ')[0]} returns (${oofDate})</div>`;
     }
   }
-  const tmrDate = new Date(today); tmrDate.setDate(tmrDate.getDate()+1);
-  const tmrStr = tmrDate.toISOString().split('T')[0];
+  const tmrStr = snoozeDays[0].value;
   picker.innerHTML = `
     <div class="sp-option" onclick="doSnoozeHours(${id},1)"><span class="sp-icon">⏰</span> 1 hour</div>
     <div class="sp-option" onclick="doSnoozeHours(${id},4)"><span class="sp-icon">🕓</span> 4 hours</div>
     <hr class="sp-sep">
-    <div class="sp-label">This week</div>
-    <div class="sp-weekdays">${weekdayBtns || '<span style="font-size:12px;color:var(--text-muted)">No more weekdays</span>'}</div>
+    <div class="sp-label">Upcoming</div>
+    <div class="sp-weekdays">${weekdayBtns}</div>
     <hr class="sp-sep">
     ${oofOption}
     <div class="sp-label">Pick date & time</div>
     <div class="sp-custom">
-      <input type="date" id="snooze-date" value="${tmrStr}">
-      <input type="time" id="snooze-time" value="09:00">
+      <input type="date" id="snooze-date" value="${tmrStr}" onclick="openNativePicker(this)">
+      <input type="time" id="snooze-time" value="09:00" onclick="openNativePicker(this)">
       <button onclick="doSnooze(${id},document.getElementById('snooze-date').value,document.getElementById('snooze-time').value)">Go</button>
     </div>`;
   document.body.appendChild(picker);

@@ -42,6 +42,10 @@
 }
 
 [data-theme="dark"] {
+    /* Without this Chromium paints native controls (the date/time picker
+       affordance, and the calendar panel itself) in light mode on a dark
+       field, leaving the affordance effectively invisible. */
+    color-scheme: dark;
     --bg-primary: #1a1a2e;
     --bg-secondary: #16213e;
     --bg-tertiary: #1a1a2e;
@@ -2118,7 +2122,7 @@ html, body {
 }
 
 .snooze-time-input {
-    width: 70px;
+    width: 90px;   /* 70px clipped "09:00 AM" to "09:0C" - see test_snooze_days */
     padding: 4px 6px;
     border: 1px solid var(--border-secondary);
     border-radius: 4px;

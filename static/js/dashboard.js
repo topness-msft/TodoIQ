@@ -1802,8 +1802,8 @@ function renderSnoozeButton(task) {
         + '<div class="snooze-custom-row">'
         + '<input type="date" class="snooze-date-input" id="snooze-date-' + taskId + '"'
         + (defaultDate ? ' value="' + defaultDate + '"' : '')
-        + ' onclick="event.stopPropagation()">'
-        + '<input type="time" class="snooze-time-input" id="snooze-time-' + taskId + '" value="09:00" onclick="event.stopPropagation()">'
+        + ' onclick="event.stopPropagation(); openNativePicker(this)">'
+        + '<input type="time" class="snooze-time-input" id="snooze-time-' + taskId + '" value="09:00" onclick="event.stopPropagation(); openNativePicker(this)">'
         + '<button class="snooze-go-btn" onclick="event.stopPropagation(); doSnoozeCustom(' + taskId + ')">Go</button>'
         + '</div>'
         + '</div>'
@@ -1863,31 +1863,66 @@ function doSnoozeCustom(taskId) {
     doSnooze(taskId, { snoozed_until: d.toISOString() });
 }
 
-function renderWeekdaySnoozeRow(taskId) {
-    var now = new Date();
-    var day = now.getDay(); // 0=Sun..6=Sat
-    var buttons = '';
-    var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+/**
+ * The next `count` weekdays after `now`, as calendar-day offsets.
+ *
+ * Weekends are skipped: the row is labelled "9 AM:" and a Saturday morning
+ * reminder is not what it is for. Offsets are calendar days so that
+ * `snoozeToDay`'s `setDate()` arithmetic stays DST-safe.
+ */
+function nextWeekdaySnoozeDays(now, count) {
+    var days = [];
+    var cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var offset = 0;
+    while (days.length < count && offset < 14) {
+        offset++;
+        cursor.setDate(cursor.getDate() + 1);
+        var dow = cursor.getDay();
+        if (dow === 0 || dow === 6) continue;
+        days.push({ offset: offset, date: new Date(cursor.getTime()) });
+    }
+    return days;
+}
 
-    if (day >= 1 && day <= 4) {
-        // Mon-Thu: show buttons for tomorrow through Friday
-        for (var offset = 1; offset <= (5 - day); offset++) {
-            var target = new Date(now);
-            target.setDate(target.getDate() + offset);
-            var label = dayNames[target.getDay()];
-            var tomorrowClass = offset === 1 ? ' snooze-weekday-tomorrow' : '';
-            buttons += '<button class="snooze-weekday-btn' + tomorrowClass + '" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + offset + ')">' + label + '</button>';
-        }
-    } else {
-        // Fri/Sat/Sun: show Mon button
-        var daysToMon = day === 0 ? 1 : (8 - day);
-        buttons += '<button class="snooze-weekday-btn snooze-weekday-tomorrow" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + daysToMon + ')">Mon</button>';
+function renderWeekdaySnoozeRow(taskId, now) {
+    now = now || new Date();
+    var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var days = nextWeekdaySnoozeDays(now, 4);
+    var buttons = '';
+
+    for (var i = 0; i < days.length; i++) {
+        var day = days[i];
+        // The soonest option stays emphasised, whichever weekday it lands on.
+        var leadClass = i === 0 ? ' snooze-weekday-tomorrow' : '';
+        var title = day.date.toLocaleDateString('en-US', {
+            weekday: 'long', month: 'short', day: 'numeric'
+        });
+        buttons += '<button class="snooze-weekday-btn' + leadClass + '"'
+            + ' title="' + escapeHtml(title) + '"'
+            + ' onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + day.offset + ')">'
+            + dayNames[day.date.getDay()] + '</button>';
     }
 
     return '<div class="snooze-weekday-row">'
         + '<span class="snooze-weekday-label">9 AM:</span>'
         + buttons
         + '</div>';
+}
+
+/**
+ * Open a native date/time picker from a click anywhere on the field.
+ *
+ * Without this, `<input type="date">` only drops its calendar when the small
+ * icon is hit; clicking the text puts a caret in `mm/dd/yyyy` and the date has
+ * to be typed. `showPicker` needs user activation and is absent on older
+ * browsers, so both failure modes fall back to plain typing.
+ */
+function openNativePicker(el) {
+    try {
+        if (el && typeof el.showPicker === 'function') el.showPicker();
+    } catch (err) {
+        /* no user activation, or unsupported - typing still works */
+    }
 }
 
 function snoozeToDay(taskId, daysOffset) {
