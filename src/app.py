@@ -24,7 +24,7 @@ from .models import (
     get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
 )
 from .services.claude_runner import run_copilot
-from .services.cowork_runner import resolve_cowork_island
+from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
 from .services.workspace_settings import get_workspace_settings
 
 logger = logging.getLogger(__name__)
@@ -246,6 +246,15 @@ def start_server(port=8766):
         target=resolve_cowork_island,
         daemon=True,
         name="cowork-island-warmup",
+    ).start()
+
+    # The write-barrier precheck costs ~5.5s cold (CLI import plus an MSAL
+    # silent refresh) and ~7ms warm. Warm it here so the first preview does not
+    # pay that on the request path.
+    threading.Thread(
+        target=warm_barrier_precheck,
+        daemon=True,
+        name="cowork-barrier-precheck-warmup",
     ).start()
 
     # Auto-sync every 30 minutes

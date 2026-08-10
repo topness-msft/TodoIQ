@@ -713,6 +713,125 @@ def preview_label(task_id) -> str:
     return f"cowork:preview:{task_id}"
 
 
+# Transcribed from the Aether server source on 2026-08-10:
+#   aether_runtime/src/orchestrator/domain/eval/auth.py
+#
+# The write barrier is gated on this list. tool_callback.py rejects any tenant
+# not in it with a 404 (deliberately not 403, "to avoid leaking eval-tenant
+# membership"), after which tool_callback_config is ignored and write tools
+# execute for real. Upstream issue #18550 documents exactly that happening on
+# the MSA consumer path.
+#
+# This is a COPY of a list we do not control and cannot query. It can go stale
+# the moment upstream edits it, which is why the precheck below is advisory.
+EVAL_ALLOWED_TENANTS = frozenset({
+    # SYNTHETIC_EVAL_TENANTS
+    "258e9af2-1c09-4fbd-9b9c-a1f08bda4697",  # coworkevals
+    "a68d3331-d391-490f-8d52-83ae83bc8ec7",  # DeepWorkAgent SEVAL
+    "afb89a62-a289-41e3-9947-49839427385d",  # InceptionBench
+    # plus tenants with real users
+    "72f988bf-86f1-41af-91ab-2d7cd011db47",  # Microsoft (dogfood) — ours
+    "e6a916c6-9ab1-40d0-b5e4-07208617ed9e",
+    "71d086c2-9cf9-4c75-8a31-bf3d1144111e",
+})
+
+
+def _cowork_whoami():
+    """Signed-in identity, via the CLI imported as a library.
+
+    Reuses the CLI's own MSAL token store, so this costs nothing and needs no
+    separate auth.
+    """
+    from cowork_cli.auth.manager import AuthManager
+    from cowork_cli.config.settings import get_settings
+
+    return AuthManager(get_settings()).whoami()
+
+
+_precheck_cache = {"verdict": None, "at": 0.0}
+_PRECHECK_TTL = 600  # seconds; identity changes only on re-auth
+
+
+def tenant_barrier_precheck(_whoami=None, *, use_cache=False):
+    """Is the write barrier's precondition still true, before we run anything?
+
+    ``_barrier_verdict`` is reactive: by the time it reports, a write may
+    already have happened. This is the proactive half — the server gates
+    ``tool_callback_config`` on tenant membership, and the CLI will tell us
+    which tenant we are on, so the two can be compared up front.
+
+    Advisory, never blocking, and never raises. Our copy of the allowlist can
+    go stale the moment upstream edits it, so treating a mismatch as fatal
+    would strand the user over our own bookkeeping. It warns; the reactive
+    verdict still backstops the run itself.
+
+    The first call costs ~5.5s (importing the CLI plus an MSAL silent refresh)
+    and later ones ~7ms, so callers on a request path pass ``use_cache=True``
+    and rely on ``warm_barrier_precheck()`` having run at startup.
+    """
+    import time as _time
+
+    if use_cache:
+        cached = _precheck_cache["verdict"]
+        if cached and (_time.time() - _precheck_cache["at"]) < _PRECHECK_TTL:
+            return cached
+
+    try:
+        who = (_whoami or _cowork_whoami)()
+        tenant = getattr(who, "tenant_id", "") or ""
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "unknown",
+            "reason": f"Could not resolve the signed-in tenant: {exc}",
+            "tenant_id": "",
+        }
+
+    if not tenant:
+        verdict = {
+            "status": "unknown",
+            "reason": "Cowork reported no tenant, so the barrier precondition "
+                      "could not be checked.",
+            "tenant_id": "",
+        }
+    elif tenant in EVAL_ALLOWED_TENANTS:
+        verdict = {
+            "status": "ok",
+            "reason": "Signed-in tenant is on the eval allowlist the write "
+                      "barrier depends on.",
+            "tenant_id": tenant,
+        }
+    else:
+        verdict = {
+            "status": "AT_RISK",
+            "reason": (
+                f"Signed-in tenant {tenant} is not on our copy of "
+                f"EVAL_ALLOWED_TENANTS. The server may ignore "
+                f"tool_callback_config entirely, in which case write tools "
+                f"execute for real (see upstream issue 18550). Either the "
+                f"allowlist changed upstream or this machine signed in "
+                f"elsewhere."
+            ),
+            "tenant_id": tenant,
+        }
+
+    _precheck_cache["verdict"] = verdict
+    _precheck_cache["at"] = _time.time()
+    return verdict
+
+
+def warm_barrier_precheck() -> None:
+    """Populate the precheck cache off the request path.
+
+    Called in a daemon thread at server startup so the first preview does not
+    pay the ~5.5s cold cost. Failure is silently ignored: an unwarmed cache
+    only means the next caller computes it.
+    """
+    try:
+        tenant_barrier_precheck(use_cache=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _barrier_verdict(tool_trace, callback_exchanges, text=""):
     """Did the write barrier actually engage on this run?
 
@@ -890,6 +1009,15 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
     config_path = build_callback_config(task_id, log_dir=log_dir)
     prompt_path = write_prompt_file(task_id, prompt, log_dir=log_dir)
     argv = build_argv(prompt_path, config_path, refs)
+
+    # Check the barrier's precondition before spending a minute on a run that
+    # might write for real. Advisory: it logs and continues, because our copy of
+    # the allowlist can go stale and _barrier_verdict still checks the result.
+    pre = tenant_barrier_precheck(use_cache=True)
+    if pre["status"] == "AT_RISK":
+        logger.error("WRITE BARRIER PRECHECK: %s", pre["reason"])
+    elif pre["status"] == "unknown":
+        logger.warning("WRITE BARRIER PRECHECK: %s", pre["reason"])
 
     spawn = spawn or _spawn_default
     try:
