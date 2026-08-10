@@ -16,11 +16,106 @@ start.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import socket
 import subprocess
 from pathlib import Path
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is a process with this PID currently running?
+
+    NOT ``os.kill(pid, 0)``. That is the portable POSIX idiom, but on Windows
+    ``os.kill`` ignores the signal and calls ``TerminateProcess``, so the
+    "probe" actually kills the target. Using it here killed the interpreter
+    outright when the PID under test was our own.
+
+    On Windows we ask the kernel directly with ``OpenProcess``. On POSIX the
+    signal-0 idiom is correct and used.
+    """
+    if pid <= 0:
+        return False
+
+    if os.name == "nt":
+        import ctypes
+
+        # PROCESS_QUERY_LIMITED_INFORMATION: enough to ask "does this exist",
+        # and obtainable for processes we do not own.
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            # ERROR_ACCESS_DENIED means it exists but is not ours; anything
+            # else (typically ERROR_INVALID_PARAMETER) means it is gone.
+            return ctypes.windll.kernel32.GetLastError() == 5
+        try:
+            exit_code = ctypes.c_ulong()
+            if ctypes.windll.kernel32.GetExitCodeProcess(
+                handle, ctypes.byref(exit_code)
+            ):
+                # 259 == STILL_ACTIVE. A handle can outlive the process.
+                return exit_code.value == 259
+            return True
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        # Unknown state. Assume alive: deleting a live instance's lock is worse
+        # than leaving a stale file behind.
+        return True
+    return True
+
+
+def is_stale_pidfile(path, _alive=None) -> bool:
+    """True when a PID file names a process that is no longer running.
+
+    A deploy that stops the tray with ``Stop-Process -Force`` leaves this file
+    behind, because the tray never gets to clean up. The next tray then sees a
+    PID file, concludes another instance owns the port, and exits silently.
+    Three consecutive deploys hit exactly that, and each looked successful.
+
+    Only a PID that is genuinely not running counts as stale. PIDs can be
+    recycled, so if *any* process holds it we leave the file alone. Unreadable
+    is likewise not stale: when we cannot tell, we do not delete someone's lock.
+    """
+    alive = _alive or _pid_alive
+    try:
+        p = Path(path)
+        if not p.exists():
+            return False
+        raw = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False
+
+    if not raw:
+        return True
+    try:
+        pid = int(raw)
+    except ValueError:
+        # An unparseable lock cannot be protecting anything.
+        return True
+    return not alive(pid)
+
+
+def clear_stale_pidfile(path, _alive=None) -> bool:
+    """Remove a stale PID file. Returns True if one was actually removed.
+
+    Fails open, like everything else here: this runs on a deploy path and must
+    never be the reason a deploy aborts.
+    """
+    if not is_stale_pidfile(path, _alive=_alive):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except Exception:
+        return False
 
 TASK_NAME = "TodoNess"
 _SCRIPT_RE = re.compile(r"[^\s\"']+\.pyw?", re.IGNORECASE)
