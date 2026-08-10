@@ -510,6 +510,7 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
         "finding": "",
         "draft": None,
         "tool_trace": [],
+        "tools": [],
         "barrier": _barrier_verdict([], None, ""),
         "error": None,
         "raw_text": "",
@@ -557,8 +558,11 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
     text = payload.get("text") or ""
     result["raw_text"] = text
 
+    result["tools"] = _canonical_tools(payload.get("sse_events"))
+
     result["barrier"] = _barrier_verdict(
-        result["tool_trace"], payload.get("callback_exchanges"), text
+        result["tool_trace"], payload.get("callback_exchanges"), text,
+        tools=result["tools"],
     )
     if result["barrier"]["status"] == "BREACHED":
         # Loud on purpose. This is the one condition where a run that looks
@@ -837,7 +841,44 @@ def warm_barrier_precheck() -> None:
         pass
 
 
-def _barrier_verdict(tool_trace, callback_exchanges, text=""):
+def _canonical_tools(sse_events):
+    """Tool calls with their CANONICAL names, from the `ts`/`tx` SSE events.
+
+    ``tool_trace`` carries display labels: G1d logged an intercepted Teams post
+    as "Post message", which matches none of the 154 canonical names in that
+    probe's config. The same run's ``sse_events`` carries the real name on the
+    ``ts`` (tool start) event, and we were already receiving it and throwing it
+    away. From the G1b capture, one call, two names:
+
+        tool_trace  "Send email with attachments"
+        ts.tn       "mcp__outlook__SendEmailWithAttachments"
+
+    Correlated on ``tid``, so a start with no exec (a run killed mid-tool, which
+    is exactly when we most want to know) still reports with ``ok=None``.
+    """
+    starts = {}
+    order = []
+    for ev in sse_events or []:
+        if not isinstance(ev, dict):
+            continue
+        name = ev.get("tn")
+        tid = ev.get("tid")
+        if not name or not tid:
+            continue
+        if ev.get("event") == "ts":
+            if tid not in starts:
+                starts[tid] = {"name": name, "ok": None, "duration_ms": None}
+                order.append(tid)
+        elif ev.get("event") == "tx":
+            entry = starts.setdefault(tid, {"name": name, "ok": None, "duration_ms": None})
+            if tid not in order:
+                order.append(tid)
+            entry["ok"] = ev.get("ok")
+            entry["duration_ms"] = ev.get("dur")
+    return [starts[t] for t in order]
+
+
+def _barrier_verdict(tool_trace, callback_exchanges, text="", tools=None):
     """Did the write barrier actually engage on this run?
 
     Reading the Aether server source (2026-08-10) established that
@@ -871,6 +912,11 @@ def _barrier_verdict(tool_trace, callback_exchanges, text=""):
     """
     writes = [t.get("tool_name") for t in tool_trace
               if _looks_like_write(t.get("tool_name"))]
+    # Canonical names from sse_events match the denylist exactly, where display
+    # labels only reach the verb heuristic. Both are reported so a breach names
+    # whichever form the caller will recognise.
+    writes += [t.get("name") for t in (tools or [])
+               if _looks_like_write(t.get("name"))]
     if not writes:
         return {
             "status": "not_exercised",

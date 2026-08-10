@@ -150,8 +150,8 @@ class TestFailureModes(unittest.TestCase):
         # path, including failures, so a caller never has to guess whether the
         # key exists before reading it.
         expected = {"terminal_status", "duration_seconds", "conversation_id",
-                    "finding", "draft", "tool_trace", "barrier", "error",
-                    "raw_text"}
+                    "finding", "draft", "tool_trace", "tools", "barrier",
+                    "error", "raw_text"}
         for bad in ("", "junk", '{"text":', json.dumps({"text": "x"})):
             with self.subTest(bad=bad[:20]):
                 self.assertEqual(set(parse_cowork_output(bad)), expected)
