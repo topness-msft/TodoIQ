@@ -68,6 +68,7 @@ GOOD_STDOUT = json.dumps(
 class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
     def setUp(self):
         import src.db as db_module
+        from src.handlers import cowork as cowork_handler
 
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
@@ -80,6 +81,12 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         # hundreds of tests; unmocked it took the suite from 35s to 313s.
         self._base_cost_fn = cr._cost_snapshot_fn
         cr._cost_snapshot_fn = lambda: None
+        self._base_handoff_fn = cowork_handler.HANDOFF_FN
+        # Same reasoning as the cost seam: GET /v1/tasks is a network call and
+        # the card GET runs in many tests. Default to "no handoff info", which
+        # is exactly the additive-degrades-to-today path.
+        cowork_handler.HANDOFF_FN = lambda _cid: None
+        cr.reset_handoff_cache()
         self.original_auth_login = cr._auth_login_fn
         cr._auth_login_fn = lambda *args, **kwargs: type(
             "Login", (), {"returncode": 1}
@@ -89,7 +96,11 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         super().setUp()
 
     def tearDown(self):
+        from src.handlers import cowork as cowork_handler
+
         cr._cost_snapshot_fn = self._base_cost_fn
+        cowork_handler.HANDOFF_FN = self._base_handoff_fn
+        cr.reset_handoff_cache()
         super().tearDown()
         cr._auth_login_fn = self.original_auth_login
         cr.reset_registry()
@@ -944,3 +955,55 @@ class TestLiveProgress(CoworkAPITestBase):
         self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=""))
         _, body = self.get_preview(tid)
         self.assertEqual(body["action"].get("progress"), [])
+
+
+class TestHandoffStatus(CoworkAPITestBase):
+    """After "Open in Cowork", what happened?
+
+    Handing a draft over is fire-and-forget today. GET /v1/tasks is keyed by the
+    SAME composite conversation id our deep link uses, and a read-only probe
+    against production (2026-08-10) matched 17 of our 18 stored ids. The state
+    worth surfacing is `needs_user_input`: Cowork is blocked waiting on Phil.
+
+    Purely additive - when the lookup returns None the card renders exactly as
+    it does today, which is why this ships unflagged.
+    """
+
+    def _ready(self):
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT))
+        self.get_preview(tid)
+        return tid
+
+    def test_handoff_is_absent_when_the_lookup_returns_nothing(self):
+        from src.handlers import cowork as cowork_handler
+
+        cowork_handler.HANDOFF_FN = lambda _cid: None
+        tid = self._ready()
+        _, body = self.get_preview(tid)
+        self.assertNotIn("handoff", body["action"])
+
+    def test_handoff_state_is_surfaced_when_available(self):
+        from src.handlers import cowork as cowork_handler
+
+        cowork_handler.HANDOFF_FN = lambda _cid: {
+            "state": "needs_user_input", "waiting_on_user": True,
+            "last_activity": 1786400663554, "title": "A task",
+        }
+        tid = self._ready()
+        _, body = self.get_preview(tid)
+        self.assertEqual(body["action"]["handoff"]["state"], "needs_user_input")
+        self.assertTrue(body["action"]["handoff"]["waiting_on_user"])
+
+    def test_a_failing_lookup_cannot_break_the_card(self):
+        """Decoration must never be able to fail a preview."""
+        from src.handlers import cowork as cowork_handler
+
+        def boom(_cid):
+            raise OSError("endpoint down")
+
+        cowork_handler.HANDOFF_FN = boom
+        tid = self._ready()
+        response, body = self.get_preview(tid)
+        self.assertEqual(response.code, 200)
+        self.assertNotIn("handoff", body["action"])

@@ -12,6 +12,7 @@ Routes:
 """
 
 import json
+import logging
 import re
 
 import tornado.web
@@ -33,6 +34,7 @@ from ..services.cowork_runner import (
     get_result,
     get_progress,
     get_cached_cowork_island,
+    handoff_status,
     is_running,
     parse_cowork_output,
     parse_source_url,
@@ -43,6 +45,12 @@ from ..services.cowork_runner import (
 # Test seams. Production leaves both None so the runner uses its own defaults.
 SPAWN = None
 LOG_DIR_OVERRIDE = None
+
+# Handoff lookup seam. Production leaves this None and the runner's own
+# `handoff_status` is used; tests replace it so the unit suite never touches the
+# network. A real network call in the poll path once took the suite from 35s to
+# 313s, so this seam is not optional.
+HANDOFF_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -394,6 +402,27 @@ class CoworkHandler(tornado.web.RequestHandler):
         # Live liveness from the CLI's stderr. A preview runs for a median of
         # 119s, so the card needs something to say while it waits.
         payload["progress"] = get_progress(preview_label(tid))
+
+        # What happened after "Open in Cowork". Only meaningful once a preview
+        # has finished and been handed over, so a run still in `previewing`
+        # never triggers a lookup. Cached in the runner, and additive: when it
+        # is None the card renders exactly as it does today.
+        #
+        # Guarded here as well as inside handoff_status, because this is
+        # decoration on a card that is already complete without it and must
+        # never be able to turn a working preview into a 500.
+        if action.get("state") == "ready" and action.get("conversation_id"):
+            try:
+                lookup = HANDOFF_FN or handoff_status
+                handoff = lookup(action["conversation_id"])
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).debug(
+                    "handoff lookup failed", exc_info=True
+                )
+                handoff = None
+            if handoff:
+                payload["handoff"] = handoff
+
         self.write(json.dumps({"action": payload}))
 
     # ── PUT ──

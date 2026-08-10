@@ -628,6 +628,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -1296,6 +1297,105 @@ def cost_delta(before, after):
     if delta < 0 or delta > _COST_SANITY_CEILING:
         return None
     return delta
+
+
+# --- handoff status ---------------------------------------------------------
+#
+# What happened AFTER "Open in Cowork". Handing a draft over is fire-and-forget
+# today: TodoIQ never learns whether Phil acted on it. `GET /v1/tasks` is keyed
+# by the SAME composite conversation id our deep link already uses, so we can
+# just ask.
+#
+# Verified read-only against production (2026-08-10): 237 tasks across 5 pages,
+# and 17 of our 18 stored conversation ids matched, carrying our own task
+# titles. That correlation was ASSUMED in the plan and then tested, because the
+# obvious-looking data source in this project has been wrong three times
+# (callback_exchanges, creditsMillicents, `tx ok`).
+#
+# Purely additive: it enriches a card that works without it, so it ships
+# unflagged. Same call already made for the cost badge.
+
+_HANDOFF_TTL = 30          # seconds; a dashboard poll must not mean a round trip
+_HANDOFF_MAX_PAGES = 6     # ~300 tasks; ours sat on page 3 in the real capture
+_handoff_cache = {"at": 0.0, "tasks": None}
+_handoff_lock = threading.Lock()
+
+# Cowork is blocked waiting for a human. This is how an approval prompt shows
+# up from the outside, and it is the whole reason this is worth reading: TodoIQ
+# can say "Cowork needs you" while owning no execute route whatsoever.
+_WAITING_STATES = frozenset({"needs_user_input"})
+
+
+def reset_handoff_cache() -> None:
+    """Drop the cached task list. Used by tests and after an explicit refresh."""
+    with _handoff_lock:
+        _handoff_cache["at"] = 0.0
+        _handoff_cache["tasks"] = None
+
+
+def _fetch_handoff_tasks(get):
+    """All visible tasks, following ``nextOffset``. Bounded; never raises."""
+    tasks = {}
+    offset = None
+    for _ in range(_HANDOFF_MAX_PAGES):
+        path = "/v1/tasks" + (f"?offset={offset}" if offset else "")
+        body = get(path).json()
+        if not isinstance(body, dict):
+            break
+        batch = body.get("tasks")
+        if not isinstance(batch, list):
+            break
+        for entry in batch:
+            if isinstance(entry, dict) and entry.get("taskId"):
+                tasks[entry["taskId"]] = entry
+        offset = body.get("nextOffset")
+        if not batch or not offset:
+            break
+    return tasks
+
+
+def handoff_status(conversation_id, _get=None):
+    """State of a handed-over conversation, or None when it cannot be read.
+
+    Returns ``{"state", "waiting_on_user", "last_activity", "title"}``.
+
+    Fails soft on every path. This is decoration on a card that is already
+    complete without it, so a throttled endpoint, an expired token or a shape
+    change must degrade to today's behaviour rather than break the card.
+    """
+    if not conversation_id:
+        return None
+
+    get = _get or _cost_get
+    try:
+        now = time.monotonic()
+        with _handoff_lock:
+            fresh = (
+                _handoff_cache["tasks"] is not None
+                and now - _handoff_cache["at"] < _HANDOFF_TTL
+            )
+            tasks = _handoff_cache["tasks"] if fresh else None
+
+        if tasks is None:
+            tasks = _fetch_handoff_tasks(get)
+            with _handoff_lock:
+                _handoff_cache["tasks"] = tasks
+                _handoff_cache["at"] = time.monotonic()
+
+        entry = tasks.get(conversation_id)
+        if not entry:
+            return None
+
+        state = entry.get("state") or ""
+        return {
+            "state": state,
+            "waiting_on_user": state in _WAITING_STATES,
+            "last_activity": entry.get("lastActivity"),
+            "title": entry.get("title") or "",
+        }
+    except Exception:  # noqa: BLE001
+        logger.debug("handoff status unavailable", exc_info=True)
+        return None
 
 
 def cost_is_attributable(concurrent_runs) -> bool:
