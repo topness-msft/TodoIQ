@@ -571,6 +571,15 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
             "WRITE BARRIER: %s", result["barrier"]["reason"]
         )
         result["error"] = result["barrier"]["reason"]
+    elif result["barrier"]["status"] == "held_unconfirmed":
+        # Not an error — every write was on the interception list, so the run
+        # is not blocked on this. But it must not be silent either: this is the
+        # state that would look identical if the tenant gate silently dropped
+        # our config (upstream #18550). The PROACTIVE tenant precheck is the
+        # real guard; this warning is how a sustained pattern becomes visible.
+        logging.getLogger(__name__).warning(
+            "WRITE BARRIER: %s", result["barrier"]["reason"]
+        )
 
     draft, findings = _extract_draft(text)
     result["draft"] = _tidy_finding(draft) if draft else None
@@ -924,25 +933,52 @@ def _barrier_verdict(tool_trace, callback_exchanges, text="", tools=None):
             "tools": [],
         }
 
-    intercepted = _BLOCK_MARKER in (text or "") or bool(
-        [e for e in (callback_exchanges or []) if isinstance(e, dict)]
+    lowered = (text or "").lower()
+    intercepted = (
+        _BLOCK_MARKER in (text or "")
+        or any(cue in lowered for cue in _INTERCEPT_CUES)
+        or bool([e for e in (callback_exchanges or []) if isinstance(e, dict)])
     )
     if intercepted:
+        # Positive evidence outranks any structural inference: if we can SEE the
+        # block, it held, whether or not our list happened to name this tool.
         return {
             "status": "held",
             "reason": "A write tool was called and interception was observed.",
             "tools": [],
         }
 
-    names = ", ".join(dict.fromkeys(str(n) for n in writes))
+    # The dangerous case is a write we never ASKED to block: nothing intercepted
+    # it and no approval gate stood in its place. Proven live on 2026-08-10 —
+    # releasing one tool from `tool_names` removed the barrier outright, and the
+    # runtime offered no `ta` approval event to replace it.
+    unrequested = [n for n in dict.fromkeys(str(n) for n in writes)
+                   if not _we_asked_to_block(n)]
+    if unrequested:
+        names = ", ".join(unrequested)
+        return {
+            "status": "BREACHED",
+            "reason": (
+                f"Write tool ran that we never asked to block: {names}. No "
+                f"interception was requested for it, so this action could have "
+                f"really happened. Check build_callback_config()."
+            ),
+            "tools": unrequested,
+        }
+
+    # Every write was on the denylist, so the config we sent asked the runtime
+    # to intercept all of them; we just have no quotable confirmation. Missing
+    # evidence is not evidence of failure, and calling it BREACHED is what
+    # trained the alarm to be ignored. The PROACTIVE tenant precheck is the real
+    # guarantee here; this is the reactive corroboration.
     return {
-        "status": "BREACHED",
+        "status": "held_unconfirmed",
         "reason": (
-            f"Write tool ran with no sign of interception: {names}. The callback "
-            f"barrier may not have engaged, so this action could have really "
-            f"happened. Check the EVAL_ALLOWED_TENANTS gate (upstream #18550)."
+            "Every write tool called was on the interception list, but the "
+            "reply did not restate the block. Interception was requested and "
+            "no delivery was observed."
         ),
-        "tools": writes,
+        "tools": [],
     }
 
 
@@ -965,9 +1001,74 @@ def _looks_like_write(name):
     norm = _norm_tool(name)
     if not norm:
         return False
+    if norm in _CONTAINER_TOOLS:
+        return False
     if norm in {_norm_tool(n) for n in load_write_tools()}:
         return True
     return any(v in norm for v in _WRITE_VERBS)
+
+
+# Denied for CONTAINMENT, not because they mutate M365. `Bash` is on the
+# denylist so a run cannot shell out and bypass the barrier, but it touches
+# nothing in the user's mailbox, is never intercepted, and so tripped the
+# "write ran with no interception" rule on every single run. That alone
+# accounted for most of the 12/18 false BREACHED verdicts measured against
+# live rows on 2026-08-10.
+_CONTAINER_TOOLS = frozenset({"bash", "task", "write_agent", "str_replace_editor"})
+
+
+def _barrier_names():
+    """Every spelling of a denylisted tool, matching build_callback_config()."""
+    names = set()
+    for tool in load_write_tools():
+        for alias in _tool_aliases(tool):
+            names |= _spellings(alias)
+    return names
+
+
+def _spellings(name):
+    """Plausible spellings of an observed tool name.
+
+    Three forms name the same tool and none of them match as raw strings:
+
+        runtime canonical   mcp__outlook__SendEmailWithAttachments
+        our config          outlook-SendEmailWithAttachments
+        display label       "Send email with attachments"
+
+    G1d logged an intercepted Teams post as "Post message". Collapsing spaces
+    and separators reduces all three to one comparable key.
+    """
+    raw = str(name or "").strip()
+    out = {_norm_tool(raw)}
+    if raw.lower().startswith("mcp__"):
+        parts = [p for p in raw[5:].split("__") if p]
+        if parts:
+            out.add(_norm_tool(parts[-1]))
+            if len(parts) >= 2:
+                out.add(_norm_tool("-".join(parts[-2:])))
+    if "-" in raw:
+        out.add(_norm_tool(raw.split("-", 1)[1]))
+    # Space/separator-insensitive key so a display label reaches the same
+    # bucket as the canonical name it stands for.
+    out |= {re.sub(r"[^a-z0-9]", "", s) for s in set(out)}
+    return {s for s in out if s}
+
+
+def _we_asked_to_block(name):
+    """Did we put this tool in ``tool_names`` for this run?"""
+    return bool(_spellings(name) & _barrier_names())
+
+
+# Interception phrased in the model's own words. `static_results` feeds the tool
+# our canned string, but the agent restates it rather than quoting it, so the
+# literal marker is absent from a genuinely blocked run. A real 2026-08-10
+# capture read "the send was blocked before anything went out ... Nothing was
+# sent or saved" and matched none of _BLOCK_MARKER.
+_INTERCEPT_CUES = (
+    "was blocked", "wasn't able to send", "was not able to send",
+    "nothing was sent", "not sent", "blocked before", "did not send",
+    "didn't send", "preview mode", "intercepted",
+)
 
 
 def load_write_tools() -> list:

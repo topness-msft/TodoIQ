@@ -42,3 +42,31 @@ def get_workspace_settings() -> dict:
     if root is None:
         return {"enabled": False}
     return {"enabled": bool(configured.get("enabled")), "root": str(root)}
+
+
+def _read_settings() -> dict:
+    """Whole settings document, or an empty one when absent or malformed."""
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def api_transport_enabled() -> bool:
+    """Is the Cowork run transport allowed to use the runtime HTTP API?
+
+    Default FALSE, and unreadable or malformed configuration also reads False,
+    so the proven `cowork` subprocess path stays in charge unless the flag is
+    deliberately turned on. TodoIQ is a daily driver; the API path has a bake
+    window measured in weeks, and the subprocess path must keep working
+    untouched throughout it.
+
+    Scope: this gates ONLY the run transport (``start_preview``). Additive
+    reads such as GET /v1/cost are not flagged, because if they fail the user
+    simply sees no badge, whereas a transport failure breaks an existing
+    feature. The rule is: flag what replaces, ship what adds.
+    """
+    return bool(_read_settings().get("cowork_api_transport") is True)

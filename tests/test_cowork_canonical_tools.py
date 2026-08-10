@@ -109,18 +109,27 @@ class TestCanonicalToolsExposed(unittest.TestCase):
 
 
 class TestCanonicalNamesSharpenTheBarrier(unittest.TestCase):
-    """The reason this is worth doing at all."""
+    """The reason this is worth doing at all.
 
-    def test_a_display_label_alone_still_relies_on_the_heuristic(self):
-        """Baseline: this is the weak path we are improving on."""
+    Canonical names from ``sse_events`` are what let the verdict tell an
+    intercepted write apart from an unrequested one. After the 2026-08-10
+    accuracy fix the interesting distinction is no longer "is it a write" but
+    "did we ask to block THIS tool", and that question can only be answered
+    against a canonical name.
+    """
+
+    def test_a_display_label_resolves_to_the_tool_we_asked_to_block(self):
+        """"Post message" appears in no config entry, but space-insensitive
+        matching resolves it to the canonical PostMessage we did denylist."""
         r = parse_cowork_output(
             _stdout(tool_trace=[{"tool_name": "Post message"}])
         )
-        self.assertEqual(r["barrier"]["status"], "BREACHED")
+        self.assertEqual(r["barrier"]["status"], "held_unconfirmed")
 
     def test_a_canonical_write_name_is_caught_even_with_no_write_verb(self):
-        """The heuristic keys on verbs. A canonical name that contains none of
-        them would slip past it, but matches the denylist exactly."""
+        """The heuristic keys on verbs. "Compose something" contains none, so
+        the display label alone would slip past — the canonical name from
+        sse_events is what identifies it as a write at all."""
         r = parse_cowork_output(
             _stdout(
                 tool_trace=[{"tool_name": "Compose something"}],
@@ -128,8 +137,20 @@ class TestCanonicalNamesSharpenTheBarrier(unittest.TestCase):
                              "tn": "mcp__outlook__SendEmailWithAttachments"}],
             )
         )
+        self.assertEqual(r["barrier"]["status"], "held_unconfirmed")
+
+    def test_a_canonical_name_outside_the_denylist_is_a_breach(self):
+        """The payoff: an unrequested write is now distinguishable, and that is
+        the shape the 2026-08-10 released-tool spike produced."""
+        r = parse_cowork_output(
+            _stdout(
+                tool_trace=[{"tool_name": "Compose something"}],
+                sse_events=[{"event": "ts", "tid": "a",
+                             "tn": "mcp__someapp__SendThing"}],
+            )
+        )
         self.assertEqual(r["barrier"]["status"], "BREACHED")
-        self.assertIn("SendEmail", r["barrier"]["reason"])
+        self.assertIn("SendThing", r["barrier"]["reason"])
 
     def test_interception_still_reads_as_held(self):
         r = parse_cowork_output(
