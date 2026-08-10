@@ -632,6 +632,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+from .workspace_settings import api_transport_enabled
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -660,6 +662,12 @@ _BLOCK_MARKER = _BLOCK_MESSAGE.split(". ")[0] + "."
 
 _CALLBACK_TIMEOUT = 30
 
+# Public constants from cowork_cli/auth/constants.py. The API transport needs no
+# CLI process, only these plus the MSAL cache the CLI already maintains — which
+# is also the hidden coupling the architect flagged as the biggest risk here.
+_API_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"   # Azure PowerShell
+_API_SCOPE = "6ab48b67-cd74-4ad4-81af-5932984589be/access_as_user"
+_API_AUTHORITY = "https://login.microsoftonline.com/organizations"
 
 class AlreadyRunning(RuntimeError):
     """A preview is already in flight for this task."""
@@ -1174,6 +1182,23 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
     elif pre["status"] == "unknown":
         logger.warning("WRITE BARRIER PRECHECK: %s", pre["reason"])
 
+    # Transport choice. Flagged because it REPLACES a working path; the proven
+    # subprocess stays in charge unless the flag is explicitly on. Everything
+    # above this line — the prompt, the barrier config, the precheck — is
+    # transport-independent and runs either way.
+    if api_transport_enabled():
+        thread = threading.Thread(
+            target=_collect_api,
+            args=(label, task_id, prompt, config_path,
+                  Path(log_dir) if log_dir else LOG_DIR),
+            daemon=True,
+            name=f"cowork-api-{task_id}",
+        )
+        with _runs_lock:
+            _runs[label]["thread"] = thread
+        thread.start()
+        return label
+
     spawn = spawn or _spawn_default
     try:
         proc = spawn(
@@ -1217,6 +1242,19 @@ def _record_progress(label, raw_line) -> None:
     never raises: a progress hiccup must not affect the run.
     """
     text = _progress_text(raw_line)
+    if not text:
+        return
+    _append_progress(label, text)
+
+
+def _append_progress(label, text) -> None:
+    """Append already-clean progress text to a run's ring.
+
+    The API transport reports structured events rather than CLI stderr, so its
+    text needs no `[cowork] streaming - ...` unwrapping. Both transports land in
+    the SAME ring, which is what lets the card read progress without knowing
+    which transport is running.
+    """
     if not text:
         return
     try:
@@ -1632,6 +1670,82 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
             }
 
 
+# --- API transport: SSE -> the CLI's own stdout document --------------------
+#
+# The migration is cheap only because NOTHING downstream changes. This turns a
+# raw SSE stream into the same JSON the CLI writes to stdout, so
+# parse_cowork_output, _barrier_verdict, _canonical_tools, _extract_draft and
+# both UIs are untouched. Verified against real captures on 2026-08-10.
+
+_TERMINAL_RUN_STATES = ("ok", "error", "failed", "completed")
+
+
+def _iter_sse(lines):
+    """Yield ``(kind, data)`` from raw SSE lines.
+
+    The kind is on its own ``event:`` line, NOT inside the ``data:`` JSON.
+    Reading ``data["event"]`` yields None for every event, which is why an early
+    spike appeared to hang for 600s: the terminal-event break never fired.
+    """
+    kind = ""
+    for raw in lines:
+        line = (raw or "").rstrip("\r\n")
+        if line.startswith("event:"):
+            kind = line[6:].strip()
+        elif line.startswith("data:"):
+            try:
+                yield kind, json.loads(line[5:].strip())
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+
+def _api_payload_from_events(events, conversation_id):
+    """Build the CLI-equivalent stdout document from ``(kind, data)`` pairs."""
+    text_parts = []
+    sse_events = []
+    starts = {}
+    order = []
+    terminal = ""
+
+    for kind, data in events:
+        if not isinstance(data, dict):
+            continue
+        if kind == "dx":
+            value = data.get("t")
+            if isinstance(value, str):
+                text_parts.append(value)
+        elif kind in ("ts", "tx"):
+            # _canonical_tools reads ev["event"], so fold the kind in — the
+            # runtime keeps it on a separate wire line.
+            sse_events.append({**data, "event": kind})
+            tid = data.get("tid")
+            name = data.get("tn")
+            if tid and name:
+                if tid not in starts:
+                    starts[tid] = {"tool_name": name, "ok": None,
+                                   "duration_seconds": None}
+                    order.append(tid)
+                if kind == "tx":
+                    starts[tid]["ok"] = data.get("ok")
+                    dur = data.get("dur")
+                    if isinstance(dur, (int, float)):
+                        starts[tid]["duration_seconds"] = round(dur / 1000.0, 3)
+        elif kind == "rl":
+            state = data.get("st")
+            if state in _TERMINAL_RUN_STATES:
+                terminal = state
+
+    return {
+        "terminal_status": terminal,
+        "duration_seconds": None,
+        "conversation_id": conversation_id,
+        "tool_trace": [starts[t] for t in order],
+        "text": "".join(text_parts),
+        "sse_events": sse_events,
+        "callback_exchanges": [],
+    }
+
+
 def _active_run_count() -> int:
     """How many previews are in flight right now, including this one.
 
@@ -1639,6 +1753,131 @@ def _active_run_count() -> int:
     """
     with _runs_lock:
         return sum(1 for e in _runs.values() if e.get("result") is None)
+
+
+# Injected seam, matching _spawn_default / _cost_snapshot_fn / _auth_login_fn.
+# The architect ruled against a CoworkTransport protocol: this codebase already
+# has an idiom for swapping implementations, and a function pair is far cheaper
+# to delete if the API path disappoints.
+_api_run_fn = None
+
+
+def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
+    """Run one preview over the runtime HTTP API. Worker thread.
+
+    Twin of ``_collect``. It MUST publish the same result dict shape, because
+    ``parse_cowork_output`` and both UIs read it and neither knows which
+    transport produced it.
+
+    Cancellation is the capability the subprocess path lacks and the reason this
+    exists: the CLI-as-library spike proved ``close_live()`` cannot halt a turn,
+    while the API exposes a real cancel. The route is not wired up yet — that is
+    a later phase — but this is the shape it hangs off.
+    """
+    concurrent = _active_run_count()
+    cost_before = _cost_snapshot_fn()
+
+    error = None
+    stdout = ""
+    try:
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        runner = _api_run_fn or _api_run_default
+        payload = runner(prompt, config, lambda text: _append_progress(label, text))
+        stdout = json.dumps(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("api transport run failed", exc_info=True)
+        error = f"Cowork run failed: {exc}"
+
+    cost = None
+    if cost_is_attributable(max(concurrent, _active_run_count())):
+        cost = cost_delta(cost_before, _cost_snapshot_fn())
+
+    with _runs_lock:
+        entry = _runs.get(label)
+        if entry is not None:
+            entry["result"] = {
+                "exit_code": 1 if error else 0,
+                "stdout": stdout,
+                "stderr": "",
+                "error": error,
+                "auth_failed": False,
+                "cost_credits": cost,
+            }
+
+
+def _api_run_default(prompt, config, on_progress):
+    """POST /v1/subscribe and fold the SSE stream into a CLI-shaped document.
+
+    Imports live here so the module keeps loading when the API path is off,
+    which is the default. Auth currently piggybacks on the CLI's MSAL cache; an
+    independent device-code flow has NOT been exercised and is a prerequisite
+    before this becomes the default transport.
+    """
+    import uuid
+
+    import httpx
+    import msal
+
+    cfg_dir = Path(os.environ["APPDATA"]) / "cowork"
+    cache = msal.SerializableTokenCache()
+    cache.deserialize((cfg_dir / "msal_cache.bin").read_text(encoding="utf-8"))
+    app = msal.PublicClientApplication(
+        _API_CLIENT_ID, authority=_API_AUTHORITY, token_cache=cache,
+    )
+    account = app.get_accounts()[0]
+    token = app.acquire_token_silent([_API_SCOPE], account=account)["access_token"]
+    base = resolve_cowork_island() or get_cached_cowork_island()
+
+    # "<oid>.<tenant>" must be split and REVERSED into "<tenant>:<oid>:<uuid>".
+    # acct["realm"] is the string "organizations", not the tenant guid; using it
+    # cost a 403 TENANT_MISMATCH.
+    oid, tenant = account["home_account_id"].split(".", 1)
+    conversation_id = f"{tenant}:{oid}:cw-{uuid.uuid4().hex[:8]}"
+
+    body = {
+        "conversationId": conversation_id,
+        "role": "user",
+        "content": [{"type": "text", "text": prompt}],
+        "toolCallbackConfig": config,
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+
+    events = []
+    with httpx.Client(timeout=httpx.Timeout(COWORK_TIMEOUT, connect=20.0)) as client:
+        with client.stream(
+            "POST", f"{base}/v1/subscribe", headers=headers, json=body,
+        ) as response:
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"POST /v1/subscribe failed: HTTP {response.status_code}"
+                )
+            for kind, data in _iter_sse(response.iter_lines()):
+                events.append((kind, data))
+                if kind == "tk":
+                    _api_progress(data, on_progress)
+                if kind == "rl" and data.get("st") in _TERMINAL_RUN_STATES:
+                    break
+
+    return _api_payload_from_events(events, conversation_id)
+
+
+def _api_progress(data, on_progress):
+    """Surface a `tk` task-card update as one progress line, best effort."""
+    try:
+        items = data.get("items")
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if isinstance(item, dict):
+                text = item.get("af") or item.get("desc")
+                if text:
+                    on_progress(str(text))
+    except Exception:  # noqa: BLE001
+        logger.debug("api progress hook raised", exc_info=True)
 
 
 def is_running(label) -> bool:
