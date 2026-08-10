@@ -146,8 +146,12 @@ class TestFailureModes(unittest.TestCase):
         self.assertIsNotNone(res["error"])
 
     def test_result_shape_stable_on_every_failure(self):
+        # "barrier" carries the write-barrier verdict and is present on every
+        # path, including failures, so a caller never has to guess whether the
+        # key exists before reading it.
         expected = {"terminal_status", "duration_seconds", "conversation_id",
-                    "finding", "draft", "tool_trace", "error", "raw_text"}
+                    "finding", "draft", "tool_trace", "barrier", "error",
+                    "raw_text"}
         for bad in ("", "junk", '{"text":', json.dumps({"text": "x"})):
             with self.subTest(bad=bad[:20]):
                 self.assertEqual(set(parse_cowork_output(bad)), expected)

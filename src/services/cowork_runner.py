@@ -510,6 +510,7 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
         "finding": "",
         "draft": None,
         "tool_trace": [],
+        "barrier": _barrier_verdict([], None, ""),
         "error": None,
         "raw_text": "",
     }
@@ -555,6 +556,17 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
 
     text = payload.get("text") or ""
     result["raw_text"] = text
+
+    result["barrier"] = _barrier_verdict(
+        result["tool_trace"], payload.get("callback_exchanges"), text
+    )
+    if result["barrier"]["status"] == "BREACHED":
+        # Loud on purpose. This is the one condition where a run that looks
+        # entirely normal may have performed a real M365 write.
+        logging.getLogger(__name__).error(
+            "WRITE BARRIER: %s", result["barrier"]["reason"]
+        )
+        result["error"] = result["barrier"]["reason"]
 
     draft, findings = _extract_draft(text)
     result["draft"] = _tidy_finding(draft) if draft else None
@@ -619,6 +631,13 @@ _BLOCK_MESSAGE = (
     "Nothing was sent, saved or modified. Do not retry, and do not attempt "
     "another tool to achieve the same effect. Report the draft instead."
 )
+
+# Derived, never hand-copied, so the two cannot drift apart. Only the first
+# sentence is used: the G1b capture predates the current wording ("The email was
+# NOT sent" rather than "Nothing was sent, saved or modified"), and the tail is
+# expected to keep evolving. The opening sentence is the stable part the agent
+# quotes back verbatim.
+_BLOCK_MARKER = _BLOCK_MESSAGE.split(". ")[0] + "."
 
 _CALLBACK_TIMEOUT = 30
 
@@ -692,6 +711,93 @@ def preview_label(task_id) -> str:
     tasks.skill_output and corrupt the Skill Output card.
     """
     return f"cowork:preview:{task_id}"
+
+
+def _barrier_verdict(tool_trace, callback_exchanges, text=""):
+    """Did the write barrier actually engage on this run?
+
+    Reading the Aether server source (2026-08-10) established that
+    ``tool_callback_config`` is an eval-harness mechanism, not a product safety
+    feature, and that it is tenant-gated:
+
+        # aether_runtime/src/orchestrator/api/v1/tool_callback.py
+        if tenant_id not in EVAL_ALLOWED_TENANTS:
+            raise HTTPException(status_code=404, detail="Not found")
+
+    Our barrier holds because we sign in on the Microsoft tenant, which is on
+    that allowlist. Upstream issue #18550 documents the same gate silently
+    dropping the config on the MSA path, after which real Graph writes ran.
+
+    The failure mode is silent, so we check every run from output we already
+    parse.
+
+    The signal is NOT ``callback_exchanges``: that array is empty in the G1b
+    capture, which is a Graph-confirmed successful interception. Nor is it
+    ``ok`` or ``output`` — both are identical between G1 (really sent) and G1b
+    (blocked). What differs is that ``static_results`` feeds the tool our canned
+    string, which the agent quotes back. So the marker's presence is the
+    evidence, and its absence beside a write tool is the breach.
+
+    Deliberately fails loud: an unrecognised shape reads as BREACHED, because
+    the dangerous direction of a wrong answer is claiming safety we lack.
+
+    Per-run, not per-call. Two writes with one interception still reads as held;
+    tightening that needs a CLI that populates ``callback_exchanges``, which is
+    why that array is honoured when non-empty.
+    """
+    writes = [t.get("tool_name") for t in tool_trace
+              if _looks_like_write(t.get("tool_name"))]
+    if not writes:
+        return {
+            "status": "not_exercised",
+            "reason": "No write tool was attempted, so the barrier was not tested.",
+            "tools": [],
+        }
+
+    intercepted = _BLOCK_MARKER in (text or "") or bool(
+        [e for e in (callback_exchanges or []) if isinstance(e, dict)]
+    )
+    if intercepted:
+        return {
+            "status": "held",
+            "reason": "A write tool was called and interception was observed.",
+            "tools": [],
+        }
+
+    names = ", ".join(dict.fromkeys(str(n) for n in writes))
+    return {
+        "status": "BREACHED",
+        "reason": (
+            f"Write tool ran with no sign of interception: {names}. The callback "
+            f"barrier may not have engaged, so this action could have really "
+            f"happened. Check the EVAL_ALLOWED_TENANTS gate (upstream #18550)."
+        ),
+        "tools": writes,
+    }
+
+
+def _norm_tool(name):
+    return str(name or "").strip().lower()
+
+
+# Verbs that mutate. Matched against the *display* name as well as the
+# canonical one, because G1d recorded an intercepted Teams post as
+# "Post message" — a label absent from all 154 names in that probe's config.
+# Matching only the denylist would therefore miss exactly the calls that matter.
+_WRITE_VERBS = (
+    "send", "post", "create", "update", "delete", "remove", "add",
+    "edit", "write", "upload", "move", "reply", "forward", "schedule",
+    "set ", "set_", "modify", "insert", "draft", "share", "invite",
+)
+
+
+def _looks_like_write(name):
+    norm = _norm_tool(name)
+    if not norm:
+        return False
+    if norm in {_norm_tool(n) for n in load_write_tools()}:
+        return True
+    return any(v in norm for v in _WRITE_VERBS)
 
 
 def load_write_tools() -> list:
