@@ -3103,10 +3103,14 @@ function renderCoworkCard(task) {
 
     if (a && a.state === 'previewing') {
         if (!_cwPollers[task.id]) startCoworkPoller(task.id);
+        var prog = (a.progress && a.progress.length)
+            ? a.progress[a.progress.length - 1]
+            : 'Cowork is reading M365';
         return cwShell('is-running', 'read-only', task,
             cwIntentBlock(task, false)
             + '<div class="cw-progress"><span class="cw-spinner"></span>'
-            + '<span class="cw-progress-text">Cowork is reading M365'
+            + '<span class="cw-progress-text">'
+            + '<span id="cw-live-' + task.id + '">' + escapeHtml(prog) + '</span>'
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
@@ -3328,6 +3332,12 @@ function pollCoworkStatus(taskId) {
             _cwActions[taskId] = action;
             cwSyncTaskState(taskId, action);
             renderTaskList();
+            // Update the live line in place. A full re-render would fight the
+            // intent editor, which is the bug fixed in 68e4119.
+            if (action.progress && action.progress.length) {
+                var el = document.getElementById('cw-live-' + taskId);
+                if (el) el.textContent = action.progress[action.progress.length - 1];
+            }
             if (action.state !== 'previewing') {
                 stopCoworkPoller(taskId);
                 cwRerender(taskId);

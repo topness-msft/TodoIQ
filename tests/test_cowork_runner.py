@@ -9,6 +9,7 @@ enumerated the write tools that must appear in it. If any of those
 assertions regress, preview mode is silently unprotected.
 """
 
+import io
 import json
 import subprocess
 import sys
@@ -23,7 +24,14 @@ from src.services import cowork_runner as cr  # noqa: E402
 
 
 class FakeProc:
-    """Stand-in for subprocess.Popen with a scripted communicate()."""
+    """Stand-in for subprocess.Popen.
+
+    Exposes real readable pipes as well as a scripted ``communicate()``, so the
+    fake exercises the same drain path as production. Before live progress
+    existed, ``_collect`` called ``communicate()`` and a scripted return value
+    was enough; it now drains ``stdout``/``stderr`` line by line, so a fake
+    without pipes would silently take a different path from the real thing.
+    """
 
     def __init__(self, stdout="", stderr="", returncode=0, raise_timeout=False):
         self._stdout = stdout
@@ -31,8 +39,11 @@ class FakeProc:
         self.returncode = returncode
         self._raise_timeout = raise_timeout
         self.communicate_calls = []
+        self.wait_calls = []
         self.killed = False
         self.waited = False
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
 
     def communicate(self, timeout=None):
         self.communicate_calls.append(timeout)
@@ -42,11 +53,16 @@ class FakeProc:
 
     def wait(self, timeout=None):
         self.waited = True
+        self.wait_calls.append(timeout)
+        if self._raise_timeout:
+            raise subprocess.TimeoutExpired(cmd="cowork", timeout=timeout)
         return self.returncode
 
     def kill(self):
         self.killed = True
         self.returncode = -9
+        # A real kill closes the pipes, which unblocks the readers.
+        self._raise_timeout = False
 
     def poll(self):
         return self.returncode
@@ -250,14 +266,28 @@ class TestProcessWiring(RunnerTestBase):
     def test_timeout_is_660_not_300(self):
         """claude_runner's 300s default would kill a live Cowork session."""
         _, proc = self.run_preview()
-        self.assertEqual(proc.communicate_calls, [660])
+        self.assertEqual(proc.wait_calls, [660])
 
-    def test_communicate_used_not_wait(self):
-        """wait() + read() deadlocks past the OS pipe buffer; the spike was
-        already 21KB."""
+    def test_pipes_are_drained_concurrently_not_after_exit(self):
+        """The anti-deadlock invariant, stated as behaviour rather than as the
+        name of the method that used to provide it.
+
+        This replaces an assertion that `communicate()` was called and `wait()`
+        was not. That wording locked in the implementation: draining live needs
+        `wait()`, so the old test would have failed a correct change while
+        proving nothing about deadlock. What actually matters is that both
+        pipes are consumed while the child is still running, which is how
+        `communicate()` was implemented anyway.
+
+        The real proof lives in test_cowork_progress.py, which runs a genuine
+        child emitting 400KB (well past any pipe buffer) with 2000 concurrent
+        stderr lines. Here we assert only the wiring.
+        """
         _, proc = self.run_preview()
-        self.assertTrue(proc.communicate_calls)
-        self.assertFalse(proc.waited)
+        self.assertTrue(proc.waited, "the child was never waited on")
+        # Both pipes were read to EOF rather than left for a post-exit read.
+        self.assertEqual(proc.stdout.read(), "")
+        self.assertEqual(proc.stderr.read(), "")
 
     def test_stdout_and_stderr_are_separate_pipes(self):
         self.run_preview()

@@ -7,6 +7,7 @@ Phase 1 is PREVIEW ONLY. The last class here asserts that structurally — no
 route may exist that could write to M365.
 """
 
+import io
 import json
 import os
 import sys
@@ -22,11 +23,23 @@ from src.services import cowork_runner as cr  # noqa: E402
 
 
 class FakeProc:
+    """Popen stand-in with real readable pipes.
+
+    `_collect` drains stdout/stderr line by line so progress can surface while a
+    run is live, so a fake must expose pipes or it takes a different path from
+    production.
+    """
+
     def __init__(self, stdout="", stderr="", returncode=0):
         self._out, self._err, self.returncode = stdout, stderr, returncode
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
 
     def communicate(self, timeout=None):
         return self._out, self._err
+
+    def wait(self, timeout=None):
+        return self.returncode
 
     def kill(self):
         self.returncode = -9
@@ -864,3 +877,65 @@ class TestRefs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLiveProgress(CoworkAPITestBase):
+    """A preview runs for a median of 119s (p90 224s, 93% over 60s) and used to
+    show a bare spinner. The CLI streams liveness to stderr the whole time, so
+    GET now returns the tail of it and the card can say what is happening."""
+
+    STDERR = (
+        "Update available: 1.21.92 -> 1.21.97. Run: cowork update\n"
+        "Or: irm https://aka.ms/cowork/ps1 | iex\n"
+        "[cowork] streaming - 0:04 elapsed - init: Ready\n"
+        "[cowork] streaming - 0:24 elapsed - tool: tool_search_tool\n"
+        "[cowork] streaming - 1:22 elapsed - Searching for your training sessions\n"
+    )
+
+    def test_get_returns_a_progress_list(self):
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=self.STDERR))
+        _, body = self.get_preview(tid)
+        self.assertIsInstance(body["action"].get("progress"), list)
+
+    def test_progress_carries_the_cli_status_lines(self):
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=self.STDERR))
+        _, body = self.get_preview(tid)
+        joined = " ".join(body["action"]["progress"])
+        self.assertIn("Searching for your training sessions", joined)
+        self.assertIn("Ready", joined)
+
+    def test_raw_tool_names_are_not_shown(self):
+        """`tool: mcp__outlook_calendar__FindMeetingTimes` is not something to
+        put in front of a user; the CLI's own human copy is."""
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=self.STDERR))
+        _, body = self.get_preview(tid)
+        joined = " ".join(body["action"]["progress"])
+        self.assertNotIn("tool_search_tool", joined)
+
+    def test_noise_is_not_shown_to_the_user(self):
+        """The update banner and the iex install hint are not progress."""
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=self.STDERR))
+        _, body = self.get_preview(tid)
+        joined = " ".join(body["action"]["progress"])
+        self.assertNotIn("Update available", joined)
+        self.assertNotIn("iex", joined)
+
+    def test_the_cowork_prefix_is_stripped(self):
+        """It is an implementation detail of the CLI, not something a user
+        should read."""
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=self.STDERR))
+        _, body = self.get_preview(tid)
+        for line in body["action"]["progress"]:
+            self.assertNotIn("[cowork]", line)
+
+    def test_a_run_with_no_progress_still_returns_a_list(self):
+        """Callers must never have to guard the key."""
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT, stderr=""))
+        _, body = self.get_preview(tid)
+        self.assertEqual(body["action"].get("progress"), [])

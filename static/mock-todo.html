@@ -2266,7 +2266,9 @@ function renderCoworkCard(t) {
   if (s === 'previewing') return cwCard('is-running', 'read-only', t,
     `${cwIntentBlock(t, false)}
      <div class="cw-progress"><div class="cw-spinner"></div><div style="flex:1">
-       <div>Cowork is reading M365</div>
+       <div id="cw-live-${t.id}">${esc((t.cw_progress && t.cw_progress.length)
+          ? t.cw_progress[t.cw_progress.length - 1]
+          : 'Cowork is reading M365')}</div>
        <div class="cw-progress-sub" id="cw-hb-${t.id}">${esc(t.cw_elapsed || '')}</div></div></div>`,
     `<span class="cw-foot-note">read-only preview · nothing is sent from here</span>`);
 

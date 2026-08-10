@@ -31,6 +31,7 @@ from ..services.cowork_runner import (
     AlreadyRunning,
     compose_prompt,
     get_result,
+    get_progress,
     get_cached_cowork_island,
     is_running,
     parse_cowork_output,
@@ -388,7 +389,11 @@ class CoworkHandler(tornado.web.RequestHandler):
         if self.get_argument("mark_seen", None) and pre_state == "ready":
             action = mark_task_action_seen(action["id"])
 
-        self.write(json.dumps({"action": _enrich(_clean(action))}))
+        payload = _enrich(_clean(action))
+        # Live liveness from the CLI's stderr. A preview runs for a median of
+        # 119s, so the card needs something to say while it waits.
+        payload["progress"] = get_progress(preview_label(tid))
+        self.write(json.dumps({"action": payload}))
 
     # ── PUT ──
 

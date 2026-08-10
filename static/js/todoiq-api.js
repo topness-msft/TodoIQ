@@ -474,6 +474,7 @@ function cwApply(t, action) {
   }
   t.cw_action_id = action.id;
   t.cw_state = action.state;
+  t.cw_progress = action.progress || [];
   t.cw_finding = action.finding || '';
   t.cw_draft = action.draft || '';
   t.cw_draft_edited = action.draft_edited || '';
@@ -634,6 +635,12 @@ async function cwPoll(id) {
     const t = cwTask(id);
     if (!t) return cwStopPoller(id);
     cwApply(t, data.action);
+    // Update the live line in place; a full re-render would fight the intent
+    // editor while it is open.
+    if (t.cw_progress && t.cw_progress.length) {
+      const el = document.getElementById(`cw-live-${id}`);
+      if (el) el.textContent = t.cw_progress[t.cw_progress.length - 1];
+    }
     if (t.cw_state !== 'previewing') {
       cwStopPoller(id);
       cwRerender(id);

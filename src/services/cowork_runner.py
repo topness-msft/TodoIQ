@@ -615,6 +615,7 @@ import logging
 import os
 import subprocess
 import threading
+from collections import deque
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -625,6 +626,10 @@ WRITE_TOOLS_PATH = Path(__file__).resolve().parent / "cowork_write_tools.json"
 
 # claude_runner's 300s default would kill a live Cowork session mid-flight.
 COWORK_TIMEOUT = 660
+
+# Progress ring size. A p90 preview (224s) emits roughly 100 lines, so this
+# keeps a whole typical run while bounding a pathological one.
+_PROGRESS_MAX = 200
 
 _BLOCK_MESSAGE = (
     "BLOCKED: TodoIQ preview mode intercepted this call. "
@@ -1004,7 +1009,9 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
         entry = _runs.get(label)
         if entry is not None and entry["result"] is None:
             raise AlreadyRunning(label)
-        _runs[label] = {"proc": None, "thread": None, "result": None}
+        _runs[label] = {
+            "proc": None, "thread": None, "result": None, "progress": deque(maxlen=_PROGRESS_MAX),
+        }
 
     config_path = build_callback_config(task_id, log_dir=log_dir)
     prompt_path = write_prompt_file(task_id, prompt, log_dir=log_dir)
@@ -1055,6 +1062,35 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
     return label
 
 
+def _record_progress(label, raw_line) -> None:
+    """Append one CLI stderr line to a run's progress ring, if it is user-facing.
+
+    Called from the stderr reader thread, so it takes the registry lock and
+    never raises: a progress hiccup must not affect the run.
+    """
+    text = _progress_text(raw_line)
+    if not text:
+        return
+    try:
+        with _runs_lock:
+            entry = _runs.get(label)
+            if entry is not None:
+                entry["progress"].append(text)
+    except Exception:  # noqa: BLE001
+        logger.debug("could not record progress", exc_info=True)
+
+
+def get_progress(label) -> list:
+    """The recent progress lines for a run, oldest first.
+
+    Bounded by ``_PROGRESS_MAX``; a long run keeps only the tail, which is what
+    the card shows anyway.
+    """
+    with _runs_lock:
+        entry = _runs.get(label)
+        return list(entry["progress"]) if entry else []
+
+
 def _failure(error: str) -> dict:
     return {
         "exit_code": None,
@@ -1063,6 +1099,95 @@ def _failure(error: str) -> dict:
         "error": error,
         "auth_failed": False,
     }
+
+
+def _progress_text(line):
+    """A user-facing progress string from one CLI stderr line, or None.
+
+    The CLI emits `[cowork] streaming - 0:44 elapsed - <what it is doing>` while
+    a run is in flight (cowork_cli/services/send_progress.py). Everything else
+    on stderr is noise for this purpose: the update banner, the `irm ... | iex`
+    install hint, tracebacks.
+    """
+    text = (line or "").strip()
+    if not text or not text.startswith("[cowork]"):
+        return None
+    text = text[len("[cowork]"):].strip()
+    # "streaming - 0:44 elapsed - tool: x" -> "tool: x"
+    parts = text.split(" - ", 2)
+    if len(parts) == 3:
+        text = parts[2].strip()
+    # Raw tool names are developer-facing. The CLI emits its own human copy
+    # alongside them ("Searching your Teams and calendar"), 35 lines against 12
+    # in a real run, so dropping these costs nothing and keeps the card
+    # readable. Per-tool detail belongs in the completed trace instead.
+    if text.startswith("tool:"):
+        return None
+    return text or None
+
+
+def _drain_process(proc, timeout, on_stderr_line=None):
+    """Run a child to completion, draining both pipes concurrently.
+
+    Returns ``(stdout, stderr, returncode)``. Raises
+    ``subprocess.TimeoutExpired`` if the child outlives ``timeout``; the caller
+    owns killing it.
+
+    This replaces ``proc.communicate(timeout=...)``, and the load-bearing
+    warning that used to sit here still applies: never ``wait()`` then read.
+    That deadlocks once the child exceeds the OS pipe buffer, and our payload is
+    already 21KB.
+
+    The invariant is preserved because both pipes are drained on their own
+    threads *for the whole life of the process*, which is exactly how
+    ``communicate()`` is implemented. Waiting is safe when something is already
+    consuming. What we gain over ``communicate()`` is that stderr lines are
+    visible while the run is still going, instead of all at once at the end.
+
+    ``on_stderr_line`` is called from the reader thread for each raw line. It is
+    wrapped so a caller-side bug cannot break a preview.
+    """
+    out_chunks = []
+    err_chunks = []
+
+    def drain(pipe, sink, hook=None):
+        try:
+            for line in iter(pipe.readline, ""):
+                sink.append(line)
+                if hook is not None:
+                    try:
+                        hook(line)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("progress hook raised", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("pipe drain ended early", exc_info=True)
+
+    threads = []
+    for pipe, sink, hook in (
+        (proc.stdout, out_chunks, None),
+        (proc.stderr, err_chunks, on_stderr_line),
+    ):
+        if pipe is None:
+            continue
+        t = threading.Thread(
+            target=drain, args=(pipe, sink, hook), daemon=True,
+            name="cowork-pipe-drain",
+        )
+        t.start()
+        threads.append(t)
+
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Readers keep running; the caller kills the child, which closes the
+        # pipes and lets them finish. Partial output is still in the sinks.
+        raise
+
+    # The child is gone, so these are bounded: the pipes are at EOF.
+    for t in threads:
+        t.join(timeout=15)
+
+    return "".join(out_chunks), "".join(err_chunks), code
 
 
 def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
@@ -1074,11 +1199,13 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
     error = None
     stdout = stderr = ""
     try:
-        stdout, stderr = proc.communicate(timeout=COWORK_TIMEOUT)
+        stdout, stderr, _ = _drain_process(
+            proc, COWORK_TIMEOUT, on_stderr_line=lambda ln: _record_progress(label, ln)
+        )
     except subprocess.TimeoutExpired:
         proc.kill()
         try:
-            stdout, stderr = proc.communicate(timeout=15)
+            stdout, stderr, _ = _drain_process(proc, 15)
         except Exception:
             pass
         error = f"Cowork timed out after {COWORK_TIMEOUT}s."
