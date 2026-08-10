@@ -170,6 +170,12 @@ def _migrate(conn: sqlite3.Connection):
     action_cols = [
         r[1] for r in conn.execute("PRAGMA table_info(task_actions)").fetchall()
     ]
+    if "cost_credits" not in action_cols:
+        # Credits consumed by one preview, measured as the difference in the
+        # user's month-to-date counter (GET /v1/cost) across the run. REAL, not
+        # TEXT: it is a number and gets formatted for display.
+        conn.execute("ALTER TABLE task_actions ADD COLUMN cost_credits REAL")
+        conn.commit()
     if "seen_at" not in action_cols:
         conn.execute("ALTER TABLE task_actions ADD COLUMN seen_at TEXT")
         conn.commit()
@@ -310,6 +316,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     conversation_id  TEXT,
     terminal_status  TEXT,
     tool_trace       TEXT,
+    cost_credits     REAL,
     error            TEXT,
     seen_at          TEXT,
     island_url       TEXT,

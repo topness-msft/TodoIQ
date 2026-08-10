@@ -71,6 +71,10 @@ class FakeProc:
 class RunnerTestBase(unittest.TestCase):
     def setUp(self):
         cr.reset_registry()
+        # A real cost snapshot is a ~1s network call and _collect runs in
+        # hundreds of tests; unmocked it took the suite from 35s to 313s.
+        self._base_cost_fn = cr._cost_snapshot_fn
+        cr._cost_snapshot_fn = lambda: None
         self.calls = []
         self._base_auth_login = cr._auth_login_fn
         cr._auth_login_fn = lambda *args, **kwargs: type(
@@ -78,6 +82,7 @@ class RunnerTestBase(unittest.TestCase):
         )()
 
     def tearDown(self):
+        cr._cost_snapshot_fn = self._base_cost_fn
         cr._auth_login_fn = self._base_auth_login
         cr.reset_registry()
 

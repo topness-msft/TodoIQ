@@ -162,7 +162,7 @@ class TestTaskActionsSchema(unittest.TestCase):
             "intent", "notes_snapshot", "redirect_text", "composed_prompt",
             "finding", "draft", "draft_edited",
             "destination_kind", "destination_ref", "conversation_id",
-            "terminal_status", "tool_trace", "error",
+            "terminal_status", "tool_trace", "cost_credits", "error",
             "seen_at", "island_url", "created_at", "updated_at",
             "delivery_channel", "destination_display",
             "destination_confirmed_at", "destination_source",

@@ -475,6 +475,7 @@ function cwApply(t, action) {
   t.cw_action_id = action.id;
   t.cw_state = action.state;
   t.cw_progress = action.progress || [];
+  t.cw_cost_credits = action.cost_credits;
   t.cw_finding = action.finding || '';
   t.cw_draft = action.draft || '';
   t.cw_draft_edited = action.draft_edited || '';

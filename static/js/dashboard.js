@@ -3022,6 +3022,21 @@ function cwEscapeAttr(value) {
         .replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function cwCostBadge(a) {
+    // Mirrors format_cost() in cowork_runner.py. Nothing to show is the common
+    // case: the endpoint has a kill switch, and overlapping previews are not
+    // attributable because the credit counter is per user rather than per run.
+    var c = a && a.cost_credits;
+    if (c === null || c === undefined || c === '') return '';
+    var n = Number(c);
+    if (!isFinite(n) || n < 0) return '';
+    var text = n === 0 ? 'no credits'
+        : n >= 1000 ? Math.round(n).toLocaleString() + ' credits'
+        : n.toFixed(1) + ' credits';
+    return '<span class="cw-foot-note" title="Credits consumed by this preview,'
+        + ' measured from your month-to-date usage">' + escapeHtml(text) + '</span>';
+}
+
 function cwFindingBlock(finding, taskId) {
     if (!finding) return '';
     var expanded = Boolean(_cwFindingExpanded[taskId]);
@@ -3138,6 +3153,10 @@ function renderCoworkCard(task) {
             : '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(draft) + '</div>';
         var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
             ? '<span class="cw-foot-note">edited by you</span>' : '';
+        // What this preview actually cost, measured as the change in the user's
+        // month-to-date credit counter across the run. Absent when it could not
+        // be attributed (two previews overlapping) or the endpoint was off.
+        var costBadge = cwCostBadge(a);
         var correction = a.redirect_text
             ? '<div class="cw-intent"><span class="i-label">Correction:</span> '
               + escapeHtml(a.redirect_text) + '</div>'
@@ -3159,7 +3178,7 @@ function renderCoworkCard(task) {
                     + '" target="_blank" rel="noopener noreferrer">Open in Cowork</a>'
                   : '')
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
-              + editedBadge;
+              + editedBadge + costBadge;
 
         return cwShell('', 'preview', task,
             cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml

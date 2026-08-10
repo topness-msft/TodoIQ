@@ -246,6 +246,7 @@ def _finalise(action: dict) -> dict:
     trace = parsed.get("tool_trace")
     fields = {
         "state": "failed" if failed else "ready",
+        "cost_credits": result.get("cost_credits"),
         "finding": parsed.get("finding"),
         "draft": parsed.get("draft"),
         "terminal_status": parsed.get("terminal_status"),

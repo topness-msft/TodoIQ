@@ -2247,6 +2247,20 @@ function cwRedoBtn(t) {
     : `<button class="cw-btn cw-btn-sec" onclick="cwToggleRedo(${t.id},true)">↻ Redo</button>`;
 }
 
+function cwCostBadge(t) {
+  // Mirrors format_cost() in cowork_runner.py. Nothing to show is the common
+  // case: the endpoint has a kill switch, and overlapping previews are not
+  // attributable because the credit counter is per user rather than per run.
+  const c = t && t.cw_cost_credits;
+  if (c === null || c === undefined || c === '') return '';
+  const n = Number(c);
+  if (!isFinite(n) || n < 0) return '';
+  const text = n === 0 ? 'no credits'
+    : n >= 1000 ? Math.round(n).toLocaleString() + ' credits'
+    : n.toFixed(1) + ' credits';
+  return `<span class="cw-foot-note" title="Credits consumed by this preview, measured from your month-to-date usage">${esc(text)}</span>`;
+}
+
 function cwCard(cls, badge, t, body, foot) {
   const label = CW_LABELS[t.action_type] || 'Action';
   return `<div class="cw-card ${cls}">
@@ -2306,7 +2320,7 @@ function renderCoworkCard(t) {
          href="${esc('https://m365.cloud.microsoft/agents/cowork#/task/' + encodeURIComponent(t.cw_conversation_id))}"
          target="_blank" rel="noopener noreferrer">Open in Cowork</a>` : ''}
        <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Hide</button>
-       ${t.cw_draft_edited ? '<span class="cw-foot-note">edited by you</span>' : ''}`);
+       ${t.cw_draft_edited ? '<span class="cw-foot-note">edited by you</span>' : ''}${cwCostBadge(t)}`);
   }
 
   // idle

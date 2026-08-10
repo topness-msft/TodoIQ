@@ -1137,6 +1137,92 @@ def get_progress(label) -> list:
         return list(entry["progress"]) if entry else []
 
 
+# A single preview cannot plausibly consume a month of credits. A jump beyond
+# this means something else moved the per-user counter, almost certainly another
+# client signed in as the same person, so we decline to attribute it.
+_COST_SANITY_CEILING = 10_000.0
+
+
+def _cost_get(path):
+    """GET a runtime path with the CLI's own session, as a library.
+
+    Same targeted use as the tenant precheck: no transport migration, just the
+    authenticated client we already have.
+    """
+    from cowork_cli.auth.manager import AuthManager
+    from cowork_cli.config.settings import get_settings
+
+    settings = get_settings()
+    session_mod = __import__(
+        "cowork_cli.services.session", fromlist=["SessionManager"]
+    )
+    session = session_mod.SessionManager(settings, AuthManager(settings))
+    return session.sync_get(path)
+
+
+def cost_snapshot(_get=None):
+    """Month-to-date credits consumed by this user, or None.
+
+    `GET /v1/cost` is a read proxy over Neptune's costing API. The value is
+    monotonic within a month and does not drift when nothing is running, so the
+    difference across a preview is that preview's cost.
+
+    Returns None rather than raising on every failure path. The endpoint has a
+    documented kill switch (an ECS flight can disable it, giving 404) and
+    returns 503 when Neptune is throttled. Cost is decoration; it must never be
+    able to fail a preview.
+    """
+    get = _get or _cost_get
+    try:
+        payload = get("/v1/cost").json()
+        value = (payload.get("user") or {}).get("consumed")
+        return float(value) if isinstance(value, (int, float)) else None
+    except Exception:  # noqa: BLE001
+        logger.debug("cost snapshot unavailable", exc_info=True)
+        return None
+
+
+def cost_delta(before, after):
+    """Credits consumed between two snapshots, or None if not trustworthy.
+
+    Rejects a decrease (the monthly reset at ``resetOn``, or a Neptune
+    correction) and an implausible jump. Zero is a real answer, not a missing
+    one: a cached turn can legitimately cost nothing.
+    """
+    if before is None or after is None:
+        return None
+    delta = after - before
+    if delta < 0 or delta > _COST_SANITY_CEILING:
+        return None
+    return delta
+
+
+def cost_is_attributable(concurrent_runs) -> bool:
+    """Can this run's cost be told apart from anything else's?
+
+    The counter is per USER, not per run, so two overlapping previews make both
+    deltas meaningless. We show nothing rather than a wrong number.
+    """
+    return (concurrent_runs or 0) <= 1
+
+
+def format_cost(delta) -> str:
+    """What a user reads. Empty string when there is nothing to say."""
+    if delta is None:
+        return ""
+    if delta == 0:
+        return "no credits"
+    if delta >= 1000:
+        return f"{delta:,.0f} credits"
+    return f"{delta:.1f} credits"
+
+
+# Replaceable seam, same pattern as _auth_login_fn. `_collect` runs in tests
+# hundreds of times, and a real cost snapshot is a ~1s network round trip, so
+# leaving this unmocked took the unit suite from 35s to 313s.
+_cost_snapshot_fn = cost_snapshot
+
+
 def _failure(error: str) -> dict:
     return {
         "exit_code": None,
@@ -1244,6 +1330,14 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
     """
     error = None
     stdout = stderr = ""
+
+    # Cost is the difference in the user's month-to-date credit counter across
+    # this run. Snapshot here rather than in start_preview: the GET costs about
+    # a second and start_preview is on the request path, while the child takes
+    # several seconds just to reach "RUN started", so nothing has been spent yet.
+    concurrent = _active_run_count()
+    cost_before = _cost_snapshot_fn()
+
     try:
         stdout, stderr, _ = _drain_process(
             proc, COWORK_TIMEOUT, on_stderr_line=lambda ln: _record_progress(label, ln)
@@ -1317,6 +1411,13 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
     except Exception as exc:
         logger.debug("Could not write Cowork stderr log: %s", exc)
 
+    # Close the cost measurement before publishing the result. Only claim a
+    # number when this run was the only one in flight: the counter is per user,
+    # so overlapping previews cannot be told apart.
+    cost = None
+    if cost_is_attributable(max(concurrent, _active_run_count())):
+        cost = cost_delta(cost_before, _cost_snapshot_fn())
+
     with _runs_lock:
         entry = _runs.get(label)
         if entry is not None:
@@ -1326,7 +1427,17 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
                 "stderr": stderr,
                 "error": error,
                 "auth_failed": auth_failed,
+                "cost_credits": cost,
             }
+
+
+def _active_run_count() -> int:
+    """How many previews are in flight right now, including this one.
+
+    The credit counter is per user, so overlapping runs cannot be attributed.
+    """
+    with _runs_lock:
+        return sum(1 for e in _runs.values() if e.get("result") is None)
 
 
 def is_running(label) -> bool:
