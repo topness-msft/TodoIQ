@@ -476,6 +476,9 @@ function cwApply(t, action) {
   t.cw_state = action.state;
   t.cw_progress = action.progress || [];
   t.cw_cost_credits = action.cost_credits;
+  // What happened after "Open in Cowork". Absent unless the preview finished
+  // and the lookup succeeded; the card renders normally without it.
+  t.cw_handoff = action.handoff || null;
   t.cw_finding = action.finding || '';
   t.cw_draft = action.draft || '';
   t.cw_draft_edited = action.draft_edited || '';

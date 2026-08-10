@@ -2711,3 +2711,20 @@ textarea.cw-draft {
 .cw-btn-sec { color: var(--accent); border-color: var(--accent); background: transparent; }
 .cw-btn-ghost { color: var(--text-secondary); border-color: transparent; background: transparent; }
 .cw-foot-note { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
+
+/* Handoff status: what Cowork did after "Open in Cowork". `waiting` is the
+   only one that earns colour - it means Cowork is blocked on the user, which
+   is how an approval prompt surfaces. The rest are quiet notes. */
+.cw-handoff {
+    margin-left: 8px; font-size: 11px; padding: 2px 8px;
+    border-radius: 10px; white-space: nowrap;
+}
+.cw-handoff-done, .cw-handoff-running {
+    color: var(--text-secondary); background: var(--bg-tertiary, rgba(127,127,127,.12));
+}
+.cw-handoff-waiting {
+    color: #8a5a00; background: #fff4d6; border: 1px solid #f0d090; font-weight: 600;
+}
+@media (prefers-color-scheme: dark) {
+    .cw-handoff-waiting { color: #ffd479; background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.35); }
+}

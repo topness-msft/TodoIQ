@@ -3037,6 +3037,49 @@ function cwCostBadge(a) {
         + ' measured from your month-to-date usage">' + escapeHtml(text) + '</span>';
 }
 
+function cwHandoffBadge(a) {
+    // What happened AFTER "Open in Cowork". Absent for a preview that was never
+    // handed over, and absent whenever the lookup failed - this is additive, so
+    // no badge is the normal, correct resting state.
+    var h = a && a.handoff;
+    if (!h || !h.state) return '';
+
+    var label, cls, title;
+    if (h.waiting_on_user) {
+        // The one worth interrupting for: Cowork is blocked on Phil, which is
+        // how an approval prompt surfaces from the outside.
+        label = 'Cowork needs you';
+        cls = 'cw-handoff cw-handoff-waiting';
+        title = 'Cowork is waiting for your input in the web app';
+    } else if (h.state === 'running') {
+        label = 'Cowork working';
+        cls = 'cw-handoff cw-handoff-running';
+        title = 'Cowork is still working on this conversation';
+    } else if (h.state === 'completed') {
+        label = 'Cowork finished' + cwHandoffAgo(h.last_activity);
+        cls = 'cw-handoff cw-handoff-done';
+        title = 'Cowork finished this conversation';
+    } else {
+        return '';
+    }
+    return '<span class="' + cls + '" title="' + cwEscapeAttr(title) + '">'
+        + escapeHtml(label) + '</span>';
+}
+
+function cwHandoffAgo(ms) {
+    // lastActivity is epoch milliseconds. Only ever a rough hint, so anything
+    // implausible renders as nothing rather than as a wrong number.
+    var n = Number(ms);
+    if (!isFinite(n) || n <= 0) return '';
+    var mins = Math.floor((Date.now() - n) / 60000);
+    if (mins < 0 || mins > 60 * 24 * 30) return '';
+    if (mins < 1) return ' just now';
+    if (mins < 60) return ' ' + mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return ' ' + hours + 'h ago';
+    return ' ' + Math.floor(hours / 24) + 'd ago';
+}
+
 function cwFindingBlock(finding, taskId) {
     if (!finding) return '';
     var expanded = Boolean(_cwFindingExpanded[taskId]);
@@ -3178,7 +3221,7 @@ function renderCoworkCard(task) {
                     + '" target="_blank" rel="noopener noreferrer">Open in Cowork</a>'
                   : '')
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
-              + editedBadge + costBadge;
+              + editedBadge + costBadge + cwHandoffBadge(a);
 
         return cwShell('', 'preview', task,
             cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml
