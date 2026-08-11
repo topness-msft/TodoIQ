@@ -12,11 +12,11 @@
             <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">
                 <span id="theme-icon">&#9790;</span>
             </button>
-            <label class="auto-sync-toggle" title="Auto-sync every 30 min">
-                <input type="checkbox" id="auto-sync-checkbox" checked onchange="toggleAutoSync(this.checked)">
-                <span class="toggle-slider"></span>
-                <span class="auto-sync-label">Auto sync</span>
-            </label>
+            <!-- The Auto sync toggle was removed: it was not a real
+                 preference. auto_sync_enabled lived in memory on the
+                 application object and defaulted to True, so it reset to on at
+                 every restart and turning it off never stuck. Auto sync itself
+                 is unchanged and still runs. -->
             <span id="connection-status" class="connection-indicator disconnected">
                 <span class="connection-dot"></span>
                 <span class="connection-label">Connecting</span>

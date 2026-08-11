@@ -619,7 +619,13 @@ function renderSection(sectionId, sectionTasks) {
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
             + (task.is_quick_hit ? '<span class="quick-hit-icon" title="Quick hit">&#9201;</span>' : '')
-            + '<span class="task-source-icon">' + sourceTypeIcon(task.source_type) + '</span>'
+            // Carries the task id. It used to live on the priority glyph, and
+            // went away with it; the id is how Phil refers to tasks when
+            // debugging, so it needs a home. Paired with the source type,
+            // which is what this icon already means.
+            + '<span class="task-source-icon" title="Task #' + task.id + ' \u00b7 '
+            + escapeHtml(task.source_type || 'manual') + '">'
+            + sourceTypeIcon(task.source_type) + '</span>'
             + '<span class="task-title">' + escapeHtml(task.title) + '</span>'
             + waitingIconHtml
             + suggestionBadgeHtml
@@ -2677,12 +2683,6 @@ function fetchSyncStatus() {
 function updateSyncUI(data) {
     var btn = document.getElementById('sync-btn');
     var statusText = document.getElementById('sync-status-text');
-    var autoSyncCheckbox = document.getElementById('auto-sync-checkbox');
-
-    // Update auto-sync toggle state
-    if (autoSyncCheckbox && data.auto_sync_enabled !== undefined) {
-        autoSyncCheckbox.checked = data.auto_sync_enabled;
-    }
 
     if (data.sync_running) {
         btn.classList.add('syncing');
@@ -2765,22 +2765,6 @@ function startSyncWatcher() {
             })
             .catch(function() {});
     }, 30000);
-}
-
-function toggleAutoSync(enabled) {
-    fetch('/api/sync-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ auto_sync: enabled })
-    })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-        var checkbox = document.getElementById('auto-sync-checkbox');
-        if (checkbox && data.auto_sync_enabled !== undefined) {
-            checkbox.checked = data.auto_sync_enabled;
-        }
-    })
-    .catch(function(err) { console.error('Failed to toggle auto-sync:', err); });
 }
 
 function requestSync() {
