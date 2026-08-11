@@ -73,7 +73,7 @@ class TestRecoveryFlow(unittest.TestCase):
     def test_auth_failure_triggers_a_login_and_a_retry(self):
         attempts = []
 
-        def runner(prompt, config, on_progress, conversation_id=None):
+        def runner(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             attempts.append(1)
             if len(attempts) == 1:
                 raise cr.CoworkAuthExpired("token expired")
@@ -95,7 +95,7 @@ class TestRecoveryFlow(unittest.TestCase):
         self.assertIn("recovered", result["stdout"])
 
     def test_a_failed_login_reports_the_actionable_message(self):
-        def runner(prompt, config, on_progress, conversation_id=None):
+        def runner(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             raise cr.CoworkAuthExpired("token expired")
 
         def login(argv, **kw):
@@ -110,7 +110,7 @@ class TestRecoveryFlow(unittest.TestCase):
         real problem and must surface, not loop."""
         attempts = []
 
-        def runner(prompt, config, on_progress, conversation_id=None):
+        def runner(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             attempts.append(1)
             raise cr.CoworkAuthExpired("still expired")
 
@@ -124,7 +124,7 @@ class TestRecoveryFlow(unittest.TestCase):
     def test_a_non_auth_error_does_not_trigger_a_login(self):
         logins = []
 
-        def runner(prompt, config, on_progress, conversation_id=None):
+        def runner(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             raise OSError("island unreachable")
 
         def login(argv, **kw):

@@ -40,11 +40,13 @@ from ..services.cowork_runner import (
     get_cached_cowork_island,
     handoff_status,
     is_running,
+    new_conversation_id,
     parse_cowork_output,
     parse_source_url,
     preview_label,
     start_preview,
 )
+from ..services.workspace_settings import api_transport_enabled
 
 # Test seams. Production leaves both None so the runner uses its own defaults.
 SPAWN = None
@@ -273,9 +275,34 @@ def _carry_forward_destination(task_id: int, resolved: dict) -> dict:
 
 
 def _enrich(action: dict) -> dict:
-    """Add the derived audience risk the UI needs but the row does not store."""
-    if action is not None:
-        action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
+    """Add the derived audience risk the UI needs but the row does not store.
+
+    Also surfaces ``waiting_on_user`` WHILE A RUN IS STILL IN FLIGHT. Cowork can
+    block mid-run asking the user something in the web app, and until it is
+    answered nothing else happens. Phil hit this on task 2132: the card showed a
+    spinner and "Working on your request" for 13 minutes while
+    GET /v1/tasks had reported state=needs_user_input the whole time.
+
+    The signal already existed; it was only read on a finished card, which is
+    the one state where it does not matter. A spinner that means "waiting for
+    you" is worse than no spinner, because it tells the user to keep waiting.
+    """
+    if action is None:
+        return action
+
+    action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
+
+    if action.get("state") == "previewing" and action.get("conversation_id"):
+        try:
+            status = (HANDOFF_FN or handoff_status)(action["conversation_id"])
+        except Exception:  # noqa: BLE001
+            status = None
+        # Only ever claim the blocked case. An unreadable status must not be
+        # rendered as "this is progressing normally".
+        action["waiting_on_user"] = bool(
+            status and status.get("waiting_on_user")
+        )
+
     return action
 
 
@@ -385,6 +412,15 @@ class CoworkHandler(tornado.web.RequestHandler):
             delivery_channel=resolved.get("delivery_channel"),
         )
 
+        # Minted BEFORE the run so Stop is addressable from the first second.
+        # Cancellation targets POST /v1/conversations/{id}/pause, and this id
+        # used to be written only when the run FINISHED, so pressing Stop
+        # during "Preparing workspace" had nothing to address: the run kept
+        # going, kept spending credits, and the still-live worker put the row
+        # back to 'previewing'. Only meaningful on the API transport; harmless
+        # otherwise, because the runner mints its own if this is None.
+        conversation_id = new_conversation_id() if api_transport_enabled() else None
+
         # A Redo is a NEW row, never an update: the original intent survives and
         # the correction chain stays auditable.
         action = create_task_action(
@@ -396,6 +432,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             composed_prompt=prompt,
             destination_kind=destination.get("kind"),
             island_url=get_cached_cowork_island(),
+            conversation_id=conversation_id,
             **resolved,
         )
 
@@ -406,6 +443,7 @@ class CoworkHandler(tornado.web.RequestHandler):
                 refs=_refs(task),
                 spawn=SPAWN,
                 log_dir=LOG_DIR_OVERRIDE,
+                conversation_id=conversation_id,
             )
         except AlreadyRunning:
             return self._fail(409, "A preview is already running for this task")

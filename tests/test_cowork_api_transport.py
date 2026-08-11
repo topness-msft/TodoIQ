@@ -217,7 +217,7 @@ class TestFlagRouting(unittest.TestCase):
             spawned.append(argv)
             return _FakeProc()
 
-        def fake_run(prompt, config, on_progress, conversation_id=None):
+        def fake_run(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             return {"terminal_status": "ok", "text": "hi", "sse_events": [],
                     "tool_trace": [], "conversation_id": "t:u:cw-x",
                     "callback_exchanges": [], "duration_seconds": None}
@@ -230,7 +230,7 @@ class TestFlagRouting(unittest.TestCase):
 
     def test_api_result_has_the_same_shape_as_the_subprocess_result(self):
         """The invariant that makes everything downstream unchanged."""
-        def fake_run(prompt, config, on_progress, conversation_id=None):
+        def fake_run(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             return {"terminal_status": "ok", "text": "hi", "sse_events": [],
                     "tool_trace": [], "conversation_id": "t:u:cw-x",
                     "callback_exchanges": [], "duration_seconds": None}
@@ -249,7 +249,7 @@ class TestFlagRouting(unittest.TestCase):
         self.assertEqual(parsed["conversation_id"], "t:u:cw-x")
 
     def test_api_failure_becomes_an_error_result_not_a_hang(self):
-        def boom(prompt, config, on_progress, conversation_id=None):
+        def boom(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             raise OSError("island unreachable")
 
         with mock.patch.object(cr, "api_transport_enabled", lambda: True), \
@@ -261,7 +261,7 @@ class TestFlagRouting(unittest.TestCase):
         self.assertTrue(result["error"])
 
     def test_api_progress_reaches_the_same_ring_the_card_reads(self):
-        def fake_run(prompt, config, on_progress, conversation_id=None):
+        def fake_run(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             on_progress("Searching your Teams and calendar")
             return {"terminal_status": "ok", "text": "hi", "sse_events": [],
                     "tool_trace": [], "conversation_id": "t:u:cw-x",
@@ -277,7 +277,7 @@ class TestFlagRouting(unittest.TestCase):
         """The write barrier is transport-independent and must stay on."""
         seen = {}
 
-        def fake_run(prompt, config, on_progress, conversation_id=None):
+        def fake_run(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             seen["config"] = config
             return {"terminal_status": "ok", "text": "", "sse_events": [],
                     "tool_trace": [], "conversation_id": "t:u:cw-x",

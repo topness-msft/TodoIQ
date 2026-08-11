@@ -2941,6 +2941,25 @@ function cwIntentBlock(task, editable) {
 // The audience a draft is written for. This is deliberately separate from the
 // Cowork conversation id: one is who would receive the message, the other is
 // which research session produced it.
+function cwOpenLink(a, label) {
+    // One place that knows the deep-link shape, so the running card and the
+    // finished card cannot drift apart.
+    if (!a || !a.conversation_id) return '';
+    return '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
+        + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
+          + encodeURIComponent(a.conversation_id))
+        + '" target="_blank" rel="noopener noreferrer" '
+        + 'data-testid="cw-open-cowork" '
+        // The read-only instruction is scoped to the drafting turn, and the
+        // barrier travels in OUR request rather than with the conversation.
+        // Verified: a follow-up "send that now" made Cowork call PostMessage,
+        // blocked only by our own config. So the handoff really is live, and
+        // the button should say so.
+        + 'title="Continue this conversation in Cowork. The draft '
+        + 'is already there, and asking it to send will send for '
+        + 'real.">' + escapeHtml(label) + '</a>';
+}
+
 function cwDestBlock(action, task) {
     var d = CW_DEST[action.destination_kind] || CW_DEST['unknown'];
     var conv = action.conversation_id || '';
@@ -3336,6 +3355,23 @@ function renderCoworkCard(task) {
         var prog = (a.progress && a.progress.length)
             ? a.progress[a.progress.length - 1]
             : 'Cowork is reading M365';
+        // Cowork can stop mid-run to ask a question in the web app, and until
+        // it is answered nothing else happens. A spinner here reads as "still
+        // working", which told Phil to keep waiting through 13 minutes of a run
+        // that was blocked on him the whole time.
+        if (a.waiting_on_user) {
+            return cwShell('is-running', 'needs you', task,
+                cwIntentBlock(task, false)
+                + '<div class="cw-blocked" data-testid="cw-blocked">'
+                + '<b>Cowork is waiting for your answer.</b>'
+                + '<div class="cw-blocked-sub">It asked a question in the web app '
+                + 'and cannot go further until you reply. Nothing has been sent.'
+                + '</div></div>',
+                cwOpenLink(a, 'Answer in Cowork')
+                + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+                + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+                + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
+        }
         return cwShell('is-running', 'read-only', task,
             cwIntentBlock(task, false)
             + '<div class="cw-progress"><span class="cw-spinner"></span>'
@@ -3344,7 +3380,11 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+            // The link belongs here too. A run in flight is exactly when the
+            // user may need to look at it, and it was previously only offered
+            // once the run had finished.
+            cwOpenLink(a, 'Open in Cowork')
+            + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
             + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
             + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
     }
@@ -3404,21 +3444,7 @@ function renderCoworkCard(task) {
               + 'title="Abandon this conversation and research again from scratch" '
               + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
               + (a.conversation_id
-                  ? '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
-                    + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
-                      + encodeURIComponent(a.conversation_id))
-                    + '" target="_blank" rel="noopener noreferrer" '
-                    + 'data-testid="cw-open-cowork" '
-                    // The read-only instruction is scoped to the drafting turn,
-                    // and the barrier travels in OUR request rather than with
-                    // the conversation. Verified: a follow-up "send that now"
-                    // made Cowork call PostMessage, blocked only by our own
-                    // config. So the handoff really is live, and the button
-                    // should say so.
-                    + 'title="Continue this conversation in Cowork. The draft '
-                    + 'is already there, and asking it to send will send for '
-                    + 'real.">Finish in Cowork</a>'
-                  : '')
+              ? cwOpenLink(a, 'Finish in Cowork') : '')
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
               + editedBadge + costBadge + cwHandoffBadge(a);
 

@@ -89,7 +89,7 @@ class TestContinuePreview(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.seen = {}
 
-        def runner(prompt, config, on_progress, conversation_id=None):
+        def runner(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             self.seen["prompt"] = prompt
             self.seen["config"] = config
             self.seen["conversation_id"] = conversation_id
@@ -145,7 +145,7 @@ class TestContinuePreview(unittest.TestCase):
             cr.continue_preview(4242, "t:u:cw-x", "shorter", log_dir=self.tmp)
 
     def test_a_failure_is_reported_not_swallowed(self):
-        def boom(prompt, config, on_progress, conversation_id=None):
+        def boom(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
             raise OSError("island unreachable")
 
         with mock.patch.object(cr, "_api_run_fn", boom):
