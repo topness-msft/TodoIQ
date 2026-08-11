@@ -2250,13 +2250,13 @@ function cwRedoRow(t) {
 }
 
 function cwRedoBtn(t) {
-  // "Start fresh" rather than "Redo": beside Refine, which keeps the
-  // conversation, the distinction that matters is whether the research is
-  // thrown away.
+  // Only for the FAILED card. On a ready card Refine does the same job in ~30s
+  // while keeping the research, so offering both there was three overlapping
+  // controls (Refine / Redo / Start over).
   return t.cw_redo_open ? ''
     : `<button class="cw-btn cw-btn-sec"
-        title="Throw away this conversation and research again from scratch. Slower and costs more than Refine."
-        onclick="cwToggleRedo(${t.id},true)">↻ Start fresh</button>`;
+        title="Run again, telling Cowork what to change."
+        onclick="cwToggleRedo(${t.id},true)">↻ Redo</button>`;
 }
 
 function cwRefineBtn(t) {
@@ -2456,7 +2456,7 @@ function renderCoworkCard(t) {
       : `<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(${t.id})">Copy draft</button>
        <button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(${t.id},true)">Edit</button>
        ${cwRefineBtn(t)}
-       ${cwRedoBtn(t)}
+       ${t.cw_conversation_id ? '' : cwRedoBtn(t)}
        <button class="cw-btn cw-btn-sec" data-testid="cw-start-over"
          title="Abandon this conversation and research again from scratch"
          onclick="cwStartOver(${t.id})">Start over</button>

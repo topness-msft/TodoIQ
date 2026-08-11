@@ -3126,15 +3126,16 @@ function cwInitFindingToggle(taskId) {
 }
 
 function cwRedoBlock(taskId) {
+    // Only for the FAILED card. On a ready card Refine does the same job in
+    // ~30s while keeping the research, so offering both there was three
+    // overlapping controls (Refine / Start fresh / Start over). A failed run
+    // has no conversation worth continuing, so re-running with a correction is
+    // still the right move.
     if (!_cwRedo[taskId]) {
-        // "Start fresh" rather than "Redo": beside Refine, which keeps the
-        // conversation, the distinction that matters is whether the research
-        // is thrown away.
         return '<button class="cw-btn cw-btn-sec" '
-            + 'title="Throw away this conversation and research again from '
-            + 'scratch. Slower and costs more than Refine." '
+            + 'title="Run again, telling Cowork what to change." '
             + 'onclick="cwToggleRedo(' + taskId + ',true)">'
-            + '&#8635; Start fresh</button>';
+            + '&#8635; Redo</button>';
     }
     return '';
 }
@@ -3348,7 +3349,7 @@ function renderCoworkCard(task) {
             : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
               + cwRefineBlock(a, task.id)
-              + cwRedoBlock(task.id)
+              + (a.conversation_id ? '' : cwRedoBlock(task.id))
               + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
               + 'title="Abandon this conversation and research again from scratch" '
               + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
