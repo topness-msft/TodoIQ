@@ -815,7 +815,7 @@ function renderDetailPane(task) {
     html += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
         + '<div class="notes-add-row">'
-        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Cowork)" '
+        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Coworker)" '
         + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTimestampedNote(' + task.id + ')}">'
         + '<button class="btn btn-sm notes-add-btn" onclick="addTimestampedNote(' + task.id + ')">+</button>'
         + '</div>'
@@ -2367,14 +2367,19 @@ function formatDate(dateStr) {
 }
 
 function priorityDot(priority, taskId) {
-    var p = priority || 3;
-    var balls = { 1: '\u25CF', 2: '\u25D5', 3: '\u25D1', 4: '\u25D4', 5: '\u25CB' };
-    var titleAttr = taskId ? ' title="Task #' + taskId + '"' : '';
-    return '<span class="priority-dot p' + p + '"' + titleAttr + '>' + balls[p] + '</span>';
+    // Harvey balls removed at Phil's request. Priority is still carried by the
+    // P1-P5 pill in the detail pane, so nothing is lost; the list just stops
+    // encoding it in a glyph most people have to decode.
+    return '';
 }
 
 function parseStatusIcon(parseStatus) {
     var status = parseStatus || 'parsed';
+    // Only states that mean "something is still owed" are worth a row-level
+    // indicator. A green tick on every parsed task is the majority case, so it
+    // carries no information and just adds noise to scan past. An error still
+    // shows, because that one IS actionable.
+    if (status === 'parsed') return '';
     return '<span class="parse-icon"><span class="parse-indicator ' + status + '"><span class="parse-ring"></span></span></span>';
 }
 
@@ -2910,8 +2915,10 @@ function cwShell(cls, badge, task, body, foot) {
     var label = CW_LABELS[task.action_type] || 'Action';
     return '<div class="cw-card ' + cls + '">'
         + '<div class="cw-head">'
-        + '<span class="cw-spark">&#10022;</span>'
-        + '<span class="cw-type">' + label + ' &middot; Cowork</span>'
+        // Referenced rather than inlined: the asset is gradient-based, and its
+        // <defs> ids would collide with every other copy on the page.
+        + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
+        + '<span class="cw-type">' + label + ' &middot; Coworker</span>'
         + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
         + '</div>'
         + '<div class="cw-body">' + body + '</div>'
@@ -2927,7 +2934,7 @@ function cwIntentBlock(task, editable) {
     var intent = task.coaching_text || '';
     if (!intent) return '';
     return '<div class="cw-intent">'
-        + '<span class="i-label">Asking Cowork to:</span> '
+        + '<span class="i-label">Asking Coworker to:</span> '
         + '<span id="coaching-display-' + task.id + '">' + escapeHtml(intent) + '</span>'
         + (editable
             ? '<span class="i-edit" onclick="toggleCoachingEdit(' + task.id + ')">Change</span>'
@@ -3151,7 +3158,7 @@ function cwHandoffAgo(ms) {
 function cwFindingBlock(finding, taskId) {
     if (!finding) return '';
     var expanded = Boolean(_cwFindingExpanded[taskId]);
-    return '<div class="cw-finding"><div class="cw-finding-label">What Cowork found</div>'
+    return '<div class="cw-finding"><div class="cw-finding-label">What Coworker found</div>'
         + '<div class="cw-finding-body' + (expanded ? '' : ' cw-finding-clamped')
         + '" id="cw-finding-' + taskId + '">'
         + renderCoworkMarkdown(_stripContextRefs(finding)) + '</div>'
@@ -3347,7 +3354,7 @@ function renderCoworkCard(task) {
     if (a === undefined) {
         cwLoad(task.id);
         return cwShell('', '', task,
-            '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '');
+            '<div class="cw-idle">Checking for a previous Coworker preview\u2026</div>', '');
     }
 
     if (a && a.state === 'previewing') {

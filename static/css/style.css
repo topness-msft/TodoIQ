@@ -2526,8 +2526,10 @@ html, body {
 }
 .cw-card.is-executed .cw-head { background: var(--skill-output-bg); }
 .cw-card.is-failed .cw-head   { background: var(--danger-bg, var(--accent-bg)); }
-.cw-spark { color: var(--accent); }
-.cw-card.is-executed .cw-spark { color: var(--success); }
+/* Now an <img> of the Coworker mark rather than a glyph, so it needs a box.
+   The asset carries its own gradients, so the old colour rules no longer
+   apply to it; the executed state is still signalled by the badge. */
+.cw-spark { width: 16px; height: 16px; display: inline-block; vertical-align: -3px; flex: 0 0 auto; }
 .cw-type { font-weight: 600; color: var(--text-primary); }
 .cw-badge {
     margin-left: auto;

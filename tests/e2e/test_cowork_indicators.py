@@ -41,7 +41,12 @@ class TestCoworkIndicators:
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
                 task.skill_output = 'Existing enrichment';
-                task.parse_status = 'parsed';
+                // A parsed task no longer renders a parse icon (the green tick
+                // was on the majority of rows and carried no information), and
+                // this test aligns the Cowork indicator against that icon. Use
+                // a state that still shows one, so the alignment assertion
+                // keeps testing alignment rather than the removal.
+                task.parse_status = 'unparsed';
                 task.cw_state = 'previewing';
                 task.cw_seen_at = null;
                 renderTaskList();
