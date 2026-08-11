@@ -60,6 +60,11 @@ behaviour at all.
     "teams": "work-teams-voice",
     "email": "work-email-voice",
     "default_channel": "teams"
+  },
+  "meeting_preferences": {
+    "default_minutes": 25,
+    "start_offset_minutes": 5,
+    "notes": ""
   }
 }
 ```
@@ -80,6 +85,25 @@ thread is written in the Teams voice regardless of what this is set to. It
 selects a voice only, and never binds a recipient, so a task with no destination
 still shows "No delivery destination selected". Leave it `null` to keep the
 neutral register, which avoids both a subject line and a sign-off.
+
+### `meeting_preferences` — how meetings get proposed
+
+Standing defaults applied whenever a draft proposes or books a meeting time.
+`default_minutes` is the length to assume, and `start_offset_minutes` is how far
+past the hour or half hour to start. The offset is fixed and does not scale with
+length: at 5, a 25 minute meeting runs :05 to :30 and a 55 minute meeting runs
+:05 to :00. `notes` is free text for anything else standing ("Never book me
+before 9am").
+
+Omit the block entirely and nothing is added to the prompt. Values that are not
+sane numbers are dropped rather than passed through, so a malformed block
+behaves like an absent one.
+
+This is deliberately not tied to a task's action type. The per-action guidance
+is, and only 6 of the 17 open tasks that read as scheduling are classified that
+way, so anything keyed to it applies about a third of the time. These
+preferences ride every prompt, phrased as a condition, so they also apply when a
+task is redirected into a meeting after the fact.
 
 ## Architecture
 

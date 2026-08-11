@@ -217,25 +217,30 @@ _VOICE_SKILL_DEFAULTS = {"teams": "work-teams-voice", "email": "work-email-voice
 # keeps a settings file from being able to argue with the safety line.
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
-_voice_settings_cache = {"doc": None, "value": None}
-
 
 def reset_voice_settings_cache() -> None:
-    """Drop the memoised settings block. Used by tests and after an edit."""
-    _voice_settings_cache["doc"] = None
-    _voice_settings_cache["value"] = None
+    """Test seam: force the next read to come from the settings file.
+
+    Reads are not memoised. An earlier version cached on the identity of the
+    parsed document, which could never hit because ``_read_settings`` parses
+    the file fresh every call and returns a new object. Rather than keep a
+    cache that only looked like one, the read is left direct: it is a small
+    local JSON file, and it is consulted once per prompt composition (one run),
+    not once per HTTP request. That is the distinction that mattered in the
+    handoff case, where a per-request NETWORK call cost 7s.
+    """
+    return None
+
+
+def _settings_doc() -> dict:
+    """The whole settings document, empty when absent or malformed."""
+    return workspace_settings._read_settings()
 
 
 def _voice_settings() -> dict:
     """The ``cowork_voice`` block, or an empty one when absent or malformed."""
-    doc = workspace_settings._read_settings()
-    if _voice_settings_cache["doc"] is doc and _voice_settings_cache["value"] is not None:
-        return _voice_settings_cache["value"]
-    block = doc.get("cowork_voice")
-    value = block if isinstance(block, dict) else {}
-    _voice_settings_cache["doc"] = doc
-    _voice_settings_cache["value"] = value
-    return value
+    block = _settings_doc().get("cowork_voice")
+    return block if isinstance(block, dict) else {}
 
 
 def voice_skill(channel: str):
@@ -283,6 +288,89 @@ def default_delivery_channel():
         return None
     channel = value.strip().lower()
     return channel if channel in _VOICE_SKILL_DEFAULTS else None
+
+
+_MEETING_NOTE_MAX = 400
+
+
+def meeting_preferences():
+    """The user's standing meeting defaults, or None when not configured.
+
+    Validated rather than trusted: a duration or offset that is not a sane
+    number is dropped instead of being pushed into the prompt. When nothing
+    survives validation this returns None and no layer is emitted, so a
+    malformed block behaves exactly like an absent one.
+    """
+    block = _settings_doc().get("meeting_preferences")
+    if not isinstance(block, dict):
+        return None
+
+    prefs = {}
+
+    minutes = block.get("default_minutes")
+    if isinstance(minutes, int) and not isinstance(minutes, bool) and 1 <= minutes <= 600:
+        prefs["default_minutes"] = minutes
+
+    offset = block.get("start_offset_minutes")
+    if isinstance(offset, int) and not isinstance(offset, bool) and 0 <= offset <= 60:
+        prefs["start_offset_minutes"] = offset
+
+    notes = block.get("notes")
+    if isinstance(notes, str):
+        # Collapse to a single line so freeform prose cannot fake a new layer
+        # header. [OUTPUT] is still emitted after this, so the safety line wins
+        # regardless, but there is no reason to let a settings value try.
+        cleaned = " ".join(notes.split())[:_MEETING_NOTE_MAX].strip()
+        if cleaned:
+            prefs["notes"] = cleaned
+
+    return prefs or None
+
+
+def _meeting_layer() -> str:
+    """Standing meeting defaults, phrased so they only bite when relevant.
+
+    Deliberately NOT keyed to action_type. The [ACTION] guidance is, and of 17
+    open tasks that read as scheduling only 6 carry
+    action_type='schedule-meeting', so anything keyed that way fires about a
+    third of the time. "Not consistently applied" was the actual complaint.
+    """
+    prefs = meeting_preferences()
+    if not prefs:
+        return ""
+
+    lines = []
+    minutes = prefs.get("default_minutes")
+    offset = prefs.get("start_offset_minutes")
+    if minutes:
+        lines.append(f"- Default to {minutes} minutes unless the task says otherwise.")
+    if offset:
+        # Stated as fixed, with both worked examples. The earlier wording gave
+        # a rationale ("so there is a gap after the previous meeting") that a
+        # model could reasonably scale with the length of the meeting. The
+        # offset does not move: 5 after is 5 after at any duration.
+        lines.append(
+            f"- Start at {offset} minutes past the hour or half hour, whatever "
+            f"the length: a 25 minute meeting runs :05 to :30, a 55 minute "
+            f"meeting runs :05 to :00. The offset never changes with duration."
+        )
+    if prefs.get("notes"):
+        lines.append(f"- {prefs['notes']}")
+
+    # The same classification gap applies to checking availability: it is stated
+    # in the [ACTION] block, which fires for about a third of the tasks that
+    # actually propose a time. Restated here in one line so it travels with the
+    # rest of the meeting mechanics.
+    lines.append(
+        "- Check every invitee's free/busy before offering a time, not just the "
+        "user's. If you cannot see a calendar, say so and frame the times as "
+        "suggestions to confirm."
+    )
+
+    return (
+        "If you propose or book a meeting time, use the user's standing "
+        "preferences:\n" + "\n".join(lines)
+    )
 
 
 def _skill_sentence(channel: str) -> str:
@@ -532,6 +620,16 @@ def compose_prompt(task, destination: dict | None = None,
     )
     if guidance:
         parts.append("[ACTION]\n" + guidance)
+
+    # Standing meeting defaults. Not keyed to action_type on purpose: the
+    # [ACTION] block above is, and only 6 of 17 open tasks that read as
+    # scheduling are classified that way, which is why the preference was
+    # applied inconsistently. Phrased as a condition so it costs two lines on
+    # prompts that never propose a meeting. Before the correction, so a Redo
+    # ("make it 60 minutes") still overrides it.
+    meetings = _meeting_layer()
+    if meetings:
+        parts.append("[MEETINGS]\n" + meetings)
 
     correction = _clean(redirect_text)
     if correction:
