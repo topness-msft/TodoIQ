@@ -2857,6 +2857,23 @@ var _cwRedo = {};
 // Refine = one more turn on the SAME Cowork conversation, keeping the research
 // it already did. Distinct from Redo, which starts a fresh conversation.
 var _cwRefine = {};
+// Live, unsaved textarea contents, keyed by task id.
+//
+// A WebSocket `task_updated` calls renderDetailPane, which rebuilds the card
+// from scratch — silently discarding whatever the user had typed into the draft
+// or instruction box. That really happened: an in-place draft edit vanished and
+// only the instruction reached Cowork. Buffering on every keystroke means a
+// re-render restores the edit instead of destroying it.
+var _cwDraftBuf = {};
+var _cwInstrBuf = {};
+
+function cwBufferDraft(taskId, value) { _cwDraftBuf[taskId] = value; }
+function cwBufferInstr(taskId, value) { _cwInstrBuf[taskId] = value; }
+
+function cwClearBuffers(taskId) {
+    delete _cwDraftBuf[taskId];
+    delete _cwInstrBuf[taskId];
+}
 var _cwPollers = {};
 var _cwStartedAt = {};
 
@@ -3208,15 +3225,19 @@ function cwRefineRow(a, taskId) {
     // Instruction only. The DRAFT is edited in place, in the card's own draft
     // area, rather than duplicated into a second box below it — showing the
     // same text twice made it ambiguous which copy was the real one.
+    var instr = _cwInstrBuf[taskId] || '';
     return '<div class="cw-refine" data-testid="cw-refine-row">'
-        + '<div class="cw-refine-label">Edit the draft above, and tell Cowork '
-        + 'what to change. Both are sent.</div>'
+        + '<div class="cw-refine-label">Change the draft above, or say what to '
+        + 'change here. Either is enough.</div>'
         + '<textarea class="cw-refine-box" id="cw-refine-' + taskId + '" rows="2" '
-        + 'placeholder="e.g. make it shorter and aim it just at Greg"></textarea>'
+        + 'oninput="cwBufferInstr(' + taskId + ',this.value)" '
+        + 'placeholder="e.g. make it shorter and aim it just at Greg">'
+        + escapeHtml(instr) + '</textarea>'
         + '<div class="cw-refine-actions">'
-        + '<span class="i-edit" data-testid="cw-refine-send" '
-        + 'onclick="cwSendRefine(' + taskId + ')">Send to Cowork</span>'
-        + '<span class="i-edit i-muted" onclick="cwToggleRefine(' + taskId + ',false)">Cancel</span>'
+        + '<button class="cw-btn cw-btn-go" data-testid="cw-refine-send" '
+        + 'onclick="cwSendRefine(' + taskId + ')">Send to Cowork</button>'
+        + '<button class="cw-btn cw-btn-ghost" '
+        + 'onclick="cwToggleRefine(' + taskId + ',false)">Cancel</button>'
         + '</div></div>';
 }
 
@@ -3227,6 +3248,7 @@ function cwToggleRefine(taskId, on) {
         delete _cwEditing[taskId];
     } else {
         delete _cwRefine[taskId];
+        cwClearBuffers(taskId);
     }
     cwRerender(taskId);
     if (on) {
@@ -3238,10 +3260,11 @@ function cwToggleRefine(taskId, on) {
 function cwSendRefine(taskId) {
     var box = document.getElementById('cw-refine-' + taskId);
     var draftBox = document.getElementById('cw-draft-' + taskId);
-    if (!box) return;
-    var instruction = (box.value || '').trim();
+    // Read the live DOM first, but fall back to the buffer: a re-render between
+    // typing and clicking would otherwise lose the edit silently.
+    var instruction = ((box ? box.value : _cwInstrBuf[taskId]) || '').trim();
     var a = _cwActions[taskId] || {};
-    var edited = draftBox ? (draftBox.value || '').trim() : '';
+    var edited = ((draftBox ? draftBox.value : _cwDraftBuf[taskId]) || '').trim();
     var original = ((a.draft_edited || a.draft) || '').trim();
 
     // Either an instruction or an in-place edit is enough to act on. Sending
@@ -3259,6 +3282,7 @@ function cwSendRefine(taskId) {
 
     delete _cwRefine[taskId];
     delete _cwEditing[taskId];
+    cwClearBuffers(taskId);
     fetch('/api/tasks/' + taskId + '/cowork/refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3323,9 +3347,15 @@ function renderCoworkCard(task) {
         // gets sent.
         var editing = !!_cwEditing[task.id] || refining;
         var draft = cwCurrentDraft(a);
+        // A pending edit outranks the stored draft: a re-render must not throw
+        // away what the user is in the middle of typing.
+        if (editing && _cwDraftBuf[task.id] !== undefined) {
+            draft = _cwDraftBuf[task.id];
+        }
         var findingHtml = cwFindingBlock(a.finding, task.id);
         var draftHtml = editing
-            ? '<textarea class="cw-draft is-editing" id="cw-draft-' + task.id + '" rows="8">'
+            ? '<textarea class="cw-draft is-editing" id="cw-draft-' + task.id + '" rows="8" '
+              + 'oninput="cwBufferDraft(' + task.id + ',this.value)">'
               + escapeHtml(draft) + '</textarea>'
             : '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(draft) + '</div>';
         var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
@@ -3460,15 +3490,23 @@ function cwToggleRedo(taskId, on) {
 }
 
 function cwToggleEdit(taskId, on) {
-    if (on) { _cwEditing[taskId] = true; } else { delete _cwEditing[taskId]; }
+    if (on) {
+        _cwEditing[taskId] = true;
+    } else {
+        delete _cwEditing[taskId];
+        cwClearBuffers(taskId);  // Cancel really discards.
+    }
     cwRerender(taskId);
 }
 
 function cwSaveDraft(taskId) {
     var box = document.getElementById('cw-draft-' + taskId);
-    if (!box) return;
-    var text = box.value;
+    // Fall back to the buffer, so a re-render between typing and clicking Save
+    // does not silently discard the edit.
+    var text = box ? box.value : _cwDraftBuf[taskId];
+    if (text === undefined || text === null) return;
     delete _cwEditing[taskId];
+    cwClearBuffers(taskId);
 
     fetch('/api/tasks/' + taskId + '/cowork', {
         method: 'PUT',

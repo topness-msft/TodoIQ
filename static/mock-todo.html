@@ -2275,21 +2275,30 @@ function cwRefineRow(t) {
   // area, rather than duplicated into a second box below it - showing the same
   // text twice made it ambiguous which copy was the real one.
   return `<div class="cw-refine" data-testid="cw-refine-row">
-    <div class="cw-refine-label">Edit the draft above, and tell Cowork what to change. Both are sent.</div>
+    <div class="cw-refine-label">Change the draft above, or say what to change here. Either is enough.</div>
     <textarea class="cw-refine-box" id="cw-refine-${t.id}" rows="2"
-      placeholder="e.g. make it shorter and aim it just at Greg"></textarea>
+      oninput="cwBufferInstr(${t.id},this.value)"
+      placeholder="e.g. make it shorter and aim it just at Greg">${esc(t.cw_instr_buf || '')}</textarea>
     <div class="cw-refine-actions">
-      <span class="i-edit" data-testid="cw-refine-send" onclick="cwSendRefine(${t.id})">Send to Cowork</span>
-      <span class="i-edit" style="color:var(--text-muted)"
-        onclick="cwToggleRefine(${t.id},false)">Cancel</span></div></div>`;
+      <button class="cw-btn cw-btn-go" data-testid="cw-refine-send" onclick="cwSendRefine(${t.id})">Send to Cowork</button>
+      <button class="cw-btn cw-btn-ghost" onclick="cwToggleRefine(${t.id},false)">Cancel</button>
+    </div></div>`;
 }
+
+// Live, unsaved textarea contents. A WebSocket task_updated rebuilds the card
+// and would otherwise silently discard whatever the user was typing - which
+// really happened: an in-place draft edit vanished and only the instruction
+// reached Cowork.
+function cwBufferDraft(id, value) { const t = cwTask(id); if (t) t.cw_draft_buf = value; }
+function cwBufferInstr(id, value) { const t = cwTask(id); if (t) t.cw_instr_buf = value; }
+function cwClearBuffers(t) { if (t) { delete t.cw_draft_buf; delete t.cw_instr_buf; } }
 
 function cwToggleRefine(id, on) {
   const t = cwTask(id);
   if (!t) return;
   t.cw_refine_open = on;
   // Refine edits the draft in place, so leave any separate Edit mode.
-  if (on) t.cw_editing = false;
+  if (on) t.cw_editing = false; else cwClearBuffers(t);
   cwRerender(id);
   if (on) {
     const box = document.getElementById(`cw-refine-${id}`);
@@ -2299,11 +2308,13 @@ function cwToggleRefine(id, on) {
 
 async function cwSendRefine(id) {
   const t = cwTask(id);
+  if (!t) return;
   const box = document.getElementById(`cw-refine-${id}`);
-  if (!t || !box) return;
-  const instruction = (box.value || '').trim();
   const draftBox = document.getElementById(`cw-edit-${id}`);
-  const edited = draftBox ? (draftBox.value || '').trim() : '';
+  // Read the live DOM first, but fall back to the buffer: a re-render between
+  // typing and clicking would otherwise lose the edit silently.
+  const instruction = ((box ? box.value : t.cw_instr_buf) || '').trim();
+  const edited = ((draftBox ? draftBox.value : t.cw_draft_buf) || '').trim();
   const original = ((t.cw_draft_edited || t.cw_draft) || '').trim();
 
   // Either an instruction or an in-place edit is enough to act on. Sending the
@@ -2320,6 +2331,7 @@ async function cwSendRefine(id) {
 
   t.cw_refine_open = false;
   t.cw_editing = false;
+  cwClearBuffers(t);
   try {
     const res = await fetch(`/api/tasks/${id}/cowork/refine`, {
       method: 'POST',
@@ -2444,7 +2456,8 @@ function renderCoworkCard(t) {
        ${t.cw_redirect_text ? `<div class="cw-intent"><span class="i-label">Correction:</span> ${esc(t.cw_redirect_text)}</div>` : ''}
        ${cwFindingBlock(t.cw_finding, t.id)}
        ${t.cw_refine_open
-          ? `<textarea class="cw-draft" id="cw-edit-${t.id}" rows="8">${esc(draft)}</textarea>`
+          ? `<textarea class="cw-draft" id="cw-edit-${t.id}" rows="8"
+               oninput="cwBufferDraft(${t.id},this.value)">${esc(t.cw_draft_buf !== undefined ? t.cw_draft_buf : draft)}</textarea>`
           : `<div class="cw-draft cw-markdown">${renderCoworkMarkdown(draft)}</div>`}
        ${cwDestBlock(t)}
        ${cwRefineRow(t)}

@@ -238,6 +238,46 @@ _VOICE_NEUTRAL = (
 _VOICE_BY_CHANNEL = {"email": _VOICE_EMAIL, "teams": _VOICE_TEAMS}
 
 
+# What a given KIND of action has to get right, beyond what the task text says.
+#
+# Added after walking a real scheduling task through the flow: Cowork checked
+# the user's own calendar for six weeks, proposed three slots and wrote the
+# message, but never checked the OTHER person's availability and proposed no
+# agenda. The draft therefore offered times they might not have free, and gave
+# them nothing to prepare against.
+#
+# Deliberately narrow. Only action types where the generic prompt demonstrably
+# produces a worse draft get a block, and each block says what to CHECK and
+# what to INCLUDE rather than restating the task.
+_ACTION_GUIDANCE = {
+    "schedule-meeting": (
+        "Check BOTH calendars before proposing anything: the user's and every "
+        "invitee's free/busy. Only offer slots that are genuinely open for "
+        "everyone.\n"
+        "- If you cannot see their calendar, say so plainly in the findings and "
+        "frame the times as suggestions to confirm rather than as open slots.\n"
+        "- Respect existing commitments, working hours and time zones, and give "
+        "the time zone in the draft when the invitees are not all in one.\n"
+        "- Propose a short agenda or a one-line purpose, so the invitee knows "
+        "what the meeting is for and can prepare.\n"
+        "- State the proposed length, and whether it recurs."
+    ),
+    "prepare": (
+        "The user is preparing for something that has already been scheduled. "
+        "Anchor on what is actually on the calendar: date, attendees and any "
+        "material already attached or shared.\n"
+        "- Surface what has changed since it was booked, and what decisions the "
+        "meeting has to reach.\n"
+        "- Draft the preparation itself, not advice about preparing."
+    ),
+    "review-document": (
+        "Read the document before commenting on it. If you cannot open it, say "
+        "so rather than reviewing from the file name.\n"
+        "- Give specific, located feedback, not general impressions."
+    ),
+}
+
+
 
 def _get(task, key, default=""):
     """Read a field from a dict or sqlite3.Row without assuming which."""
@@ -348,6 +388,14 @@ def compose_prompt(task, destination: dict | None = None,
 
     parts.append("[VOICE]\n" + _VOICE_BY_CHANNEL.get(
         (delivery_channel or "").strip().lower(), _VOICE_NEUTRAL))
+
+    # What this KIND of action has to get right. After the task and source so it
+    # can refer to them, before the correction so the user can still override it.
+    guidance = _ACTION_GUIDANCE.get(
+        _clean(_get(task, "action_type")).strip().lower()
+    )
+    if guidance:
+        parts.append("[ACTION]\n" + guidance)
 
     correction = _clean(redirect_text)
     if correction:
