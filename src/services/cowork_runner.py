@@ -312,6 +312,27 @@ def _strip_workiq(text: str) -> str:
     return _WORKIQ_RE.sub("", text)
 
 
+_HANDOFF_TITLE_MAX = 90
+_HANDOFF_TITLE_PREFIX = "TodoIQ: "
+
+
+def _handoff_title_line(title) -> str:
+    """The single line the Cowork task list will show for this conversation.
+
+    Kept on one line and short, because a task list renders a truncated prefix.
+    The "TodoIQ:" marker is what tells a handed-off task apart from one the user
+    started in Cowork themselves.
+    """
+    text = " ".join((_clean(title) or "").split())
+    if not text:
+        return _HANDOFF_TITLE_PREFIX.rstrip() + " task"
+
+    budget = _HANDOFF_TITLE_MAX - len(_HANDOFF_TITLE_PREFIX)
+    if len(text) > budget:
+        text = text[: budget - 1].rstrip() + "\u2026"
+    return _HANDOFF_TITLE_PREFIX + text
+
+
 def compose_prompt(task, destination: dict | None = None,
                    redirect_text: str | None = None,
                    delivery_channel: str | None = None) -> str:
@@ -338,6 +359,13 @@ def compose_prompt(task, destination: dict | None = None,
         destination = parse_source_url(_get(task, "source_url") or None)
 
     parts: list[str] = []
+
+    # The Cowork web app derives a task title by truncating the opening text of
+    # the prompt, and /v1/subscribe has no title field to override it. Without
+    # this line every handed-off task is listed as "[ROLE] You are helping the
+    # user act", so the whole list is unreadable. Emitted above the tagged
+    # layers, which are semantic and must keep their order.
+    parts.append(_handoff_title_line(_get(task, "title")))
 
     parts.append(
         "[ROLE]\n"
