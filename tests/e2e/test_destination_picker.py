@@ -368,6 +368,64 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+    def test_dashboard_keeps_the_choose_note_when_there_is_no_recipient(
+        self, page: Page, base_url
+    ):
+        """An app-wide voice preference is not a destination.
+
+        The voice setting can bind a channel on a task that carries no audience
+        signal at all. The channel note reads "Email to this recipient." and
+        there is no recipient, so it must NOT displace the standing instruction
+        to pick a destination before any send. Losing that would trade a safety
+        surface for a preference.
+        """
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_dashboard(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="none",
+                    destination_ref=None,
+                    destination_display=None,
+                    delivery_channel="email",
+                    destination_source=None,
+                ),
+            )
+            expect(page.get_by_test_id("dest-channel-chip")).to_have_text("Email")
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "Choose Teams or email" in block
+            assert "to this recipient" not in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_todoiq_keeps_the_choose_note_when_there_is_no_recipient(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_todo(
+                page,
+                base_url,
+                task_id,
+                _action(
+                    task_id,
+                    destination_kind="none",
+                    destination_ref=None,
+                    destination_display=None,
+                    delivery_channel="email",
+                    destination_source=None,
+                ),
+            )
+            expect(page.get_by_test_id("dest-channel-chip")).to_have_text("Email")
+            block = page.locator(".cw-dest").first.inner_text()
+            assert "Choose Teams or email" in block
+            assert "to this recipient" not in block
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_no_send_or_execute_control_exists(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         try:

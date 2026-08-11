@@ -46,6 +46,41 @@ Skills generate contextual drafts for individual tasks:
 | `follow-up` | Draft a follow-up message |
 | `prepare` | Build meeting/presentation prep notes |
 
+## Settings
+
+App-wide settings live in `data/settings.json`, which is gitignored because it
+is per-user. Every value fails closed: if the file is missing, unreadable or
+malformed, TodoIQ falls back to its shipped defaults rather than to no
+behaviour at all.
+
+```json
+{
+  "cowork_api_transport": true,
+  "cowork_voice": {
+    "teams": "work-teams-voice",
+    "email": "work-email-voice",
+    "default_channel": "teams"
+  }
+}
+```
+
+### `cowork_voice` — which voice a draft is written in
+
+Cowork drafts are written in your own voice using a Cowork skill, chosen by the
+channel the task is bound to. Set `teams` and `email` to the skill you want for
+each. Set either to `null` to name no skill for that channel; the inline
+mechanics (contractions, no em-dashes, no corporate filler, channel-specific
+openings and sign-offs) still apply, because a skill lives outside this repo and
+can change or fail to resolve without a code change.
+
+`default_channel` is the voice used when a task carries no channel signal of its
+own — typically one you typed yourself rather than one derived from a Teams
+thread or a mail item. It is the LAST thing consulted: a task from a Teams
+thread is written in the Teams voice regardless of what this is set to. It
+selects a voice only, and never binds a recipient, so a task with no destination
+still shows "No delivery destination selected". Leave it `null` to keep the
+neutral register, which avoids both a subject line and a sign-off.
+
 ## Architecture
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture, database schema, and development notes.

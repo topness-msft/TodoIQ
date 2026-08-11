@@ -197,34 +197,134 @@ _SKILL_NOTE = (
     "unavailable rely on them alone."
 )
 
-_VOICE_EMAIL = (
-    "Use the skill work-email-voice to set the voice of this draft. " + _SKILL_NOTE
-    + "\n\nThis draft is an Outlook email from the user's Microsoft work account.\n"
-    + _VOICE_SHARED + "\n"
-    "- Give it a short, specific, plain subject line. No hype.\n"
-    "- Open \"Hi {First},\" for peers, or just \"{First},\" for a leader or an "
-    "active thread. Never \"Dear\", \"Hello,\" or \"Team,\".\n"
-    "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" "
-    "as a closing line; gratitude belongs in the body. The signature block "
-    "auto-appends, so do not retype it."
-)
+# App-wide voice settings, read from the gitignored data/settings.json:
+#
+#   "cowork_voice": {
+#     "teams": "work-teams-voice",
+#     "email": "work-email-voice",
+#     "default_channel": null
+#   }
+#
+# Skill names are configurable because they name something outside this repo;
+# the mechanics below them are not, for the reason recorded on _VOICE_SHARED.
+# Every read fails closed to these defaults, so a malformed settings file
+# degrades to today's behaviour rather than to no voice at all.
+_VOICE_SKILL_DEFAULTS = {"teams": "work-teams-voice", "email": "work-email-voice"}
+
+# A skill name is an identifier. This value is user-controlled text that lands
+# in a prompt whose last layer carries the write barrier, so anything that is
+# not a bare name is refused and the default is used instead. Cheap, and it
+# keeps a settings file from being able to argue with the safety line.
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+_voice_settings_cache = {"doc": None, "value": None}
+
+
+def reset_voice_settings_cache() -> None:
+    """Drop the memoised settings block. Used by tests and after an edit."""
+    _voice_settings_cache["doc"] = None
+    _voice_settings_cache["value"] = None
+
+
+def _voice_settings() -> dict:
+    """The ``cowork_voice`` block, or an empty one when absent or malformed."""
+    doc = workspace_settings._read_settings()
+    if _voice_settings_cache["doc"] is doc and _voice_settings_cache["value"] is not None:
+        return _voice_settings_cache["value"]
+    block = doc.get("cowork_voice")
+    value = block if isinstance(block, dict) else {}
+    _voice_settings_cache["doc"] = doc
+    _voice_settings_cache["value"] = value
+    return value
+
+
+def voice_skill(channel: str):
+    """Which voice skill to name for this channel, or None to name none.
+
+    Returns the configured skill for a known channel, falling back to the
+    shipped default. An explicit null or blank turns the skill reference off
+    while leaving the inline mechanics in place, which is the supported way to
+    run on the inline floor alone.
+    """
+    key = (channel or "").strip().lower()
+    if key not in _VOICE_SKILL_DEFAULTS:
+        return None
+
+    if key not in _voice_settings():
+        return _VOICE_SKILL_DEFAULTS[key]
+
+    configured = _voice_settings()[key]
+    if configured is None:
+        return None
+    if not isinstance(configured, str):
+        return _VOICE_SKILL_DEFAULTS[key]
+    name = configured.strip()
+    if not name:
+        return None
+    if not _SKILL_NAME_RE.match(name):
+        logger.warning(
+            "ignoring cowork_voice.%s: %r is not a skill name", key, configured[:40]
+        )
+        return _VOICE_SKILL_DEFAULTS[key]
+    return name
+
+
+def default_delivery_channel():
+    """Channel to assume when the task itself gives no signal, or None.
+
+    Unset by default. Measured on live data, 24% of open tasks (all typed by
+    the user rather than derived from Teams or mail) resolve to no channel, so
+    neither voice skill fires. This is what lets an app-wide voice apply to
+    those without pretending a destination was detected: it selects a register,
+    it never binds an audience.
+    """
+    value = _voice_settings().get("default_channel")
+    if not isinstance(value, str):
+        return None
+    channel = value.strip().lower()
+    return channel if channel in _VOICE_SKILL_DEFAULTS else None
+
+
+def _skill_sentence(channel: str) -> str:
+    """"Use the skill X..." line, or nothing when no skill is configured."""
+    name = voice_skill(channel)
+    if not name:
+        return ""
+    return f"Use the skill {name} to set the voice of this draft. {_SKILL_NOTE}\n\n"
+
+
+def _voice_email() -> str:
+    return (
+        _skill_sentence("email")
+        + "This draft is an Outlook email from the user's Microsoft work account.\n"
+        + _VOICE_SHARED + "\n"
+        "- Give it a short, specific, plain subject line. No hype.\n"
+        "- Open \"Hi {First},\" for peers, or just \"{First},\" for a leader or an "
+        "active thread. Never \"Dear\", \"Hello,\" or \"Team,\".\n"
+        "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" "
+        "as a closing line; gratitude belongs in the body. The signature block "
+        "auto-appends, so do not retype it."
+    )
+
 
 # Teams mechanics below were corrected by a WorkIQ study of real sent messages.
 # An earlier hand-written version claimed an emoji could soften a nudge; the data
 # says he uses capitalisation and punctuation instead, and the name-dash opening
 # is his signature move.
-_VOICE_TEAMS = (
-    "Use the skill work-teams-voice to set the voice of this draft. " + _SKILL_NOTE
-    + "\n\nThis draft is a Teams chat message, not an email. Match chat register.\n"
-    + _VOICE_SHARED + "\n"
-    "- No subject, no greeting block, no sign-off and no signature.\n"
-    "- Open with the name-dash pattern: \"Hi {First} - \", \"Hey {First} - \" or "
-    "just \"{First} - \". In an active back-and-forth, drop the name entirely.\n"
-    "- Keep it to 1-2 sentences unless it is a group coordination post.\n"
-    "- No emoji. Enthusiasm is capitalisation and punctuation, not emoji.\n"
-    "- Never chase with pressure: no \"Just following up\", \"Any update?\" or "
-    "\"Did you see my last message?\". Reference the existing context instead."
-)
+def _voice_teams() -> str:
+    return (
+        _skill_sentence("teams")
+        + "This draft is a Teams chat message, not an email. Match chat register.\n"
+        + _VOICE_SHARED + "\n"
+        "- No subject, no greeting block, no sign-off and no signature.\n"
+        "- Open with the name-dash pattern: \"Hi {First} - \", \"Hey {First} - \" or "
+        "just \"{First} - \". In an active back-and-forth, drop the name entirely.\n"
+        "- Keep it to 1-2 sentences unless it is a group coordination post.\n"
+        "- No emoji. Enthusiasm is capitalisation and punctuation, not emoji.\n"
+        "- Never chase with pressure: no \"Just following up\", \"Any update?\" or "
+        "\"Did you see my last message?\". Reference the existing context instead."
+    )
+
 
 # No bound channel means the transport is genuinely unknown. Both skills are
 # channel-specific, so there is no correct one to pull, and guessing email
@@ -235,7 +335,16 @@ _VOICE_NEUTRAL = (
     + _VOICE_SHARED
 )
 
-_VOICE_BY_CHANNEL = {"email": _VOICE_EMAIL, "teams": _VOICE_TEAMS}
+
+def _voice_for(channel: str) -> str:
+    """The [VOICE] layer for a bound channel, or the neutral register."""
+    key = (channel or "").strip().lower()
+    if key == "email":
+        return _voice_email()
+    if key == "teams":
+        return _voice_teams()
+    return _VOICE_NEUTRAL
+
 
 
 # What a given KIND of action has to get right, beyond what the task text says.
@@ -414,8 +523,7 @@ def compose_prompt(task, destination: dict | None = None,
     if source_lines:
         parts.append("[SOURCE]\n" + "\n".join(source_lines))
 
-    parts.append("[VOICE]\n" + _VOICE_BY_CHANNEL.get(
-        (delivery_channel or "").strip().lower(), _VOICE_NEUTRAL))
+    parts.append("[VOICE]\n" + _voice_for(delivery_channel))
 
     # What this KIND of action has to get right. After the task and source so it
     # can refer to them, before the correction so the user can still override it.
@@ -738,6 +846,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from . import workspace_settings
 from .workspace_settings import api_transport_enabled
 
 logger = logging.getLogger(__name__)

@@ -2948,8 +2948,13 @@ function cwDestBlock(action, task) {
     var confirmed = !!action.destination_confirmed_at;
     var display = action.destination_display || action.destination_ref || d.label;
     var chan = CW_CHANNEL[action.delivery_channel] || null;
+    // A channel with no recipient is a voice preference, not a destination. Its
+    // note says "...to this recipient", so applying it where none is bound both
+    // contradicts the line above it and displaces the standing instruction to
+    // pick one. The instruction is a safety surface; it outranks the preference.
+    var hasRecipient = !!(action.destination_ref || action.destination_display);
     // A broadcast warning outranks any transport note — never trade it away.
-    var note = (!risky && chan
+    var note = (!risky && chan && hasRecipient
         && action.delivery_channel !== CW_KIND_CHANNEL[action.destination_kind])
         ? chan.note : d.note;
     // ...and it outranks the action-specific note too. Only a non-broadcast

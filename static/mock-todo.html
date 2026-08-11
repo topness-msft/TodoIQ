@@ -2099,8 +2099,14 @@ function cwDestBlock(t) {
   const confirmed = !!t.cw_dest_confirmed_at;
   const display = t.cw_dest_display || t.cw_dest_ref || d.label;
   const chan = CW_CHANNEL[t.cw_delivery_channel] || null;
+  // A channel with no recipient is a voice preference, not a destination. Its
+  // note says "...to this recipient", so applying it where none is bound both
+  // contradicts the line above it and displaces the standing instruction to
+  // pick one. The instruction is a safety surface; it outranks the preference.
+  const hasRecipient = !!(t.cw_dest_ref || t.cw_dest_display);
   // A broadcast warning outranks any transport note — never trade it away.
-  const note = (!risky && chan && t.cw_delivery_channel !== CW_KIND_CHANNEL[kind])
+  const note = (!risky && chan && hasRecipient
+      && t.cw_delivery_channel !== CW_KIND_CHANNEL[kind])
     ? chan.note : d.note;
   // A scheduling task ends in a calendar invite, so the reply-mechanics note
   // reads wrong beside it. The AUDIENCE binding still stands - only the

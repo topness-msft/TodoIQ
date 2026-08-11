@@ -34,6 +34,7 @@ from ..services.cowork_runner import (
     compose_prompt,
     compose_refine_prompt,
     continue_preview,
+    default_delivery_channel,
     get_result,
     get_progress,
     get_cached_cowork_island,
@@ -194,16 +195,23 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     # than prose, so it is never overridden here.
     inferred = _infer_channel_from_text(task) if channel is None else None
 
+    # Last of all, the user's app-wide preference. Ordered below every piece of
+    # evidence on purpose: a task from a Teams thread is a Teams message no
+    # matter what the preference says. This only selects a voice register for
+    # tasks that carry no signal at all; it can never bind an audience, because
+    # destination_ref is not derived from it.
+    fallback = default_delivery_channel()
+
     if person:
         return {
-            "delivery_channel": channel or inferred,
+            "delivery_channel": channel or inferred or fallback,
             "destination_ref": person["email"] or person["name"],
             "destination_display": person["name"],
             "destination_source": "auto_key_people",
         }
 
     return {
-        "delivery_channel": channel or inferred,
+        "delivery_channel": channel or inferred or fallback,
         "destination_ref": None,
         "destination_display": None,
         # Only claim text provenance when nothing else determined the binding,
