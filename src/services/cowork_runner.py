@@ -714,18 +714,61 @@ def _default_island_probe():
         return None
 
 
+def _island_from_routing_cache():
+    """The island URL from the CLI's routing cache, without importing it.
+
+    ``%APPDATA%/cowork/routing_cache.json`` is plain JSON that the CLI keeps
+    up to date, and every API spike read it directly. Preferring it removes a
+    ``cowork_cli`` import from the critical path, so a broken or moved package
+    degrades island resolution instead of taking it out entirely.
+
+    Returns None on every failure; the CLI probe is still the fallback.
+    """
+    try:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        path = Path(appdata) / "cowork" / "routing_cache.json"
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if not isinstance(entries, list) or not entries:
+            return None
+        endpoint = ((entries[0] or {}).get("result") or {}).get("endpoint")
+        return endpoint or None
+    except Exception:  # noqa: BLE001
+        logger.debug("routing cache unreadable", exc_info=True)
+        return None
+
+
 def resolve_cowork_island():
-    """Probe once and cache the resolved runtime URL, including failed probes."""
+    """Probe once and cache the resolved runtime URL, including failed probes.
+
+    Prefers the routing cache file over the CLI probe: same answer, no Python
+    import, so the API transport keeps working if ``cowork_cli`` breaks.
+    """
     global _island_probe_attempted, _cached_island_url
     with _island_probe_lock:
         if _island_probe_attempted:
             return _cached_island_url
-        probe = _ISLAND_PROBE_FN or _default_island_probe
-        try:
-            resolved = probe()
-        except Exception as exc:
-            logger.warning("Cowork island probe failed: %s", exc)
-            resolved = None
+        # An explicitly injected probe is an override and wins outright — that
+        # is what the seam is for, and it also stops a test reading the real
+        # machine's routing cache.
+        if _ISLAND_PROBE_FN is not None:
+            try:
+                resolved = _ISLAND_PROBE_FN()
+            except Exception as exc:
+                logger.warning("Cowork island probe failed: %s", exc)
+                resolved = None
+        else:
+            resolved = _island_from_routing_cache()
+            if not resolved:
+                try:
+                    resolved = _default_island_probe()
+                except Exception as exc:
+                    logger.warning("Cowork island probe failed: %s", exc)
+                    resolved = None
         _cached_island_url = resolved or None
         _island_probe_attempted = True
         return _cached_island_url
@@ -1768,6 +1811,29 @@ def _active_run_count() -> int:
 _api_run_fn = None
 
 
+class CoworkAuthExpired(Exception):
+    """MSAL could not produce a token silently — the refresh token is gone.
+
+    Distinct from a transport error: the fix is to re-authenticate, not to
+    retry. The subprocess path detects the same condition by finding
+    `cowork auth login` on stderr.
+    """
+
+
+# HTTP statuses that mean "your token is no good", as opposed to "the service
+# is unwell". Re-authenticating on a 500 would burn a device-code prompt on a
+# server problem and still fail.
+_AUTH_HTTP_CODES = ("401", "403")
+
+
+def _is_auth_failure(exc) -> bool:
+    """Does this exception mean we need to re-authenticate?"""
+    if isinstance(exc, CoworkAuthExpired):
+        return True
+    text = str(exc)
+    return any(f"HTTP {code}" in text for code in _AUTH_HTTP_CODES)
+
+
 def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
@@ -1775,21 +1841,31 @@ def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
     ``parse_cowork_output`` and both UIs read it and neither knows which
     transport produced it.
 
-    Cancellation is the capability the subprocess path lacks and the reason this
-    exists: the CLI-as-library spike proved ``close_live()`` cannot halt a turn,
-    while the API exposes a real cancel. The route is not wired up yet — that is
-    a later phase — but this is the shape it hangs off.
+    Auth recovery mirrors ``_collect`` (L1358-1404): auth expires SILENTLY, so
+    one ``cowork auth login`` and exactly one retry. Without this an expired
+    token strands a preview, which is the correctness gap that kept the API
+    transport off by default.
     """
     concurrent = _active_run_count()
     cost_before = _cost_snapshot_fn()
 
     error = None
     stdout = ""
+    auth_failed = False
     try:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         runner = _api_run_fn or _api_run_default
-        payload = runner(prompt, config, lambda text: _append_progress(label, text))
+        on_progress = lambda text: _append_progress(label, text)  # noqa: E731
+        try:
+            payload = runner(prompt, config, on_progress)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_auth_failure(exc):
+                raise
+            payload = _api_reauth_and_retry(runner, prompt, config, on_progress)
         stdout = json.dumps(payload)
+    except CoworkAuthExpired as exc:
+        auth_failed = True
+        error = str(exc)
     except Exception as exc:  # noqa: BLE001
         logger.debug("api transport run failed", exc_info=True)
         error = f"Cowork run failed: {exc}"
@@ -1806,9 +1882,47 @@ def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
                 "stdout": stdout,
                 "stderr": "",
                 "error": error,
-                "auth_failed": False,
+                "auth_failed": auth_failed,
                 "cost_credits": cost,
             }
+
+
+def _api_reauth_and_retry(runner, prompt, config, on_progress):
+    """Log in once, then retry the run exactly once.
+
+    Not a loop: a token that is still bad after a successful login is a real
+    problem and must surface rather than spin.
+    """
+    logger.info("API transport: token rejected, attempting re-authentication")
+    with _auth_recovery_lock:
+        try:
+            login_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "timeout": 120,
+            }
+            if os.name == "nt":
+                login_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            login = _auth_login_fn(["cowork", "auth", "login"], **login_kwargs)
+        except Exception:  # noqa: BLE001
+            login = None
+
+    if login is None or login.returncode != 0:
+        raise CoworkAuthExpired(
+            "Cowork is not authenticated. Run `cowork auth login` and try again."
+        )
+
+    try:
+        return runner(prompt, config, on_progress)
+    except Exception as exc:  # noqa: BLE001
+        if _is_auth_failure(exc):
+            raise CoworkAuthExpired(
+                "Cowork is not authenticated. Run `cowork auth login` and try "
+                "again."
+            ) from exc
+        raise
 
 
 def _api_run_default(prompt, config, on_progress):
@@ -1831,7 +1945,15 @@ def _api_run_default(prompt, config, on_progress):
         _API_CLIENT_ID, authority=_API_AUTHORITY, token_cache=cache,
     )
     account = app.get_accounts()[0]
-    token = app.acquire_token_silent([_API_SCOPE], account=account)["access_token"]
+    acquired = app.acquire_token_silent([_API_SCOPE], account=account)
+    # Silent acquisition returns None (or a dict with no token) when the
+    # 90-day refresh token has expired or been revoked. This is the API's
+    # version of the subprocess path's "exit 1, empty stdout, hint on stderr",
+    # and it must be recognisable so _collect_api can re-authenticate rather
+    # than reporting a generic failure.
+    if not acquired or "access_token" not in acquired:
+        raise CoworkAuthExpired("MSAL could not acquire a token silently")
+    token = acquired["access_token"]
     base = resolve_cowork_island() or get_cached_cowork_island()
 
     # "<oid>.<tenant>" must be split and REVERSED into "<tenant>:<oid>:<uuid>".
