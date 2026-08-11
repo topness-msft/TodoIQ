@@ -25,7 +25,7 @@ cannot positively prove is a 1:1 is reported as a broadcast.
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 import json
 
 __all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
@@ -2166,21 +2166,12 @@ def _api_reauth_and_retry(runner, prompt, config, on_progress):
         raise
 
 
-def _api_run_default(prompt, config, on_progress, conversation_id=None):
-    """POST /v1/subscribe and fold the SSE stream into a CLI-shaped document.
+def _api_auth_default():
+    """Token, island URL and identity for the API transport.
 
-    When ``conversation_id`` is supplied the turn CONTINUES that conversation
-    instead of starting a new one, which is what makes a refine turn cheap: the
-    runtime still holds the earlier research, so it does not repeat it.
-
-    Imports live here so the module keeps loading when the API path is off,
-    which is the default. Auth currently piggybacks on the CLI's MSAL cache; an
-    independent device-code flow has NOT been exercised and is a prerequisite
-    before this becomes the default transport.
+    Split out of ``_api_run_default`` so the protocol can be tested without a
+    network or a signed-in machine. Returns ``(token, base_url, tenant, oid)``.
     """
-    import uuid
-
-    import httpx
     import msal
 
     cfg_dir = Path(os.environ["APPDATA"]) / "cowork"
@@ -2198,13 +2189,50 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None):
     # than reporting a generic failure.
     if not acquired or "access_token" not in acquired:
         raise CoworkAuthExpired("MSAL could not acquire a token silently")
-    token = acquired["access_token"]
-    base = resolve_cowork_island() or get_cached_cowork_island()
 
+    base = resolve_cowork_island() or get_cached_cowork_island()
     # "<oid>.<tenant>" must be split and REVERSED into "<tenant>:<oid>:<uuid>".
-    # acct["realm"] is the string "organizations", not the tenant guid; using it
-    # cost a 403 TENANT_MISMATCH.
+    # account["realm"] is the string "organizations", not the tenant guid;
+    # using it cost a 403 TENANT_MISMATCH.
     oid, tenant = account["home_account_id"].split(".", 1)
+    return acquired["access_token"], base, tenant, oid
+
+
+def _api_http_client_default():
+    import httpx
+
+    return httpx.Client(timeout=httpx.Timeout(COWORK_TIMEOUT, connect=20.0))
+
+
+# Injected seams, same idiom as _spawn_default / _cost_snapshot_fn.
+_api_auth_fn = _api_auth_default
+_api_http_client_fn = _api_http_client_default
+
+
+def _api_run_default(prompt, config, on_progress, conversation_id=None):
+    """Run one turn over the runtime HTTP API and fold the SSE stream into a
+    CLI-shaped document.
+
+    THE REQUEST SHAPE DIFFERS BY TURN. There is no published spec for this SSE
+    protocol, but the `cowork` CLI is another client of the same API and its
+    source documents the sequence (cowork_cli/services/live_session.py:213):
+
+        turn 1      POST /v1/subscribe     prompt rides the subscribe body
+        follow-up   GET  /v1/subscribe     re-resolves pod locality, opens SSE
+                    POST /v1/messages      delivers the prompt
+
+    Re-POSTing /v1/subscribe on an EXISTING conversation is not the sanctioned
+    path. It happened to work while the actor pod was still warm and then failed
+    on task 2268: HTTP 200, stream closed 1.1s later with zero events, so there
+    was no terminal event and the run reported "status unknown".
+
+    ``toolCallbackConfig`` rides on BOTH shapes, so the write barrier is sent
+    per turn either way.
+    """
+    import uuid
+
+    token, base, tenant, oid = _api_auth_fn()
+    is_follow_up = bool(conversation_id)
     conversation_id = conversation_id or f"{tenant}:{oid}:cw-{uuid.uuid4().hex[:8]}"
 
     body = {
@@ -2213,21 +2241,44 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None):
         "content": [{"type": "text", "text": prompt}],
         "toolCallbackConfig": config,
     }
-    headers = {
+    sse_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
+    post_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
     events = []
-    with httpx.Client(timeout=httpx.Timeout(COWORK_TIMEOUT, connect=20.0)) as client:
+    client = _api_http_client_fn()
+    with client:
+        verb = "GET" if is_follow_up else "POST"
+        stream_body = None if is_follow_up else body
+        # GET /v1/subscribe takes the conversation as a QUERY PARAMETER
+        # (aether subscribe.py: `conversation_id: ... Query(alias="conversationId")`).
+        # Omitting it is a 400, which is what task 2268's refine hit. The POST
+        # form carries it in the body instead.
+        stream_url = f"{base}/v1/subscribe"
+        if is_follow_up:
+            stream_url += f"?conversationId={quote(conversation_id, safe='')}"
         with client.stream(
-            "POST", f"{base}/v1/subscribe", headers=headers, json=body,
+            verb, stream_url, headers=sse_headers, json=stream_body,
         ) as response:
             if response.status_code != 200:
                 raise RuntimeError(
-                    f"POST /v1/subscribe failed: HTTP {response.status_code}"
+                    f"{verb} /v1/subscribe failed: HTTP {response.status_code}"
                 )
+            if is_follow_up:
+                # The stream is open; now deliver this turn's message on it.
+                posted = client.post(
+                    f"{base}/v1/messages", headers=post_headers, json=body,
+                )
+                if posted.status_code not in (200, 202):
+                    raise RuntimeError(
+                        f"POST /v1/messages returned HTTP {posted.status_code}"
+                    )
             for kind, data in _iter_sse(response.iter_lines()):
                 events.append((kind, data))
                 text = _api_progress_text(kind, data)
@@ -2235,6 +2286,15 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None):
                     on_progress(text)
                 if kind == "rl" and data.get("st") in _TERMINAL_RUN_STATES:
                     break
+
+    if not events:
+        # 200 then silence. Distinct from "the run failed" and from "the run
+        # finished oddly", and the user can act on it: try again, or start
+        # fresh. Reporting it as "status unknown" told them nothing.
+        raise RuntimeError(
+            "Cowork accepted the request but sent no events. The conversation "
+            "may have expired; try again, or use Start over."
+        )
 
     return _api_payload_from_events(events, conversation_id)
 
