@@ -87,6 +87,10 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         # is exactly the additive-degrades-to-today path.
         cowork_handler.HANDOFF_FN = lambda _cid: None
         cr.reset_handoff_cache()
+        # Tests must never read the user's real data/settings.json — with the
+        # API transport flag on for dogfood, these tests made real network calls.
+        self._base_api_flag = cr.api_transport_enabled
+        cr.api_transport_enabled = lambda: False
         self.original_auth_login = cr._auth_login_fn
         cr._auth_login_fn = lambda *args, **kwargs: type(
             "Login", (), {"returncode": 1}
@@ -100,6 +104,7 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
 
         cr._cost_snapshot_fn = self._base_cost_fn
         cowork_handler.HANDOFF_FN = self._base_handoff_fn
+        cr.api_transport_enabled = self._base_api_flag
         cr.reset_handoff_cache()
         super().tearDown()
         cr._auth_login_fn = self.original_auth_login

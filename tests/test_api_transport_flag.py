@@ -89,5 +89,31 @@ class TestDoesNotDisturbWorkspaceSettings(FlagTestBase):
             self.assertTrue(api_transport_enabled())
 
 
+class TestTestsAreIndependentOfRealSettings(FlagTestBase):
+    """The suite must not change behaviour when the user turns the flag on.
+
+    Turning `cowork_api_transport` on for the Phase 4 dogfood made the unit
+    suite read the real data/settings.json, take the API path, and make REAL
+    network calls: one file went from seconds to 275s. The test bases now pin
+    the transport, and this pins the test bases.
+    """
+
+    def test_runner_base_forces_the_flag_off(self):
+        import inspect
+
+        from tests import test_cowork_runner
+
+        source = inspect.getsource(test_cowork_runner.RunnerTestBase)
+        self.assertIn("api_transport_enabled", source)
+
+    def test_api_base_forces_the_flag_off(self):
+        import inspect
+
+        from tests import test_cowork_api
+
+        source = inspect.getsource(test_cowork_api.CoworkAPITestBase)
+        self.assertIn("api_transport_enabled", source)
+
+
 if __name__ == "__main__":
     unittest.main()

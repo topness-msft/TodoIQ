@@ -75,6 +75,13 @@ class RunnerTestBase(unittest.TestCase):
         # hundreds of tests; unmocked it took the suite from 35s to 313s.
         self._base_cost_fn = cr._cost_snapshot_fn
         cr._cost_snapshot_fn = lambda: None
+        # Tests must never read the user's real data/settings.json. With
+        # `cowork_api_transport` turned on for dogfood, start_preview took the
+        # API path and every subprocess test made REAL network calls — one file
+        # went from seconds to 275s. Pin the transport; tests that exercise the
+        # API path patch this themselves.
+        self._base_api_flag = cr.api_transport_enabled
+        cr.api_transport_enabled = lambda: False
         self.calls = []
         self._base_auth_login = cr._auth_login_fn
         cr._auth_login_fn = lambda *args, **kwargs: type(
@@ -83,6 +90,7 @@ class RunnerTestBase(unittest.TestCase):
 
     def tearDown(self):
         cr._cost_snapshot_fn = self._base_cost_fn
+        cr.api_transport_enabled = self._base_api_flag
         cr._auth_login_fn = self._base_auth_login
         cr.reset_registry()
 

@@ -1044,15 +1044,46 @@ def _norm_tool(name):
     return str(name or "").strip().lower()
 
 
-# Verbs that mutate. Matched against the *display* name as well as the
-# canonical one, because G1d recorded an intercepted Teams post as
-# "Post message" — a label absent from all 154 names in that probe's config.
-# Matching only the denylist would therefore miss exactly the calls that matter.
-_WRITE_VERBS = (
+# Verbs that mutate, as whole TOKENS of the action.
+#
+# Matched by equality against tokens rather than as substrings. Substring
+# matching put "share" inside "sharepoint" and flagged three read-only
+# SharePoint tools as unrequested writes, which failed a real preview during
+# the Phase 4 soak. Equality also stops "settings" reading as "set".
+#
+# This is only the BACKSTOP for tools that are not on the denylist; anything we
+# actually deny is matched by name across every spelling.
+_WRITE_VERB_TOKENS = frozenset({
     "send", "post", "create", "update", "delete", "remove", "add",
     "edit", "write", "upload", "move", "reply", "forward", "schedule",
-    "set ", "set_", "modify", "insert", "draft", "share", "invite",
-)
+    "scheduled", "set", "setup", "modify", "insert", "draft", "share",
+    "invite", "save", "accept", "decline", "cancel", "flag",
+})
+
+# Kept for reference by callers/tests that predate tokenisation.
+_WRITE_VERBS = tuple(sorted(_WRITE_VERB_TOKENS))
+
+
+def _action_segment(name):
+    """The action part of a tool name, without the server or product.
+
+    The runtime reports ``mcp__<server>__<Action>``. Only the last segment is
+    the action: ``sharepoint_onedrive`` is a product name and must never be
+    searched for verbs.
+    """
+    raw = str(name or "").strip()
+    if raw.lower().startswith("mcp__"):
+        parts = [p for p in raw[5:].split("__") if p]
+        return parts[-1] if parts else raw
+    if "-" in raw:
+        return raw.split("-", 1)[1]
+    return raw
+
+
+def _tokens(text):
+    """camelCase, snake_case and spaced words -> lowercase tokens."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(text or ""))
+    return [t.lower() for t in re.split(r"[^A-Za-z0-9]+", spaced) if t]
 
 
 def _looks_like_write(name):
@@ -1061,9 +1092,13 @@ def _looks_like_write(name):
         return False
     if norm in _CONTAINER_TOOLS:
         return False
-    if norm in {_norm_tool(n) for n in load_write_tools()}:
+    # Name match across every spelling. The runtime says
+    # `mcp__graph__CallGraph` where our denylist says `graph-CallGraph`; a
+    # plain string comparison missed 20 of 84 entries, including CallGraph
+    # itself — the universal Graph bypass — leaving the canary blind to them.
+    if _spellings(name) & _barrier_names():
         return True
-    return any(v in norm for v in _WRITE_VERBS)
+    return bool(set(_tokens(_action_segment(name))) & _WRITE_VERB_TOKENS)
 
 
 # Denied for CONTAINMENT, not because they mutate M365. `Bash` is on the
@@ -1076,12 +1111,24 @@ _CONTAINER_TOOLS = frozenset({"bash", "task", "write_agent", "str_replace_editor
 
 
 def _barrier_names():
-    """Every spelling of a denylisted tool, matching build_callback_config()."""
-    names = set()
-    for tool in load_write_tools():
-        for alias in _tool_aliases(tool):
-            names |= _spellings(alias)
-    return names
+    """Every spelling of a denylisted tool, matching build_callback_config().
+
+    Cached: this is now consulted by ``_looks_like_write`` for every tool in
+    every trace, and recomputing it meant re-reading the JSON and expanding 84
+    entries each time. Unmemoised it took the unit suite past 8 minutes from a
+    ~60s baseline. The denylist is a static file, so one build is enough.
+    """
+    global _barrier_names_cache
+    if _barrier_names_cache is None:
+        names = set()
+        for tool in load_write_tools():
+            for alias in _tool_aliases(tool):
+                names |= _spellings(alias)
+        _barrier_names_cache = names
+    return _barrier_names_cache
+
+
+_barrier_names_cache = None
 
 
 def _spellings(name):
@@ -1130,8 +1177,20 @@ _INTERCEPT_CUES = (
 
 
 def load_write_tools() -> list:
-    """The G1c-1.21.88 denylist: 83 writes plus one retained query tool."""
-    return json.loads(WRITE_TOOLS_PATH.read_text(encoding="utf-8"))
+    """The G1c-1.21.88 denylist: 83 writes plus one retained query tool.
+
+    Cached — read once per process. It is a file that ships with the code, and
+    it is now on the hot path of every write check.
+    """
+    global _write_tools_cache
+    if _write_tools_cache is None:
+        _write_tools_cache = json.loads(
+            WRITE_TOOLS_PATH.read_text(encoding="utf-8")
+        )
+    return _write_tools_cache
+
+
+_write_tools_cache = None
 
 
 def _tool_aliases(name: str) -> list:
