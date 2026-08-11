@@ -2368,7 +2368,8 @@ function renderCoworkCard(t) {
          onclick="cwStartOver(${t.id})">Start over</button>
        ${t.cw_conversation_id ? `<a class="cw-btn cw-btn-sec cw-btn-link"
          href="${esc('https://m365.cloud.microsoft/agents/cowork#/task/' + encodeURIComponent(t.cw_conversation_id))}"
-         target="_blank" rel="noopener noreferrer">Open in Cowork</a>` : ''}
+         target="_blank" rel="noopener noreferrer" data-testid="cw-open-cowork"
+         title="Continue this conversation in Cowork. The draft is already there, and asking it to send will send for real.">Finish in Cowork</a>` : ''}
        <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Hide</button>
        ${t.cw_draft_edited ? '<span class="cw-foot-note">edited by you</span>' : ''}${cwCostBadge(t)}${cwHandoffBadge(t)}`);
   }

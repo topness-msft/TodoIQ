@@ -91,6 +91,13 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         # API transport flag on for dogfood, these tests made real network calls.
         self._base_api_flag = cr.api_transport_enabled
         cr.api_transport_enabled = lambda: False
+        # tenant_barrier_precheck() calls the runtime to read the signed-in
+        # tenant. start_preview runs it on every POST, so unstubbed it makes a
+        # real network call per test — which fails Tornado's 5s fetch timeout
+        # whenever the service is slow. Same isolation gap as the cost and
+        # handoff seams. The precheck is advisory, so "ok" is the honest stub.
+        self._base_precheck = cr.tenant_barrier_precheck
+        cr.tenant_barrier_precheck = lambda **kw: {"status": "ok", "reason": ""}
         self.original_auth_login = cr._auth_login_fn
         cr._auth_login_fn = lambda *args, **kwargs: type(
             "Login", (), {"returncode": 1}
@@ -105,6 +112,7 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         cr._cost_snapshot_fn = self._base_cost_fn
         cowork_handler.HANDOFF_FN = self._base_handoff_fn
         cr.api_transport_enabled = self._base_api_flag
+        cr.tenant_barrier_precheck = self._base_precheck
         cr.reset_handoff_cache()
         super().tearDown()
         cr._auth_login_fn = self.original_auth_login

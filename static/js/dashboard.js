@@ -3249,7 +3249,17 @@ function renderCoworkCard(task) {
                   ? '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
                     + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
                       + encodeURIComponent(a.conversation_id))
-                    + '" target="_blank" rel="noopener noreferrer">Open in Cowork</a>'
+                    + '" target="_blank" rel="noopener noreferrer" '
+                    + 'data-testid="cw-open-cowork" '
+                    // The read-only instruction is scoped to the drafting turn,
+                    // and the barrier travels in OUR request rather than with
+                    // the conversation. Verified: a follow-up "send that now"
+                    // made Cowork call PostMessage, blocked only by our own
+                    // config. So the handoff really is live, and the button
+                    // should say so.
+                    + 'title="Continue this conversation in Cowork. The draft '
+                    + 'is already there, and asking it to send will send for '
+                    + 'real.">Finish in Cowork</a>'
                   : '')
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
               + editedBadge + costBadge + cwHandoffBadge(a);
