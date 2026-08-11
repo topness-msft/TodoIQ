@@ -28,6 +28,7 @@ from unittest import mock
 from src.services.cowork_runner import (
     handoff_status,
     reset_handoff_cache,
+    wait_for_handoff_refresh,
 )
 
 
@@ -51,30 +52,42 @@ class HandoffTestBase(unittest.TestCase):
         reset_handoff_cache()
         self.addCleanup(reset_handoff_cache)
 
+    def _settled(self, cid, get):
+        """Read once the background refresh has landed.
+
+        ``handoff_status`` no longer blocks on the network, so a cold read
+        returns None by design (see tests/test_handoff_latency.py). These
+        tests are about how a payload is *interpreted*, not about when it
+        arrives, so prime the cache and then read it.
+        """
+        handoff_status(cid, _get=get)
+        wait_for_handoff_refresh(timeout=5)
+        return handoff_status(cid, _get=get)
+
 
 class TestReadsState(HandoffTestBase):
     def test_returns_the_state_for_a_known_conversation(self):
-        got = handoff_status(CID, _get=lambda p: _get([_task(CID, "running")]))
+        got = self._settled(CID, lambda p: _get([_task(CID, "running")]))
         self.assertEqual(got["state"], "running")
 
     def test_surfaces_needs_user_input(self):
         """The state worth building a UI around."""
-        got = handoff_status(
-            CID, _get=lambda p: _get([_task(CID, "needs_user_input")])
+        got = self._settled(
+            CID, lambda p: _get([_task(CID, "needs_user_input")])
         )
         self.assertEqual(got["state"], "needs_user_input")
         self.assertTrue(got["waiting_on_user"])
 
     def test_completed_is_not_waiting_on_user(self):
-        got = handoff_status(CID, _get=lambda p: _get([_task(CID, "completed")]))
+        got = self._settled(CID, lambda p: _get([_task(CID, "completed")]))
         self.assertFalse(got["waiting_on_user"])
 
     def test_carries_last_activity(self):
-        got = handoff_status(CID, _get=lambda p: _get([_task(CID, "running")]))
+        got = self._settled(CID, lambda p: _get([_task(CID, "running")]))
         self.assertEqual(got["last_activity"], 1786400663554)
 
     def test_unknown_conversation_returns_none(self):
-        got = handoff_status(CID, _get=lambda p: _get([_task("someone-else")]))
+        got = self._settled(CID, lambda p: _get([_task("someone-else")]))
         self.assertIsNone(got)
 
     def test_blank_conversation_id_does_not_call_the_network(self):
@@ -102,8 +115,8 @@ class TestFailsSoft(HandoffTestBase):
         self.assertIsNone(handoff_status(CID, _get=lambda p: bad))
 
     def test_non_dict_task_entries_are_skipped(self):
-        got = handoff_status(
-            CID, _get=lambda p: _get(["nope", None, _task(CID, "running")])
+        got = self._settled(
+            CID, lambda p: _get(["nope", None, _task(CID, "running")])
         )
         self.assertEqual(got["state"], "running")
 
@@ -122,7 +135,7 @@ class TestPaging(HandoffTestBase):
             calls.append(path)
             return pages[len(calls) - 1]
 
-        got = handoff_status(CID, _get=paged)
+        got = self._settled(CID, paged)
         self.assertEqual(got["state"], "running")
         self.assertEqual(len(calls), 3)
 
@@ -134,7 +147,7 @@ class TestPaging(HandoffTestBase):
             calls.append(path)
             return _get([_task(f"other-{len(calls)}")], next_offset=str(len(calls)))
 
-        self.assertIsNone(handoff_status(CID, _get=endless))
+        self.assertIsNone(self._settled(CID, endless))
         self.assertLessEqual(len(calls), 6)
 
 
@@ -152,7 +165,7 @@ class TestCaching(HandoffTestBase):
             calls.append(path)
             return _get([_task(CID, "running")])
 
-        handoff_status(CID, _get=spy)
+        self._settled(CID, spy)
         handoff_status(CID, _get=spy)
         self.assertEqual(len(calls), 1)
 
@@ -164,7 +177,7 @@ class TestCaching(HandoffTestBase):
             calls.append(path)
             return _get([_task(CID, "running"), _task(other, "completed")])
 
-        self.assertEqual(handoff_status(CID, _get=spy)["state"], "running")
+        self.assertEqual(self._settled(CID, spy)["state"], "running")
         self.assertEqual(handoff_status(other, _get=spy)["state"], "completed")
         self.assertEqual(len(calls), 1)
 
@@ -175,9 +188,9 @@ class TestCaching(HandoffTestBase):
             calls.append(path)
             return _get([_task(CID, "running")])
 
-        handoff_status(CID, _get=spy)
+        self._settled(CID, spy)
         reset_handoff_cache()
-        handoff_status(CID, _get=spy)
+        self._settled(CID, spy)
         self.assertEqual(len(calls), 2)
 
 

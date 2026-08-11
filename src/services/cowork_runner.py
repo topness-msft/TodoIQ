@@ -1642,9 +1642,12 @@ def cost_delta(before, after):
 # unflagged. Same call already made for the cost badge.
 
 _HANDOFF_TTL = 30          # seconds; a dashboard poll must not mean a round trip
+_HANDOFF_RETRY = 10        # seconds to wait before retrying after a failed refresh
 _HANDOFF_MAX_PAGES = 6     # ~300 tasks; ours sat on page 3 in the real capture
-_handoff_cache = {"at": 0.0, "tasks": None}
+_handoff_cache = {"at": 0.0, "tasks": None, "refreshing": False}
 _handoff_lock = threading.Lock()
+_handoff_idle = threading.Event()
+_handoff_idle.set()
 
 # Cowork is blocked waiting for a human. This is how an approval prompt shows
 # up from the outside, and it is the whole reason this is worth reading: TodoIQ
@@ -1653,10 +1656,61 @@ _WAITING_STATES = frozenset({"needs_user_input"})
 
 
 def reset_handoff_cache() -> None:
-    """Drop the cached task list. Used by tests and after an explicit refresh."""
+    """Drop the cached task list. Used by tests and after an explicit refresh.
+
+    Drains any in-flight refresh first. Refreshes became asynchronous, so
+    clearing the in-flight guard while a thread was still running let that
+    thread land its result in the *next* test's cache. Draining here fixes
+    every caller at once rather than one test at a time.
+    """
+    wait_for_handoff_refresh(timeout=10)
     with _handoff_lock:
         _handoff_cache["at"] = 0.0
         _handoff_cache["tasks"] = None
+        _handoff_cache["refreshing"] = False
+    _handoff_idle.set()
+
+
+def wait_for_handoff_refresh(timeout=5) -> bool:
+    """Block until no refresh is in flight. For tests and shutdown only."""
+    return _handoff_idle.wait(timeout=timeout)
+
+
+def _refresh_handoff_tasks(get) -> None:
+    """Repopulate the cache out of band. Never raises, never blocks a caller.
+
+    A failure must leave the previous answer in place. Wiping the cache on a
+    throttled response would turn one bad request into a blank badge on every
+    card until the next success.
+    """
+    try:
+        tasks = _fetch_handoff_tasks(get)
+    except Exception:  # noqa: BLE001
+        logger.debug("handoff refresh failed; keeping previous data", exc_info=True)
+        tasks = None
+
+    with _handoff_lock:
+        if tasks is not None:
+            _handoff_cache["tasks"] = tasks
+            _handoff_cache["at"] = time.monotonic()
+        else:
+            # Back off so a hard-down endpoint is not retried on every click.
+            _handoff_cache["at"] = time.monotonic() - _HANDOFF_TTL + _HANDOFF_RETRY
+        _handoff_cache["refreshing"] = False
+    _handoff_idle.set()
+
+
+def _start_handoff_refresh(get) -> None:
+    """Kick off one refresh, or do nothing if one is already running."""
+    with _handoff_lock:
+        if _handoff_cache["refreshing"]:
+            return
+        _handoff_cache["refreshing"] = True
+    _handoff_idle.clear()
+    threading.Thread(
+        target=_refresh_handoff_tasks, args=(get,),
+        name="handoff-refresh", daemon=True,
+    ).start()
 
 
 def _fetch_handoff_tasks(get):
@@ -1685,8 +1739,18 @@ def handoff_status(conversation_id, _get=None):
 
     Returns ``{"state", "waiting_on_user", "last_activity", "title"}``.
 
-    Fails soft on every path. This is decoration on a card that is already
-    complete without it, so a throttled endpoint, an expired token or a shape
+    NEVER blocks on the network. ``GET /v1/tasks`` pages up to six times and
+    was measured at ~7s; doing that inside the request path made the first
+    task clicked after each TTL expiry stall for seconds while every other
+    click answered in ~20ms. Phil reported it as "switching between tasks can
+    be very slow", and the stall tracked the cache clock rather than the task.
+
+    This is decoration on a card that is already complete without it, so the
+    right trade is stale-but-instant: serve whatever is cached and refresh out
+    of band. A cold cache returns None and the badge simply appears on the next
+    read.
+
+    Fails soft on every path. A throttled endpoint, an expired token or a shape
     change must degrade to today's behaviour rather than break the card.
     """
     if not conversation_id:
@@ -1696,17 +1760,14 @@ def handoff_status(conversation_id, _get=None):
     try:
         now = time.monotonic()
         with _handoff_lock:
-            fresh = (
-                _handoff_cache["tasks"] is not None
-                and now - _handoff_cache["at"] < _HANDOFF_TTL
-            )
-            tasks = _handoff_cache["tasks"] if fresh else None
+            tasks = _handoff_cache["tasks"]
+            stale = now - _handoff_cache["at"] >= _HANDOFF_TTL
+
+        if tasks is None or stale:
+            _start_handoff_refresh(get)
 
         if tasks is None:
-            tasks = _fetch_handoff_tasks(get)
-            with _handoff_lock:
-                _handoff_cache["tasks"] = tasks
-                _handoff_cache["at"] = time.monotonic()
+            return None
 
         entry = tasks.get(conversation_id)
         if not entry:
