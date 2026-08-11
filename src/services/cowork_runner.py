@@ -1090,7 +1090,7 @@ def _looks_like_write(name):
     norm = _norm_tool(name)
     if not norm:
         return False
-    if norm in _CONTAINER_TOOLS:
+    if norm in _container_tools():
         return False
     # Name match across every spelling. The runtime says
     # `mcp__graph__CallGraph` where our denylist says `graph-CallGraph`; a
@@ -1102,12 +1102,56 @@ def _looks_like_write(name):
 
 
 # Denied for CONTAINMENT, not because they mutate M365. `Bash` is on the
-# denylist so a run cannot shell out and bypass the barrier, but it touches
-# nothing in the user's mailbox, is never intercepted, and so tripped the
-# "write ran with no interception" rule on every single run. That alone
-# accounted for most of the 12/18 false BREACHED verdicts measured against
-# live rows on 2026-08-10.
-_CONTAINER_TOOLS = frozenset({"bash", "task", "write_agent", "str_replace_editor"})
+# denylist so a run cannot shell out and bypass the barrier, and `Skill` is how
+# our own prompt loads the voice guides — but neither touches the user's
+# mailbox, so neither is evidence that a write was attempted.
+#
+# Derived rather than hardcoded, from a structural property of the denylist:
+# every M365 service tool is namespaced (`outlook-SendEmailWithAttachments`,
+# `graph-CallGraph`), while the container-local ones are bare single words
+# (`bash`, `create`, `edit`, `skill`, `stop_bash`, `task`, `write_agent`).
+# Hardcoding three of the seven let `Skill` slip through and report a research
+# run as "a write tool was called" — the same slide 7b693b0 fixed for `Bash`.
+#
+# The exclusion is on the EXACT bare name, so `Create folder` and
+# `mcp__outlook_calendar__CreateEvent` are still writes.
+def _container_tools():
+    global _container_tools_cache
+    if _container_tools_cache is None:
+        _container_tools_cache = frozenset(
+            _norm_tool(t) for t in load_write_tools() if "-" not in t
+        )
+    return _container_tools_cache
+
+
+_container_tools_cache = None
+
+
+class _ContainerTools:
+    """Lazy view of the container-local tool names.
+
+    A plain frozenset at import time would read the denylist file on import;
+    this defers it while still supporting ``in`` and iteration, so callers and
+    tests can treat ``_CONTAINER_TOOLS`` as the set it has always been.
+    """
+
+    def __contains__(self, item):
+        return item in _container_tools()
+
+    def __iter__(self):
+        return iter(_container_tools())
+
+    def __len__(self):
+        return len(_container_tools())
+
+    def __eq__(self, other):
+        return set(_container_tools()) == set(other)
+
+    def __repr__(self):
+        return repr(_container_tools())
+
+
+_CONTAINER_TOOLS = _ContainerTools()
 
 
 def _barrier_names():
