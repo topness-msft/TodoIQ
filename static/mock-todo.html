@@ -2068,6 +2068,13 @@ const CW_KIND_CHANNEL = {
   one_to_one: 'teams', group: 'teams', meeting: 'teams', channel: 'teams',
 };
 
+// A scheduling task ends in a calendar invite, so the reply-mechanics note
+// reads wrong beside it. Audience binding is unchanged; only the mechanics
+// sentence swaps, and only where there is no broadcast warning to state.
+const CW_ACTION_NOTE = {
+  'schedule-meeting': 'Times are proposed here; the invite would go to the same person.',
+};
+
 // Fallback only. On /todo the kind comes from the server, where
 // parse_source_url is the single source of truth; this local derivation
 // exists so the file still renders when opened standalone.
@@ -2095,6 +2102,11 @@ function cwDestBlock(t) {
   // A broadcast warning outranks any transport note — never trade it away.
   const note = (!risky && chan && t.cw_delivery_channel !== CW_KIND_CHANNEL[kind])
     ? chan.note : d.note;
+  // A scheduling task ends in a calendar invite, so the reply-mechanics note
+  // reads wrong beside it. The AUDIENCE binding still stands - only the
+  // mechanics sentence changes, and a broadcast warning still outranks it.
+  const actionNote = CW_ACTION_NOTE[t.action_type];
+  const finalNote = (!risky && actionNote) ? actionNote : note;
   // Link straight to the conversation this is drafted for, so checking who is
   // actually in it is one click rather than a hunt through Teams.
   const srcUrl = t.source_url || '';
@@ -2107,7 +2119,7 @@ function cwDestBlock(t) {
     <span data-testid="${risky ? 'dest-risky' : 'dest-safe'}"><span data-testid="dest-status">${esc(display)}</span></span>
     ${chan ? `<span class="cw-dest-chan" data-testid="dest-channel-chip">${esc(chan.label)}</span>` : ''}
     ${openLink}
-    <br><span style="color:var(--text-muted)">${esc(note)}</span>
+    <br><span style="color:var(--text-muted)" data-testid="dest-note">${esc(finalNote)}</span>
     <span class="cw-dest-actions">
       ${confirmed ? '<span class="cw-dest-badge" data-testid="dest-confirmed">✓ audience confirmed</span>' : ''}
       <button class="cw-dest-btn" type="button" data-testid="dest-change-btn"

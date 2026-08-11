@@ -2849,6 +2849,16 @@ var CW_KIND_CHANNEL = {
     'one_to_one': 'teams', 'group': 'teams', 'meeting': 'teams', 'channel': 'teams'
 };
 
+// A scheduling task ends in a calendar invite, so the reply-mechanics note
+// ("a reply lands in the same thread") reads wrong beside it. The AUDIENCE
+// binding still stands — it is the safety guarantee, and the invite goes to the
+// same people the message would. Only the mechanics sentence changes, and only
+// where there is no broadcast warning to state instead.
+var CW_ACTION_NOTE = {
+    'schedule-meeting': 'Times are proposed here; the invite would go to the '
+        + 'same person.'
+};
+
 // taskId -> action row, or null once we know there is no preview yet.
 var _cwActions = {};
 var _cwLoading = {};
@@ -2942,6 +2952,11 @@ function cwDestBlock(action, task) {
     var note = (!risky && chan
         && action.delivery_channel !== CW_KIND_CHANNEL[action.destination_kind])
         ? chan.note : d.note;
+    // ...and it outranks the action-specific note too. Only a non-broadcast
+    // destination swaps in the scheduling wording; a group chat still has to
+    // say everyone would see it.
+    var actionNote = task && CW_ACTION_NOTE[task.action_type];
+    if (!risky && actionNote) note = actionNote;
     // Link straight to the conversation this is drafted for, so checking who
     // is actually in it is one click rather than a hunt through Teams.
     var srcUrl = (task && task.source_url) || '';
@@ -2958,7 +2973,7 @@ function cwDestBlock(action, task) {
         + (chan ? '<span class="cw-dest-chan" data-testid="dest-channel-chip">'
             + escapeHtml(chan.label) + '</span>' : '')
         + openLink
-        + '<span class="d-note">' + escapeHtml(note) + '</span>'
+        + '<span class="d-note" data-testid="dest-note">' + escapeHtml(note) + '</span>'
         + '<span class="cw-dest-actions">'
         + (confirmed
             ? '<span class="cw-dest-badge" data-testid="dest-confirmed">&#10003; audience confirmed</span>'

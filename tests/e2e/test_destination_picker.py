@@ -378,3 +378,80 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+
+
+class TestSchedulingDestinationNote:
+    """A scheduling task ends in a calendar invite, not a chat reply.
+
+    The one_to_one note says "Linear conversation, so a reply lands in the same
+    thread." That is REPLY mechanics, and it reads wrong on a card whose whole
+    purpose is to land a meeting - Phil flagged exactly this.
+
+    The audience binding itself stays. It is the safety guarantee: it states WHO
+    would receive this and is the only place that is confirmed. What changes is
+    the mechanics sentence beside it.
+    """
+
+    def test_scheduling_note_talks_about_the_invite_not_a_reply(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                f"""
+                const t = tasks.find(x => x.id === {task_id});
+                t.action_type = 'schedule-meeting';
+                _cwActions[{task_id}] = {json.dumps(_action(0))};
+                _cwActions[{task_id}].task_id = {task_id};
+                selectedTaskId = {task_id};
+                renderDetailPane(t);
+                """
+            )
+            note = page.get_by_test_id("dest-note")
+            expect(note).to_be_visible()
+            expect(note).to_contain_text("invite")
+            expect(note).not_to_contain_text("reply lands")
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_a_broadcast_warning_still_outranks_the_scheduling_note(
+        self, page: Page, base_url
+    ):
+        """Safety must never be traded away for nicer copy. A group chat still
+        has to say everyone would see it, scheduling or not."""
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            action = _action(0, destination_kind="group", is_broadcast=True,
+                             destination_display="group chat with Rima and Greg")
+            action["task_id"] = task_id
+            page.evaluate(
+                f"""
+                const t = tasks.find(x => x.id === {task_id});
+                t.action_type = 'schedule-meeting';
+                _cwActions[{task_id}] = {json.dumps(action)};
+                selectedTaskId = {task_id};
+                renderDetailPane(t);
+                """
+            )
+            expect(page.get_by_test_id("dest-note")).to_contain_text("Everyone")
+            expect(page.get_by_test_id("dest-risky")).to_be_visible()
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_a_non_scheduling_task_keeps_the_reply_note(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            _load_dashboard(page, base_url, task_id, _action(task_id))
+            expect(page.get_by_test_id("dest-note")).to_contain_text("reply lands")
+        finally:
+            _delete_task(page, base_url, task_id)
