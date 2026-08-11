@@ -2233,7 +2233,10 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None):
 
     token, base, tenant, oid = _api_auth_fn()
     is_follow_up = bool(conversation_id)
-    conversation_id = conversation_id or f"{tenant}:{oid}:cw-{uuid.uuid4().hex[:8]}"
+    # Full UUID, not the CLI's `cw-<8 hex>`. Both are accepted by the runtime,
+    # but the Cowork web app 403s on a `cw-` session, so "Finish in Cowork"
+    # only resolves when the id is shaped the way the web app mints its own.
+    conversation_id = conversation_id or f"{tenant}:{oid}:{uuid.uuid4()}"
 
     body = {
         "conversationId": conversation_id,

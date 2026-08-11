@@ -24,6 +24,7 @@ the follow-up path would mean an unbarriered turn.
 """
 
 import unittest
+import uuid
 
 from src.services import cowork_runner as cr
 
@@ -115,7 +116,24 @@ class TestFirstTurnIsUnchanged(ApiProtocolTestBase):
 
     def test_it_mints_a_conversation_id(self):
         _, payload = self._run()
-        self.assertTrue(payload["conversation_id"].startswith("t:u:cw-"))
+        self.assertTrue(payload["conversation_id"].startswith("t:u:"))
+
+    def test_the_session_segment_is_a_full_uuid(self):
+        """The deep link only resolves when the id looks web-app-minted.
+
+        The CLI mints ``cw-<8 hex>`` and we copied it. Every task the Cowork
+        web app creates uses a full UUID as the third segment, and opening a
+        ``cw-`` one raised a 403. Sampled from real URLs: the web app's own
+        links are ``<tenant>%3A<oid>%3A<uuid>``.
+        """
+        _, payload = self._run()
+        session = payload["conversation_id"].split(":")[-1]
+        self.assertFalse(
+            session.startswith("cw-"),
+            "cw- prefixed sessions cannot be opened in the Cowork web app",
+        )
+        # Raises ValueError if it is not a real UUID.
+        self.assertEqual(str(uuid.UUID(session)), session)
 
 
 class TestFollowUpUsesTheDocumentedShape(ApiProtocolTestBase):
