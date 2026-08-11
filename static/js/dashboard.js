@@ -3150,6 +3150,26 @@ function cwStartOver(taskId) {
     cwStart(taskId);
 }
 
+function cwStopPreview(taskId) {
+    // Stops work in flight. proc.kill() only killed OUR process while the
+    // server-side run carried on spending credits; this actually halts it.
+    if (!window.confirm('Stop this Cowork run?\n\nWhatever it has produced so '
+        + 'far is kept. Nothing was sent.')) return;
+    var el = document.getElementById('cw-live-' + taskId);
+    if (el) el.textContent = 'Stopping…';
+    fetch('/api/tasks/' + taskId + '/cowork', { method: 'DELETE' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            stopCoworkPoller(taskId);
+            if (data && data.action) _cwActions[taskId] = data.action;
+            cwRerender(taskId);
+        })
+        .catch(function () {
+            stopCoworkPoller(taskId);
+            cwRerender(taskId);
+        });
+}
+
 function renderCoworkCard(task) {
     var a = _cwActions[task.id];
 
@@ -3172,7 +3192,9 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
+            '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+            + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+            + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
     }
 
     if (a && a.state === 'failed') {

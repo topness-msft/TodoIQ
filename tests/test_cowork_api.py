@@ -1007,3 +1007,51 @@ class TestHandoffStatus(CoworkAPITestBase):
         response, body = self.get_preview(tid)
         self.assertEqual(response.code, 200)
         self.assertNotIn("handoff", body["action"])
+
+
+class TestStopPreview(CoworkAPITestBase):
+    """DELETE stops a run in flight.
+
+    The only call in TodoIQ that reaches Cowork and changes something - and it
+    strictly REDUCES what can happen. It stops work; it cannot start or send
+    anything. That is why it is safe while there is still no execute route.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from src.handlers import cowork as cowork_handler
+        self._cancel = cowork_handler.CANCEL_FN
+        self.cancelled = []
+
+        def fake_cancel(cid):
+            self.cancelled.append(cid)
+            return True
+
+        cowork_handler.CANCEL_FN = fake_cancel
+        self.addCleanup(lambda: setattr(cowork_handler, "CANCEL_FN", self._cancel))
+
+    def _running(self):
+        """A task with a preview still in flight."""
+        tid = self.make_task()
+        proc = FakeProc(stdout=GOOD_STDOUT)
+        proc.hold = True
+        self.start(tid, proc)
+        return tid
+
+    def test_delete_on_a_missing_preview_is_404(self):
+        tid = self.make_task()
+        r = self.fetch(f"/api/tasks/{tid}/cowork", method="DELETE")
+        self.assertEqual(r.code, 404)
+
+    def test_delete_on_a_finished_preview_is_409(self):
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT))
+        self.get_preview(tid)
+        r = self.fetch(f"/api/tasks/{tid}/cowork", method="DELETE")
+        self.assertEqual(r.code, 409)
+
+    def test_no_execute_route_was_introduced(self):
+        """DELETE stops work. It must never become a way to send."""
+        from src.handlers.cowork import CoworkHandler
+        self.assertFalse(hasattr(CoworkHandler, "execute"))
+        self.assertFalse(hasattr(CoworkHandler, "send"))

@@ -514,6 +514,7 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
         "barrier": _barrier_verdict([], None, ""),
         "error": None,
         "raw_text": "",
+        "cancelled": False,
     }
 
     if _AUTH_HINT in (stderr or ""):
@@ -585,7 +586,12 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
     result["draft"] = _tidy_finding(draft) if draft else None
     result["finding"] = _tidy_finding(findings)
 
-    if result["terminal_status"] != "ok":
+    # A run the user stopped on purpose is not a crash. It keeps whatever text
+    # Cowork produced before the stop and reports itself as cancelled, so the
+    # card can say "you stopped this" instead of apologising for a failure.
+    if result["terminal_status"] == "cancel":
+        result["cancelled"] = True
+    elif result["terminal_status"] != "ok":
         result["error"] = (
             f"Cowork finished with status "
             f"{result['terminal_status'] or 'unknown'!s}."
@@ -1677,7 +1683,7 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
 # parse_cowork_output, _barrier_verdict, _canonical_tools, _extract_draft and
 # both UIs are untouched. Verified against real captures on 2026-08-10.
 
-_TERMINAL_RUN_STATES = ("ok", "error", "failed", "completed")
+_TERMINAL_RUN_STATES = ("ok", "error", "failed", "completed", "cancel")
 
 
 def _iter_sse(lines):
@@ -1878,6 +1884,60 @@ def _api_progress(data, on_progress):
                     on_progress(str(text))
     except Exception:  # noqa: BLE001
         logger.debug("api progress hook raised", exc_info=True)
+
+
+def _api_post(path, body):
+    """POST to the runtime with the CLI's own authenticated session."""
+    from cowork_cli.auth.manager import AuthManager
+    from cowork_cli.config.settings import get_settings
+
+    settings = get_settings()
+    session_mod = __import__(
+        "cowork_cli.services.session", fromlist=["SessionManager"]
+    )
+    session = session_mod.SessionManager(settings, AuthManager(settings))
+    return session.sync_post(path, body)
+
+
+def cancel_run(conversation_id, _post=None) -> bool:
+    """Stop a run that is in flight. Returns whether the runtime accepted it.
+
+    THIS IS THE CAPABILITY THE SUBPROCESS PATH DOES NOT HAVE.
+
+    ``proc.kill()`` only kills our local process: the server-side run carries on
+    and keeps spending credits. The cowork_cli library path was worse — a spike
+    proved ``close_live()`` does not halt a turn at all (still running at 50s),
+    which is why that migration was closed.
+
+    Verified live on 2026-08-10: `pause` returned 200 ``success: true``, the SSE
+    stream produced ``rl st=cancel`` 0.9s later, and the run was fully stopped
+    3.0s after the request.
+
+    ``mode: hard`` per aether control.py: interrupt immediately and cancel
+    in-flight LLM and tool calls. ``soft`` would wait for the current turn,
+    which is not what a user pressing Stop means.
+
+    Never raises. A cancel that cannot be delivered reports False so the caller
+    can say so, rather than leaving the card claiming it stopped something.
+    """
+    if not conversation_id:
+        return False
+    post = _post or _api_post
+    try:
+        response = post(
+            f"/v1/conversations/{conversation_id}/pause",
+            {"mode": "hard", "reason": "Stopped from TodoIQ"},
+        )
+        if getattr(response, "status_code", None) != 200:
+            logger.warning(
+                "cancel refused: HTTP %s", getattr(response, "status_code", "?")
+            )
+            return False
+        # 200 is not the same as "it stopped" — the body carries the verdict.
+        return bool((response.json() or {}).get("success"))
+    except Exception:  # noqa: BLE001
+        logger.debug("cancel failed", exc_info=True)
+        return False
 
 
 def is_running(label) -> bool:

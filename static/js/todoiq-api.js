@@ -596,8 +596,9 @@ async function cwSaveIntent(id) {
   } catch (e) { toast('Failed to save'); }
 }
 
-// Client side only — there is no delete route, so the task_actions audit
-// chain stays intact. Reloads on the next visit.
+// Client side only — hiding a card must not delete the task_actions row, so
+// the audit chain stays intact. Reloads on the next visit. (DELETE on the
+// cowork route STOPS A RUN; it does not delete an action.)
 function cwDiscard(id) {
   const t = cwTask(id);
   if (!t) return;
@@ -605,6 +606,26 @@ function cwDiscard(id) {
   t.cw_editing = false;
   t.cw_redo_open = false;
   t.cw_loaded = false;
+  cwRerender(id);
+}
+
+async function cwStopPreview(id) {
+  // Stops work in flight. proc.kill() only killed OUR process while the
+  // server-side run carried on spending credits; this actually halts it.
+  if (!confirm('Stop this Cowork run?\n\nWhatever it has produced so far is '
+      + 'kept. Nothing was sent.')) return;
+  const t = cwTask(id);
+  const live = document.getElementById(`cw-live-${id}`);
+  if (live) live.textContent = 'Stopping…';
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`, { method: 'DELETE' });
+    const data = await res.json();
+    cwStopPoller(id);
+    if (t && data && data.action) cwApply(t, data.action);
+  } catch (err) {
+    cwStopPoller(id);
+    if (t) t.cw_error = 'Could not stop the run.';
+  }
   cwRerender(id);
 }
 

@@ -148,10 +148,12 @@ class TestFailureModes(unittest.TestCase):
     def test_result_shape_stable_on_every_failure(self):
         # "barrier" carries the write-barrier verdict and is present on every
         # path, including failures, so a caller never has to guess whether the
-        # key exists before reading it.
+        # key exists before reading it. "cancelled" is guaranteed for the same
+        # reason: the card decides between "you stopped this" and "this failed"
+        # by reading it, and a missing key would read as a failure.
         expected = {"terminal_status", "duration_seconds", "conversation_id",
                     "finding", "draft", "tool_trace", "tools", "barrier",
-                    "error", "raw_text"}
+                    "error", "raw_text", "cancelled"}
         for bad in ("", "junk", '{"text":', json.dumps({"text": "x"})):
             with self.subTest(bad=bad[:20]):
                 self.assertEqual(set(parse_cowork_output(bad)), expected)

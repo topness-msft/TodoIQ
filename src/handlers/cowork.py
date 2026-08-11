@@ -30,6 +30,7 @@ from ..models import (
 )
 from ..services.cowork_runner import (
     AlreadyRunning,
+    cancel_run,
     compose_prompt,
     get_result,
     get_progress,
@@ -51,6 +52,9 @@ LOG_DIR_OVERRIDE = None
 # network. A real network call in the poll path once took the suite from 35s to
 # 313s, so this seam is not optional.
 HANDOFF_FN = None
+
+# Cancel seam, same reasoning: the unit suite must never post a real pause.
+CANCEL_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -424,6 +428,50 @@ class CoworkHandler(tornado.web.RequestHandler):
                 payload["handoff"] = handoff
 
         self.write(json.dumps({"action": payload}))
+
+    # ── DELETE ──
+
+    def delete(self, task_id):
+        """Stop a preview that is in flight.
+
+        The ONLY thing here that reaches out to Cowork and changes something,
+        and it strictly REDUCES what can happen: it stops work, it cannot start
+        or send anything. That is why it is safe to expose while there is still
+        deliberately no execute route.
+
+        `proc.kill()` on the subprocess path only kills our local process; the
+        server-side run keeps going and keeps spending credits. Cancellation is
+        the capability the API transport adds, verified live: the run stopped
+        3.0s after the request.
+        """
+        tid = int(task_id)
+        action = get_latest_task_action(tid)
+        if not action:
+            return self._fail(404, "No Cowork preview for this task")
+        if action["state"] != "previewing":
+            return self._fail(409, "That preview is not running")
+
+        conversation_id = action.get("conversation_id")
+        stopped = False
+        if conversation_id:
+            stopped = (CANCEL_FN or cancel_run)(conversation_id)
+
+        # Local bookkeeping happens either way. If the remote cancel did not
+        # land we still stop showing a spinner, but we say so rather than
+        # claiming we stopped something we did not.
+        updated = update_task_action(
+            action["id"],
+            frozenset({"state", "error"}),
+            state="failed",
+            error=None if stopped else (
+                "Stop was requested but Cowork did not confirm it. The run may "
+                "still be finishing on the server."
+            ),
+        )
+        self.write(json.dumps({
+            "action": _enrich(_clean(updated or action)),
+            "stopped": stopped,
+        }))
 
     # ── PUT ──
 
