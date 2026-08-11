@@ -2095,11 +2095,18 @@ function cwDestBlock(t) {
   // A broadcast warning outranks any transport note — never trade it away.
   const note = (!risky && chan && t.cw_delivery_channel !== CW_KIND_CHANNEL[kind])
     ? chan.note : d.note;
+  // Link straight to the conversation this is drafted for, so checking who is
+  // actually in it is one click rather than a hunt through Teams.
+  const srcUrl = t.source_url || '';
+  const openLink = srcUrl
+    ? `<a class="cw-dest-open" href="${cwEscapeAttr(srcUrl)}" target="_blank" rel="noopener noreferrer" data-testid="dest-open">Open chat</a>`
+    : '';
   return `<div class="cw-dest${risky ? ' is-risky' : ''}">
     <span>${risky ? '⚠' : '↳'}</span>
     <span><b>Drafted for:</b>
     <span data-testid="${risky ? 'dest-risky' : 'dest-safe'}"><span data-testid="dest-status">${esc(display)}</span></span>
     ${chan ? `<span class="cw-dest-chan" data-testid="dest-channel-chip">${esc(chan.label)}</span>` : ''}
+    ${openLink}
     <br><span style="color:var(--text-muted)">${esc(note)}</span>
     <span class="cw-dest-actions">
       ${confirmed ? '<span class="cw-dest-badge" data-testid="dest-confirmed">✓ audience confirmed</span>' : ''}

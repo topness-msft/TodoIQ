@@ -2911,7 +2911,7 @@ function cwIntentBlock(task, editable) {
 // The audience a draft is written for. This is deliberately separate from the
 // Cowork conversation id: one is who would receive the message, the other is
 // which research session produced it.
-function cwDestBlock(action) {
+function cwDestBlock(action, task) {
     var d = CW_DEST[action.destination_kind] || CW_DEST['unknown'];
     var conv = action.conversation_id || '';
     var risky = d.risky || !!action.is_broadcast;
@@ -2922,6 +2922,14 @@ function cwDestBlock(action) {
     var note = (!risky && chan
         && action.delivery_channel !== CW_KIND_CHANNEL[action.destination_kind])
         ? chan.note : d.note;
+    // Link straight to the conversation this is drafted for, so checking who
+    // is actually in it is one click rather than a hunt through Teams.
+    var srcUrl = (task && task.source_url) || '';
+    var openLink = srcUrl
+        ? '<a class="cw-dest-open" href="' + cwEscapeAttr(srcUrl) + '" '
+          + 'target="_blank" rel="noopener noreferrer" '
+          + 'data-testid="dest-open">Open chat</a>'
+        : '';
     return '<div class="cw-dest' + (risky ? ' is-risky' : '') + '">'
         + '<span class="d-icon">' + (risky ? '&#9888;' : '&#8627;') + '</span>'
         + '<span><b>Drafted for:</b> '
@@ -2929,6 +2937,7 @@ function cwDestBlock(action) {
         + '<span data-testid="dest-status">' + escapeHtml(display) + '</span></span>'
         + (chan ? '<span class="cw-dest-chan" data-testid="dest-channel-chip">'
             + escapeHtml(chan.label) + '</span>' : '')
+        + openLink
         + '<span class="d-note">' + escapeHtml(note) + '</span>'
         + '<span class="cw-dest-actions">'
         + (confirmed
@@ -3247,7 +3256,7 @@ function renderCoworkCard(task) {
 
         return cwShell('', 'preview', task,
             cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml
-            + cwDestBlock(a) + cwRedoRow(task.id),
+            + cwDestBlock(a, task) + cwRedoRow(task.id),
             foot);
     }
 

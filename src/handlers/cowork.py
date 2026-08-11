@@ -184,9 +184,7 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
         return {
             "delivery_channel": channel or "teams",
             "destination_ref": destination["conversation_id"],
-            "destination_display": (
-                f"{person['name']} ({label})" if person else label
-            ),
+            "destination_display": _conversation_display(label, people, person),
             "destination_source": "auto_source_url",
         }
 
@@ -210,6 +208,39 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
         # so the audit trail never overstates what was read.
         "destination_source": "auto_task_text" if inferred else None,
     }
+
+
+# At most this many names before collapsing to "+N". The card is one line and
+# a wrapped destination row pushes the draft out of view.
+_DEST_NAME_LIMIT = 2
+
+
+def _conversation_display(label, people, person):
+    """A human label for a bound conversation.
+
+    "group chat" states the SHAPE of the audience but not who is in it, and the
+    names were already on the task. Naming them also makes the broadcast
+    warning concrete: "everyone in the chat" is easy to skim past, two named
+    colleagues are not.
+
+    The shape is always kept alongside the names, never replaced by them.
+    """
+    if person:
+        return f"{person['name']} ({label})"
+
+    names = [p["name"] for p in (people or []) if p.get("name")]
+    if not names:
+        return label
+
+    shown = names[:_DEST_NAME_LIMIT]
+    extra = len(names) - len(shown)
+    if extra > 0:
+        joined = ", ".join(shown) + f" +{extra}"
+    elif len(shown) == 2:
+        joined = f"{shown[0]} and {shown[1]}"
+    else:
+        joined = shown[0]
+    return f"{label} with {joined}"
 
 
 def _carry_forward_destination(task_id: int, resolved: dict) -> dict:

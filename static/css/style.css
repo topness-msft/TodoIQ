@@ -2712,6 +2712,14 @@ textarea.cw-draft {
 .cw-btn-ghost { color: var(--text-secondary); border-color: transparent; background: transparent; }
 .cw-foot-note { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
 
+/* Link to the conversation a draft is bound to. Deliberately quiet: the
+   broadcast warning beside it must stay the loudest thing in the row. */
+.cw-dest-open {
+    margin-left: 8px; font-size: 11px; color: #0f6cbd;
+    text-decoration: none; white-space: nowrap;
+}
+.cw-dest-open:hover { text-decoration: underline; }
+
 /* Handoff status: what Cowork did after "Open in Cowork". `waiting` is the
    only one that earns colour - it means Cowork is blocked on the user, which
    is how an approval prompt surfaces. The rest are quiet notes. */
