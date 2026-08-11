@@ -1406,14 +1406,23 @@ def _append_progress(label, text) -> None:
     text needs no `[cowork] streaming - ...` unwrapping. Both transports land in
     the SAME ring, which is what lets the card read progress without knowing
     which transport is running.
+
+    Consecutive duplicates are dropped. A repeated line is not progress, and on
+    a real run 22 copies of "Connecting MCP servers" pushed everything
+    informative out of a ring that only keeps the tail. A line recurring AFTER
+    something else is kept: returning to a phase is real information.
     """
     if not text:
         return
     try:
         with _runs_lock:
             entry = _runs.get(label)
-            if entry is not None:
-                entry["progress"].append(text)
+            if entry is None:
+                return
+            ring = entry["progress"]
+            if ring and ring[-1] == text:
+                return
+            ring.append(text)
     except Exception:  # noqa: BLE001
         logger.debug("could not record progress", exc_info=True)
 
@@ -2088,27 +2097,49 @@ def _api_run_default(prompt, config, on_progress):
                 )
             for kind, data in _iter_sse(response.iter_lines()):
                 events.append((kind, data))
-                if kind == "tk":
-                    _api_progress(data, on_progress)
+                text = _api_progress_text(kind, data)
+                if text:
+                    on_progress(text)
                 if kind == "rl" and data.get("st") in _TERMINAL_RUN_STATES:
                     break
 
     return _api_payload_from_events(events, conversation_id)
 
 
-def _api_progress(data, on_progress):
-    """Surface a `tk` task-card update as one progress line, best effort."""
-    try:
+def _api_progress_text(kind, data):
+    """One user-facing progress line from an SSE event, or None.
+
+    Mirrors the CLI's own mapping (cowork_cli/services/send_progress.py:102).
+    The important one is ``ps``, which carries the readable sentence such as
+    "Searching your Teams and calendar". Reading only ``tk`` showed container
+    plumbing on a loop: a real run reached 4 minutes with 22 of its 25 progress
+    lines being the identical string "Connecting MCP servers".
+
+    Raw tool names are deliberately NOT surfaced, matching ``_progress_text`` on
+    the subprocess path: they are developer-facing and the runtime emits its own
+    human copy alongside them.
+    """
+    if not isinstance(data, dict):
+        return None
+    if kind == "ps":
+        msg = str(data.get("msg") or "").strip()
+        return msg[:80] if msg else None
+    if kind == "th":
+        return "Thinking"
+    if kind == "dx":
+        return "Writing the reply"
+    if kind == "fr":
+        return "Finalizing"
+    if kind == "tk":
         items = data.get("items")
         if not isinstance(items, list):
-            return
+            return None
         for item in items:
             if isinstance(item, dict):
                 text = item.get("af") or item.get("desc")
                 if text:
-                    on_progress(str(text))
-    except Exception:  # noqa: BLE001
-        logger.debug("api progress hook raised", exc_info=True)
+                    return str(text).strip()[:80]
+    return None
 
 
 def _api_post(path, body):
