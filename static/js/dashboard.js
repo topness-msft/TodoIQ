@@ -2854,6 +2854,9 @@ var _cwActions = {};
 var _cwLoading = {};
 var _cwEditing = {};
 var _cwRedo = {};
+// Refine = one more turn on the SAME Cowork conversation, keeping the research
+// it already did. Distinct from Redo, which starts a fresh conversation.
+var _cwRefine = {};
 var _cwPollers = {};
 var _cwStartedAt = {};
 
@@ -3124,8 +3127,14 @@ function cwInitFindingToggle(taskId) {
 
 function cwRedoBlock(taskId) {
     if (!_cwRedo[taskId]) {
-        return '<button class="cw-btn cw-btn-sec" onclick="cwToggleRedo(' + taskId + ',true)">'
-            + '&#8635; Redo</button>';
+        // "Start fresh" rather than "Redo": beside Refine, which keeps the
+        // conversation, the distinction that matters is whether the research
+        // is thrown away.
+        return '<button class="cw-btn cw-btn-sec" '
+            + 'title="Throw away this conversation and research again from '
+            + 'scratch. Slower and costs more than Refine." '
+            + 'onclick="cwToggleRedo(' + taskId + ',true)">'
+            + '&#8635; Start fresh</button>';
     }
     return '';
 }
@@ -3179,6 +3188,95 @@ function cwStopPreview(taskId) {
         });
 }
 
+function cwRefineBlock(a, taskId) {
+    // Only possible on the API transport: a subprocess-produced row carries no
+    // conversation id, so there is nothing to continue. That absence is the
+    // honest gate — no flag lookup needed in the UI.
+    if (!a || !a.conversation_id) return '';
+    if (!_cwRefine[taskId]) {
+        return '<button class="cw-btn cw-btn-sec" data-testid="cw-refine-btn" '
+            + 'title="Ask Cowork to revise this, keeping everything it already '
+            + 'researched. Much faster than starting over." '
+            + 'onclick="cwToggleRefine(' + taskId + ',true)">Refine</button>';
+    }
+    return '';
+}
+
+function cwRefineRow(a, taskId) {
+    if (!_cwRefine[taskId]) return '';
+    // Instruction only. The DRAFT is edited in place, in the card's own draft
+    // area, rather than duplicated into a second box below it — showing the
+    // same text twice made it ambiguous which copy was the real one.
+    return '<div class="cw-refine" data-testid="cw-refine-row">'
+        + '<div class="cw-refine-label">Edit the draft above, and tell Cowork '
+        + 'what to change. Both are sent.</div>'
+        + '<textarea class="cw-refine-box" id="cw-refine-' + taskId + '" rows="2" '
+        + 'placeholder="e.g. make it shorter and aim it just at Greg"></textarea>'
+        + '<div class="cw-refine-actions">'
+        + '<span class="i-edit" data-testid="cw-refine-send" '
+        + 'onclick="cwSendRefine(' + taskId + ')">Send to Cowork</span>'
+        + '<span class="i-edit i-muted" onclick="cwToggleRefine(' + taskId + ',false)">Cancel</span>'
+        + '</div></div>';
+}
+
+function cwToggleRefine(taskId, on) {
+    if (on) {
+        _cwRefine[taskId] = true;
+        // Refine edits the draft in place, so leave any separate Edit mode.
+        delete _cwEditing[taskId];
+    } else {
+        delete _cwRefine[taskId];
+    }
+    cwRerender(taskId);
+    if (on) {
+        var box = document.getElementById('cw-refine-' + taskId);
+        if (box) box.focus();
+    }
+}
+
+function cwSendRefine(taskId) {
+    var box = document.getElementById('cw-refine-' + taskId);
+    var draftBox = document.getElementById('cw-draft-' + taskId);
+    if (!box) return;
+    var instruction = (box.value || '').trim();
+    var a = _cwActions[taskId] || {};
+    var edited = draftBox ? (draftBox.value || '').trim() : '';
+    var original = ((a.draft_edited || a.draft) || '').trim();
+
+    // Either an instruction or an in-place edit is enough to act on. Sending
+    // the edited draft verbatim is what makes "I rewrote it, now match this"
+    // work without the user having to describe the change in prose.
+    var changed = edited && edited !== original;
+    if (!instruction && !changed) return;
+
+    var payload = instruction;
+    if (changed) {
+        payload = (instruction ? instruction + "\n\n" : "")
+            + "Here is my edited version. Use it as the basis for the revised "
+            + "draft:\n\n" + edited;
+    }
+
+    delete _cwRefine[taskId];
+    delete _cwEditing[taskId];
+    fetch('/api/tasks/' + taskId + '/cowork/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: payload })
+    })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+        if (!res.ok) {
+            var a = _cwActions[taskId];
+            if (a) a.error = (res.d && res.d.error) || 'Could not continue.';
+            return cwRerender(taskId);
+        }
+        _cwActions[taskId] = res.d.action;
+        cwRerender(taskId);
+        startCoworkPoller(taskId);
+    })
+    .catch(function () { cwRerender(taskId); });
+}
+
 function renderCoworkCard(task) {
     var a = _cwActions[task.id];
 
@@ -3218,7 +3316,11 @@ function renderCoworkCard(task) {
     }
 
     if (a && a.state === 'ready') {
-        var editing = !!_cwEditing[task.id];
+        var refining = !!_cwRefine[task.id];
+        // Refine edits the draft IN PLACE: the same textarea, so there is only
+        // ever one copy of the text on screen and no ambiguity about which one
+        // gets sent.
+        var editing = !!_cwEditing[task.id] || refining;
         var draft = cwCurrentDraft(a);
         var findingHtml = cwFindingBlock(a.finding, task.id);
         var draftHtml = editing
@@ -3236,11 +3338,16 @@ function renderCoworkCard(task) {
               + escapeHtml(a.redirect_text) + '</div>'
             : '';
 
-        var foot = editing
+        var foot = refining
+            // In refine mode the actions live in the refine row, so the footer
+            // only offers the way out.
+            ? '<button class="cw-btn cw-btn-ghost" onclick="cwToggleRefine(' + task.id + ',false)">Cancel</button>'
+            : editing
             ? '<button class="cw-btn cw-btn-go" onclick="cwSaveDraft(' + task.id + ')">Save edit</button>'
               + '<button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(' + task.id + ',false)">Cancel</button>'
             : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
+              + cwRefineBlock(a, task.id)
               + cwRedoBlock(task.id)
               + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
               + 'title="Abandon this conversation and research again from scratch" '
@@ -3266,7 +3373,7 @@ function renderCoworkCard(task) {
 
         return cwShell('', 'preview', task,
             cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml
-            + cwDestBlock(a, task) + cwRedoRow(task.id),
+            + cwDestBlock(a, task) + cwRefineRow(a, task.id) + cwRedoRow(task.id),
             foot);
     }
 

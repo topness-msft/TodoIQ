@@ -193,6 +193,14 @@ def _migrate(conn: sqlite3.Connection):
         if column not in action_cols:
             conn.execute(f"ALTER TABLE task_actions ADD COLUMN {column} TEXT")
             conn.commit()
+    if "parent_action_id" not in action_cols:
+        # A refine turn continues an existing Cowork conversation rather than
+        # starting a new one. It is still its OWN row so the correction chain
+        # stays auditable, and this points back at the attempt it refines.
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN parent_action_id INTEGER"
+        )
+        conn.commit()
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [

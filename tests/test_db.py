@@ -166,6 +166,10 @@ class TestTaskActionsSchema(unittest.TestCase):
             "seen_at", "island_url", "created_at", "updated_at",
             "delivery_channel", "destination_display",
             "destination_confirmed_at", "destination_source",
+            # A refine turn continues an existing Cowork conversation. It is
+            # still its own row so the correction chain stays auditable, and
+            # this points back at the attempt it refines.
+            "parent_action_id",
         }
         self.assertEqual(cols, expected)
 

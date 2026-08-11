@@ -1068,3 +1068,92 @@ class TestStopPreview(CoworkAPITestBase):
         from src.handlers.cowork import CoworkHandler
         self.assertFalse(hasattr(CoworkHandler, "execute"))
         self.assertFalse(hasattr(CoworkHandler, "send"))
+
+
+class TestRefineTurn(CoworkAPITestBase):
+    """POST /cowork/refine — one more turn on the SAME conversation.
+
+    A Redo starts a brand new Cowork conversation and re-researches M365 from
+    zero (27s-6min, 69-355 credits measured). A refine continues the existing
+    conversation, which still holds that research.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from src.services import cowork_runner as cr_mod
+        self.continued = []
+
+        def fake_continue(task_id, conversation_id, instruction, **kw):
+            self.continued.append(
+                {"task_id": task_id, "cid": conversation_id, "text": instruction}
+            )
+            return cr_mod.preview_label(task_id)
+
+        import src.handlers.cowork as handler_mod
+        self._orig = handler_mod.continue_preview
+        handler_mod.continue_preview = fake_continue
+        self.addCleanup(
+            lambda: setattr(handler_mod, "continue_preview", self._orig)
+        )
+
+    def _ready(self):
+        tid = self.make_task()
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT))
+        self.get_preview(tid)
+        return tid
+
+    def _refine(self, tid, instruction="make it shorter"):
+        return self.fetch(
+            f"/api/tasks/{tid}/cowork/refine",
+            method="POST",
+            body=json.dumps({"instruction": instruction}),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_it_continues_the_existing_conversation(self):
+        tid = self._ready()
+        r = self._refine(tid)
+        self.assertEqual(r.code, 202)
+        self.assertEqual(len(self.continued), 1)
+        self.assertEqual(self.continued[0]["cid"], "conv-abc")
+
+    def test_it_creates_a_new_row_linked_to_its_parent(self):
+        """The audit chain: the original attempt survives."""
+        tid = self._ready()
+        before = json.loads(
+            self.fetch(f"/api/tasks/{tid}/cowork?history=1").body
+        )["actions"]
+        self._refine(tid)
+        after = json.loads(
+            self.fetch(f"/api/tasks/{tid}/cowork?history=1").body
+        )["actions"]
+        self.assertEqual(len(after), len(before) + 1)
+        newest = after[0] if after[0]["id"] > after[-1]["id"] else after[-1]
+        self.assertTrue(newest.get("parent_action_id"))
+
+    def test_the_instruction_is_recorded(self):
+        tid = self._ready()
+        self._refine(tid, "aim it just at Greg")
+        self.assertEqual(self.continued[0]["text"], "aim it just at Greg")
+
+    def test_an_empty_instruction_is_rejected(self):
+        tid = self._ready()
+        self.assertEqual(self._refine(tid, "   ").code, 400)
+        self.assertEqual(self.continued, [])
+
+    def test_a_task_with_no_preview_is_404(self):
+        tid = self.make_task()
+        self.assertEqual(self._refine(tid).code, 404)
+
+    def test_a_running_preview_is_409(self):
+        tid = self.make_task()
+        proc = FakeProc(stdout=GOOD_STDOUT)
+        self.start(tid, proc)
+        self.assertEqual(self._refine(tid).code, 409)
+
+    def test_no_execute_route_was_introduced(self):
+        """`delete` is a Tornado base method, so only our own names are checked."""
+        from src.handlers.cowork import CoworkRefineHandler
+        own = set(vars(CoworkRefineHandler))
+        self.assertEqual(own & {"execute", "send", "deliver"}, set())
+        self.assertIn("post", own)

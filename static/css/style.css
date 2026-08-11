@@ -2720,6 +2720,22 @@ textarea.cw-draft {
 }
 .cw-dest-open:hover { text-decoration: underline; }
 
+/* Refine: one more turn on the same Cowork conversation. Pre-populated with
+   the draft, so "change this bit" is typing over it rather than describing it. */
+.cw-refine {
+    margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+    background: var(--bg-tertiary, #faf9f8); border: 1px solid var(--border, #e1dfdd);
+}
+.cw-refine-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+.cw-refine-box {
+    width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
+    line-height: 1.45; padding: 8px 10px; border-radius: 4px;
+    border: 1px solid var(--border, #c8c6c4); resize: vertical;
+    background: var(--bg-primary, #fff); color: var(--text-primary, inherit);
+}
+.cw-refine-box:focus { outline: 2px solid #0f6cbd; outline-offset: -1px; }
+.cw-refine-actions { display: flex; gap: 14px; padding-top: 8px; }
+
 /* Handoff status: what Cowork did after "Open in Cowork". `waiting` is the
    only one that earns colour - it means Cowork is blocked on the user, which
    is how an approval prompt surfaces. The rest are quiet notes. */

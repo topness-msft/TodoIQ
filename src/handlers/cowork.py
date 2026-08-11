@@ -32,6 +32,8 @@ from ..services.cowork_runner import (
     AlreadyRunning,
     cancel_run,
     compose_prompt,
+    compose_refine_prompt,
+    continue_preview,
     get_result,
     get_progress,
     get_cached_cowork_island,
@@ -520,6 +522,98 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(400, "No editable fields supplied")
 
         self.write(json.dumps({"action": _enrich(_clean(updated))}))
+
+
+class CoworkRefineHandler(tornado.web.RequestHandler):
+    """POST /api/tasks/<id>/cowork/refine — one more turn, same conversation.
+
+    A Redo rebuilds the whole prompt and starts a BRAND NEW Cowork
+    conversation, so it re-researches M365 from zero: measured at 27s to 6
+    minutes and 69 to 355 credits every time. A refine turn continues the
+    existing conversation, which still holds that research, and came back in
+    about 30s in a live check.
+
+    Still no execute route. The barrier is rebuilt and re-sent on this turn
+    (it travels per request), so a "send it now" instruction typed here is
+    intercepted — which makes this strictly safer than the same words typed
+    into the Cowork web app, where there is no barrier at all.
+    """
+
+    def _fail(self, code, message):
+        self.set_status(code)
+        self.write(json.dumps({"error": message}))
+
+    def post(self, task_id):
+        tid = int(task_id)
+        task = get_task(tid)
+        if not task:
+            return self._fail(404, "Task not found")
+
+        action = get_latest_task_action(tid)
+        if not action:
+            return self._fail(404, "No Cowork preview for this task")
+        if action["state"] == "previewing":
+            return self._fail(409, "A preview is already running for this task")
+
+        conversation_id = action.get("conversation_id")
+        if not conversation_id:
+            # Subprocess-produced rows carry no conversation id, so there is
+            # nothing to continue. The UI hides the affordance in that case;
+            # this is the server-side guard.
+            return self._fail(
+                409,
+                "This preview cannot be continued. Use Redo to start a new "
+                "Cowork conversation.",
+            )
+
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except (json.JSONDecodeError, TypeError):
+            return self._fail(400, "Invalid JSON")
+
+        instruction = (body.get("instruction") or "").strip()
+        if not instruction:
+            return self._fail(400, "An instruction is required")
+
+        # A refine is a NEW row for the same reason a Redo is: the original
+        # attempt survives and the correction chain stays auditable. The
+        # audience binding is carried forward wholesale — it was resolved on a
+        # ready row, so re-deriving it could silently change who this is for.
+        new_action = create_task_action(
+            tid,
+            action_type=action.get("action_type") or "general",
+            intent=action.get("intent"),
+            notes_snapshot=action.get("notes_snapshot"),
+            redirect_text=instruction,
+            composed_prompt=compose_refine_prompt(instruction),
+            conversation_id=conversation_id,
+            island_url=action.get("island_url"),
+            parent_action_id=action["id"],
+            destination_kind=action.get("destination_kind"),
+            destination_ref=action.get("destination_ref"),
+            destination_display=action.get("destination_display"),
+            destination_source=action.get("destination_source"),
+            destination_confirmed_at=action.get("destination_confirmed_at"),
+            delivery_channel=action.get("delivery_channel"),
+        )
+
+        try:
+            continue_preview(
+                tid, conversation_id, instruction, log_dir=LOG_DIR_OVERRIDE,
+            )
+        except AlreadyRunning:
+            return self._fail(409, "A preview is already running for this task")
+        except Exception as exc:  # pragma: no cover - defensive
+            update_task_action(
+                new_action["id"],
+                frozenset({"state", "error"}),
+                state="failed",
+                error=f"Could not continue the conversation: {exc}",
+            )
+            return self._fail(500, f"Could not continue the conversation: {exc}")
+
+        self.set_status(202)
+        self.write(json.dumps({"action": _enrich(_clean(new_action))}))
 
 
 class CoworkDestinationHandler(tornado.web.RequestHandler):

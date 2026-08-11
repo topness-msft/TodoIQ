@@ -361,6 +361,29 @@ def compose_prompt(task, destination: dict | None = None,
     return "\n\n".join(parts)
 
 
+def compose_refine_prompt(instruction: str) -> str:
+    """The prompt for a FOLLOW-UP turn on an existing conversation.
+
+    Deliberately minimal. The conversation already holds [ROLE], [TASK],
+    [SOURCE], [VOICE], [INTENT] and [NOTES] from the first turn, so re-sending
+    them wastes tokens and risks stacking conflicting [CORRECTION] blocks on
+    top of each other.
+
+    ``_SAFETY`` is restated because it also carries the OUTPUT CONTRACT, not
+    just the do-not-send rule. Without it a free-form instruction such as "what
+    did Brandon originally write?" gets answered in prose, ``_extract_draft``
+    finds no draft block, and the card renders blank with no error.
+
+    The safety text is decoration, not the control: the real barrier is the
+    per-request ``toolCallbackConfig``, which ``continue_preview`` re-sends on
+    every turn.
+    """
+    text = _clean(instruction)
+    if not text:
+        raise ValueError("A refine instruction is required.")
+    return "[REFINEMENT]\n" + text + "\n\n[OUTPUT]\n" + _SAFETY
+
+
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
@@ -630,6 +653,7 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
 # both G1 (email sent) and G1b (intercepted) — it records the call, not the
 # execution.
 
+import functools
 import logging
 import os
 import subprocess
@@ -1387,6 +1411,61 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
     return label
 
 
+def continue_preview(task_id, conversation_id, instruction, *, log_dir=None) -> str:
+    """Run a FOLLOW-UP turn on an existing Cowork conversation. Non-blocking.
+
+    Separate entry point rather than a flag on ``start_preview``: the divergence
+    is only the conversation id and the prompt, and threading a resume flag
+    through that function would infect the busiest path in this module.
+
+    Only possible on the API transport. The CLI has no ``--resume`` and its
+    stdout carries no conversation id, so a subprocess-produced row has nothing
+    to continue from — which is why the UI gates the affordance on
+    ``conversation_id`` being present.
+
+    Why it is worth having: a fresh run re-researches M365 from zero, measured
+    at 27s to 6 minutes and 69 to 355 credits. A follow-up turn keeps the
+    conversation's context and completed in about 30s in a live check.
+    """
+    if not conversation_id:
+        raise ValueError("A conversation id is required to continue a preview.")
+    prompt = compose_refine_prompt(instruction)
+    label = preview_label(task_id)
+
+    with _runs_lock:
+        entry = _runs.get(label)
+        if entry is not None and entry["result"] is None:
+            raise AlreadyRunning(label)
+        _runs[label] = {
+            "proc": None, "thread": None, "result": None,
+            "progress": deque(maxlen=_PROGRESS_MAX),
+        }
+
+    # SAFETY: the barrier travels in the request body PER TURN, so a follow-up
+    # turn is only barriered if we build and send the config again.
+    config_path = build_callback_config(task_id, log_dir=log_dir)
+    write_prompt_file(f"{task_id}_refine", prompt, log_dir=log_dir)
+
+    pre = tenant_barrier_precheck(use_cache=True)
+    if pre["status"] == "AT_RISK":
+        logger.error("WRITE BARRIER PRECHECK: %s", pre["reason"])
+    elif pre["status"] == "unknown":
+        logger.warning("WRITE BARRIER PRECHECK: %s", pre["reason"])
+
+    thread = threading.Thread(
+        target=_collect_api,
+        args=(label, task_id, prompt, config_path,
+              Path(log_dir) if log_dir else LOG_DIR),
+        kwargs={"conversation_id": conversation_id},
+        daemon=True,
+        name=f"cowork-refine-{task_id}",
+    )
+    with _runs_lock:
+        _runs[label]["thread"] = thread
+    thread.start()
+    return label
+
+
 def _record_progress(label, raw_line) -> None:
     """Append one CLI stderr line to a run's progress ring, if it is user-facing.
 
@@ -1946,7 +2025,8 @@ def _is_auth_failure(exc) -> bool:
     return any(f"HTTP {code}" in text for code in _AUTH_HTTP_CODES)
 
 
-def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
+def _collect_api(label, task_id, prompt, config_path, log_dir,
+                 conversation_id=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -1968,12 +2048,13 @@ def _collect_api(label, task_id, prompt, config_path, log_dir) -> None:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         runner = _api_run_fn or _api_run_default
         on_progress = lambda text: _append_progress(label, text)  # noqa: E731
+        call = functools.partial(runner, conversation_id=conversation_id)
         try:
-            payload = runner(prompt, config, on_progress)
+            payload = call(prompt, config, on_progress)
         except Exception as exc:  # noqa: BLE001
             if not _is_auth_failure(exc):
                 raise
-            payload = _api_reauth_and_retry(runner, prompt, config, on_progress)
+            payload = _api_reauth_and_retry(call, prompt, config, on_progress)
         stdout = json.dumps(payload)
     except CoworkAuthExpired as exc:
         auth_failed = True
@@ -2037,8 +2118,12 @@ def _api_reauth_and_retry(runner, prompt, config, on_progress):
         raise
 
 
-def _api_run_default(prompt, config, on_progress):
+def _api_run_default(prompt, config, on_progress, conversation_id=None):
     """POST /v1/subscribe and fold the SSE stream into a CLI-shaped document.
+
+    When ``conversation_id`` is supplied the turn CONTINUES that conversation
+    instead of starting a new one, which is what makes a refine turn cheap: the
+    runtime still holds the earlier research, so it does not repeat it.
 
     Imports live here so the module keeps loading when the API path is off,
     which is the default. Auth currently piggybacks on the CLI's MSAL cache; an
@@ -2072,7 +2157,7 @@ def _api_run_default(prompt, config, on_progress):
     # acct["realm"] is the string "organizations", not the tenant guid; using it
     # cost a 403 TENANT_MISMATCH.
     oid, tenant = account["home_account_id"].split(".", 1)
-    conversation_id = f"{tenant}:{oid}:cw-{uuid.uuid4().hex[:8]}"
+    conversation_id = conversation_id or f"{tenant}:{oid}:cw-{uuid.uuid4().hex[:8]}"
 
     body = {
         "conversationId": conversation_id,

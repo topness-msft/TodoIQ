@@ -450,6 +450,7 @@ _ACTION_INSERT_FIELDS = (
     "action_type", "intent", "notes_snapshot", "redirect_text",
     "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
     "island_url", "delivery_channel", "destination_display", "destination_source",
+    "destination_confirmed_at", "parent_action_id",
 )
 
 # Teams and email are the only transports TodoIQ can describe today. The value

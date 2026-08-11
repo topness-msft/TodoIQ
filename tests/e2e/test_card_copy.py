@@ -2,7 +2,7 @@
 
 F34 established that `--tool-callback-config` is a per-message barrier carried by
 the connected client, so it does NOT follow a conversation into the Cowork web
-app. Once the user clicks "Open in Cowork" they are in an ordinary Cowork
+app. Once the user clicks "Finish in Cowork" they are in an ordinary Cowork
 session and may well send from there - which is now deliberate.
 
 The old copy read "Preview only - nothing is sent. You copy and send it
@@ -77,3 +77,4 @@ class TestNoSendClaimIsScopedToTodoIQ:
                 assert banned not in text, banned
         finally:
             _delete(page, base_url, task_id)
+
