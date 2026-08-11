@@ -119,18 +119,22 @@ class TestFirstTurnIsUnchanged(ApiProtocolTestBase):
         self.assertTrue(payload["conversation_id"].startswith("t:u:"))
 
     def test_the_session_segment_is_a_full_uuid(self):
-        """The deep link only resolves when the id looks web-app-minted.
+        """Match the format the Cowork web app mints for its own tasks.
 
-        The CLI mints ``cw-<8 hex>`` and we copied it. Every task the Cowork
-        web app creates uses a full UUID as the third segment, and opening a
-        ``cw-`` one raised a 403. Sampled from real URLs: the web app's own
-        links are ``<tenant>%3A<oid>%3A<uuid>``.
+        The CLI mints ``cw-<8 hex>`` and we copied it. Every task the web app
+        creates uses a full UUID as the third segment.
+
+        This was changed while chasing an HTTP 403 from the web app. It does
+        NOT fix that: the 403 reproduces with a full UUID too, and the cause is
+        still unknown (see cowork-bug-reports-draft.md #9). The format is kept
+        because matching the web app removes one confounder, not because it
+        makes the handoff work.
         """
         _, payload = self._run()
         session = payload["conversation_id"].split(":")[-1]
         self.assertFalse(
             session.startswith("cw-"),
-            "cw- prefixed sessions cannot be opened in the Cowork web app",
+            "session ids should match the web app's UUID format",
         )
         # Raises ValueError if it is not a real UUID.
         self.assertEqual(str(uuid.UUID(session)), session)
