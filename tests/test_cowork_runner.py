@@ -195,7 +195,16 @@ class TestCallbackConfig(RunnerTestBase):
         self.assertIn("m365_teams-PostMessage", cfg["tool_names"])
         self.assertIn("PostMessage", cfg["tool_names"])
 
-    def test_static_result_says_blocked_and_do_not_retry(self):
+    def test_static_result_blocks_this_turn_without_binding_the_next(self):
+        """Was "Do not retry", unscoped, and that broke the handoff.
+
+        A spoofed write puts this text into the conversation, where the model
+        reads it again on later turns. Phrased as a standing prohibition it
+        made Cowork refuse to send in the WEB APP, on a turn TodoIQ never sent
+        (task 2132: four CreateEvent calls spoofed, then "This task is in
+        preview mode" back to the user). The turn-scoped wording keeps the
+        loophole closed for the current turn without outliving it.
+        """
         cfg = json.loads(
             cr.build_callback_config(2076, log_dir=self.log_dir()).read_text(
                 encoding="utf-8"
@@ -204,9 +213,11 @@ class TestCallbackConfig(RunnerTestBase):
         msg = cfg["static_results"]["m365_teams-PostMessage"]
         self.assertIn("BLOCKED", msg)
         self.assertIn("Nothing was sent", msg)
-        self.assertIn("Do not retry", msg)
-        # Must also close the "try a different tool" loophole.
+        self.assertIn("THIS turn", msg)
+        # Must still close the "try a different tool" loophole for this turn.
         self.assertIn("another tool", msg)
+        # ...but must not read as permanent.
+        self.assertIn("not a standing restriction", msg)
 
     def test_config_is_utf8(self):
         path = cr.build_callback_config(2076, log_dir=self.log_dir())

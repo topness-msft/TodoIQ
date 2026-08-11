@@ -25,6 +25,7 @@ cannot positively prove is a 1:1 is reported as a broadcast.
 from __future__ import annotations
 
 import re
+import uuid
 from urllib.parse import unquote, quote
 import json
 
@@ -962,8 +963,11 @@ _PROGRESS_MAX = 200
 
 _BLOCK_MESSAGE = (
     "BLOCKED: TodoIQ preview mode intercepted this call. "
-    "Nothing was sent, saved or modified. Do not retry, and do not attempt "
-    "another tool to achieve the same effect. Report the draft instead."
+    "Nothing was sent, saved or modified. For THIS turn, report the draft "
+    "instead of retrying or reaching for another tool to achieve the same "
+    "effect. This is not a standing restriction on the conversation: if the "
+    "user later asks you directly to do it, treat that as a new instruction "
+    "and follow your normal confirmation process."
 )
 
 # Derived, never hand-copied, so the two cannot drift apart. Only the first
@@ -1616,8 +1620,15 @@ def _spawn_default(argv, **kwargs):
     return subprocess.Popen(argv, **kwargs)
 
 
-def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> str:
-    """Spawn a preview run and return its label. Non-blocking."""
+def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
+                  conversation_id=None) -> str:
+    """Spawn a preview run and return its label. Non-blocking.
+
+    ``conversation_id`` is optional and, when given, is the id the caller has
+    ALREADY persisted so that Stop is addressable while the run is still
+    starting up. This is turn 1 regardless: the id says where to address the
+    run, not that a conversation is being resumed.
+    """
     label = preview_label(task_id)
 
     with _runs_lock:
@@ -1650,6 +1661,7 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None) -> st
             target=_collect_api,
             args=(label, task_id, prompt, config_path,
                   Path(log_dir) if log_dir else LOG_DIR),
+            kwargs={"conversation_id": conversation_id, "is_follow_up": False},
             daemon=True,
             name=f"cowork-api-{task_id}",
         )
@@ -1739,7 +1751,7 @@ def continue_preview(task_id, conversation_id, instruction, *, log_dir=None) -> 
         target=_collect_api,
         args=(label, task_id, prompt, config_path,
               Path(log_dir) if log_dir else LOG_DIR),
-        kwargs={"conversation_id": conversation_id},
+        kwargs={"conversation_id": conversation_id, "is_follow_up": True},
         daemon=True,
         name=f"cowork-refine-{task_id}",
     )
@@ -2370,7 +2382,7 @@ def _is_auth_failure(exc) -> bool:
 
 
 def _collect_api(label, task_id, prompt, config_path, log_dir,
-                 conversation_id=None) -> None:
+                 conversation_id=None, is_follow_up=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -2392,7 +2404,9 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         runner = _api_run_fn or _api_run_default
         on_progress = lambda text: _append_progress(label, text)  # noqa: E731
-        call = functools.partial(runner, conversation_id=conversation_id)
+        call = functools.partial(
+            runner, conversation_id=conversation_id, is_follow_up=is_follow_up
+        )
         try:
             payload = call(prompt, config, on_progress)
         except Exception as exc:  # noqa: BLE001
@@ -2505,7 +2519,30 @@ _api_auth_fn = _api_auth_default
 _api_http_client_fn = _api_http_client_default
 
 
-def _api_run_default(prompt, config, on_progress, conversation_id=None):
+def new_conversation_id(_auth=None):
+    """Mint an addressable conversation id BEFORE the run starts, or None.
+
+    The id is minted client side and merely echoed back by the runtime, so
+    there is no reason to wait for a run to finish before knowing it. Waiting
+    is what made Stop unusable for the first ~30s of every run: cancellation
+    targets POST /v1/conversations/{id}/pause, and until the row had an id
+    there was nothing to address.
+
+    Fails soft. If auth is unavailable the run itself is about to fail anyway,
+    and returning None simply restores the previous behaviour of minting inside
+    the run.
+    """
+    auth = _auth or _api_auth_fn
+    try:
+        _token, _base, tenant, oid = auth()
+    except Exception:  # noqa: BLE001
+        logger.debug("could not mint a conversation id up front", exc_info=True)
+        return None
+    return f"{tenant}:{oid}:{uuid.uuid4()}"
+
+
+def _api_run_default(prompt, config, on_progress, conversation_id=None,
+                     is_follow_up=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -2525,10 +2562,15 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None):
     ``toolCallbackConfig`` rides on BOTH shapes, so the write barrier is sent
     per turn either way.
     """
-    import uuid
-
     token, base, tenant, oid = _api_auth_fn()
-    is_follow_up = bool(conversation_id)
+    # The turn kind is now EXPLICIT rather than inferred from "did we get an
+    # id". It used to be inferred, which meant an id could only ever be
+    # supplied for a follow-up, which in turn meant turn 1 could not be given
+    # an id up front -- and that is what left Stop with nothing to address for
+    # the first ~30s of a run. Callers that do not say fall back to the old
+    # inference, so nothing that predates this changes behaviour.
+    if is_follow_up is None:
+        is_follow_up = bool(conversation_id)
     # Full UUID rather than the CLI's `cw-<8 hex>`, matching the format the
     # Cowork web app mints for its own tasks. Both are accepted by the runtime.
     #
