@@ -40,6 +40,11 @@ class TestRiveterVisuals:
             image = Image.open(Path("static") / "img" / filename)
             assert image.mode == "RGBA"
             assert image.getpixel((0, 0))[3] == 0
+            gap = image.crop((660, 310, 739, 374))
+            assert not any(
+                alpha > 180 and min(red, green, blue) > 240
+                for red, green, blue, alpha in gap.getdata()
+            )
 
         dark = Image.open(Path("static") / "img" / "riveter-dark.png").convert("RGBA")
         wordmark = dark.crop((730, 35, 1840, 275))
