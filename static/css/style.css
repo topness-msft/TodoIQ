@@ -129,11 +129,24 @@ html, body {
     flex: 0 0 388px;
 }
 
-.riveter-logo {
+.riveter-logo,
+.riveter-logo-dark {
     width: 300px;
     height: 75px;
     object-fit: contain;
     object-position: left center;
+}
+
+.riveter-logo-dark {
+    display: none;
+}
+
+[data-theme="dark"] .riveter-logo-light {
+    display: none;
+}
+
+[data-theme="dark"] .riveter-logo-dark {
+    display: block;
 }
 
 .app-title {

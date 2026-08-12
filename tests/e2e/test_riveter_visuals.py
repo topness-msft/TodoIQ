@@ -1,7 +1,9 @@
 """Visual gates for Riveter branding and right-pane design alternatives."""
 
 import os
+from pathlib import Path
 
+from PIL import Image
 from playwright.sync_api import Page, expect
 
 
@@ -25,12 +27,30 @@ class TestRiveterVisuals:
         page.evaluate(
             "document.documentElement.setAttribute('data-theme', 'dark')"
         )
+        expect(page.get_by_test_id("riveter-logo-dark")).to_be_visible()
+        expect(page.get_by_test_id("riveter-logo-light")).to_be_hidden()
         _capture(page, "dashboard-desktop-dark")
 
         page.set_viewport_size({"width": 375, "height": 720})
         page.goto(base_url + "/")
-        expect(page.locator(".riveter-logo")).to_be_visible()
+        expect(page.get_by_test_id("riveter-logo-light")).to_be_visible()
         _capture(page, "dashboard-mobile-light")
+
+        for filename in ("riveter-light.png", "riveter-dark.png"):
+            image = Image.open(Path("static") / "img" / filename)
+            assert image.mode == "RGBA"
+            assert image.getpixel((0, 0))[3] == 0
+
+        dark = Image.open(Path("static") / "img" / "riveter-dark.png").convert("RGBA")
+        wordmark = dark.crop((730, 35, 1840, 275))
+        gray_pixels = [
+            (r, g, b)
+            for r, g, b, a in wordmark.getdata()
+            if a > 180 and max(r, g, b) - min(r, g, b) < 12
+        ]
+        assert gray_pixels
+        average = sum(sum(pixel) / 3 for pixel in gray_pixels) / len(gray_pixels)
+        assert 140 <= average <= 230
 
     def test_right_pane_alternatives(self, page: Page, base_url):
         page.set_viewport_size({"width": 1440, "height": 960})
@@ -81,20 +101,15 @@ class TestRiveterVisuals:
         notes_editor.press("Control+Enter")
         expect(notes).to_contain_text("Keep the roadmap language tentative.")
 
-        prompt = page.get_by_test_id("cowork-prompt")
-        expect(prompt).to_contain_text("Cowork prompt")
-        prompt.click()
-        editor = page.get_by_test_id("cowork-prompt-editor")
-        expect(editor).to_be_visible()
-        editor.fill("Draft a shorter Teams follow-up.")
-        editor.press("Control+Enter")
-        expect(prompt).to_contain_text("Draft a shorter Teams follow-up.")
-
         progress = page.get_by_test_id("progress-details")
         expect(progress).to_have_count(3)
         expect(progress.first).not_to_have_attribute("open", "")
         progress.first.locator("summary").click()
         expect(progress.first).to_have_attribute("open", "")
+        tool_icons = page.get_by_test_id("tool-call-icon")
+        expect(tool_icons).to_have_count(2)
+        expect(page.get_by_role("img", name="Teams tool call")).to_be_visible()
+        expect(page.get_by_role("img", name="Outlook tool call")).to_be_visible()
 
         command_strip = page.get_by_test_id("cowork-command-strip")
         expect(command_strip).to_be_visible()
@@ -108,6 +123,33 @@ class TestRiveterVisuals:
             "Cowork finished 8m ago"
         )
 
+        prompt = page.get_by_test_id("cowork-prompt")
+        expect(prompt).to_contain_text("Cowork prompt")
+        prompt.click()
+        editor = page.get_by_test_id("cowork-prompt-editor")
+        expect(editor).to_be_visible()
+        editor.fill("Draft a shorter Teams follow-up.")
+        editor.press("Control+Enter")
+        expect(prompt).to_contain_text("Draft a shorter Teams follow-up.")
+        expect(page.get_by_test_id("session-timeline")).to_be_hidden()
+        expect(page.get_by_test_id("interaction-card")).to_be_hidden()
+        send_direction = page.get_by_test_id("send-direction")
+        expect(send_direction).to_be_visible()
+        page.get_by_test_id("session-mode-no-interaction").click()
+        expect(page.get_by_test_id("session-timeline")).to_be_hidden()
+        expect(page.get_by_test_id("session-complete")).to_be_hidden()
+        expect(send_direction).to_be_visible()
+        page.get_by_test_id("session-mode-interaction").click()
+        expect(page.get_by_test_id("interaction-card")).to_be_hidden()
+        expect(send_direction).to_be_visible()
+        _capture(page, "rightpane-b-direction-cleared-light")
+        send_direction.click()
+        expect(send_direction).to_be_hidden()
+        expect(page.get_by_test_id("redirect-sent")).to_be_visible()
+
+        page.goto(
+            f"{base_url}/static/mock-riveter-rightpane-b.html?scoutTheme=light"
+        )
         page.get_by_test_id("session-mode-no-interaction").click()
         expect(page.locator(".ask")).to_be_hidden()
         expect(page.get_by_test_id("cowork-command-strip")).to_be_hidden()
@@ -123,3 +165,75 @@ class TestRiveterVisuals:
             "document.documentElement.setAttribute('data-theme', 'dark')"
         )
         _capture(page, "rightpane-b-iteration-dark")
+        page.get_by_test_id("cowork-prompt").click()
+        dark_editor = page.get_by_test_id("cowork-prompt-editor")
+        dark_editor.fill("Redirect the follow-up to current support only.")
+        dark_editor.press("Control+Enter")
+        expect(page.get_by_test_id("send-direction")).to_be_visible()
+        _capture(page, "rightpane-b-direction-cleared-dark")
+
+    def test_evidence_and_action_live_running_state(self, page: Page, base_url):
+        page.set_viewport_size({"width": 1440, "height": 960})
+        page.goto(
+            f"{base_url}/static/mock-riveter-rightpane-b.html"
+            "?scoutTheme=dark&mode=running"
+        )
+
+        expect(page.get_by_test_id("live-running")).to_be_visible()
+        expect(page.get_by_test_id("cowork-finished")).to_be_hidden()
+        page.get_by_test_id("session-mode-no-interaction").click()
+        expect(page.get_by_test_id("session-complete")).to_be_hidden()
+        expect(page.get_by_test_id("live-running")).to_be_visible()
+        dots = page.get_by_test_id("step-dot")
+        expect(dots).to_have_count(3)
+        assert page.evaluate(
+            "getComputedStyle(document.querySelectorAll('[data-testid=\"step-dot\"]')[0]).animationName"
+        ) == "none"
+        assert page.evaluate(
+            "getComputedStyle(document.querySelector('[data-testid=\"step-dot\"].active')).animationName"
+        ) == "cowork-pulse"
+
+        elapsed = page.get_by_test_id("elapsed-timer")
+        before = elapsed.inner_text()
+        page.wait_for_timeout(1100)
+        assert elapsed.inner_text() != before
+        expect(page.locator("#current-step-time")).to_have_text(elapsed.inner_text())
+
+        completed_before = page.locator(".event.completed").all_inner_texts()
+        page.evaluate(
+            """window.dispatchEvent(new CustomEvent('cowork:progress', {
+                detail: {line: 'Drafting the Teams follow-up'}
+            }))"""
+        )
+        live_status = page.get_by_test_id("live-status")
+        expect(live_status).to_have_attribute("aria-live", "polite")
+        expect(live_status).to_have_text("Drafting the Teams follow-up")
+        assert page.locator(".event.completed").all_inner_texts() == completed_before
+        _capture(page, "rightpane-b-live-running-dark")
+
+        page.emulate_media(reduced_motion="reduce")
+        assert page.evaluate(
+            "getComputedStyle(document.querySelector('[data-testid=\"step-dot\"].active')).animationName"
+        ) == "none"
+
+        page.emulate_media(reduced_motion="no-preference")
+        page.evaluate("window.dispatchEvent(new CustomEvent('cowork:done'))")
+        expect(page.get_by_test_id("live-running")).to_be_hidden()
+        expect(page.get_by_test_id("cowork-finished")).to_be_visible()
+        assert page.evaluate(
+            "getComputedStyle(document.querySelectorAll('[data-testid=\"step-dot\"]')[2]).animationName"
+        ) == "none"
+
+        page.goto(
+            f"{base_url}/static/mock-riveter-rightpane-b.html"
+            "?scoutTheme=dark&mode=running"
+        )
+        page.get_by_test_id("cowork-prompt").click()
+        editor = page.get_by_test_id("cowork-prompt-editor")
+        editor.fill("Redirect this turn to current support only.")
+        editor.press("Control+Enter")
+        expect(page.get_by_test_id("live-running")).to_be_hidden()
+        expect(page.get_by_test_id("send-direction")).to_be_visible()
+        stopped_at = page.get_by_test_id("elapsed-timer").inner_text()
+        page.wait_for_timeout(1100)
+        expect(page.get_by_test_id("elapsed-timer")).to_have_text(stopped_at)

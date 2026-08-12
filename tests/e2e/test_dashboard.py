@@ -40,7 +40,10 @@ class TestDashboardLoads:
         ).ok
         logo = page.locator('.riveter-logo')
         expect(logo).to_be_visible()
-        expect(logo).to_have_attribute('src', '/static/img/riveter.png')
+        expect(logo).to_have_attribute('src', '/static/img/riveter-light.png')
+        assert page.request.get(
+            base_url + '/static/img/riveter-dark.png'
+        ).ok
         assert page.evaluate(
             "() => document.querySelector('.riveter-logo').naturalWidth"
         ) > 0

@@ -125,8 +125,8 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
 .timeline { position: relative; padding-left: 25px; }
 .timeline::before { content: ""; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 1px; background: var(--cp-border); }
 .event { position: relative; margin-bottom: 16px; }
-.event::before { content: ""; position: absolute; left: -23px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--cp-surface); border: 2px solid var(--cp-border-strong); }
-.event.active::before { border-color: var(--cp-accent); background: var(--cp-accent); }
+.step-dot { position: absolute; left: -23px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--cp-surface); border: 2px solid var(--cp-border-strong); }
+.step-dot.active { border-color: var(--cp-accent); background: var(--cp-accent); }
 .event small { color: var(--cp-text-muted); min-width: 48px; display: inline-block; }
 .event p { margin: 3px 0 0; line-height: 1.45; }
 .event details { margin: 0; border: 0; border-radius: 0; padding: 0; background: none; }
@@ -135,12 +135,24 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
 .event summary::after { content: "＋"; color: var(--cp-link); font-size: 11px; margin-left: 6px; }
 .event details[open] summary::after { content: "−"; }
 .event details p { margin: 7px 0 0 52px; }
+.tool-call { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 18px; margin-left: 6px; border: 1px solid var(--cp-border); border-radius: 4px; background: var(--cp-surface-soft); color: var(--cp-text-muted); font-size: 10px; font-weight: 700; vertical-align: 1px; }
+.live-running { display: inline-flex; align-items: center; gap: 5px; color: var(--cp-text-muted); font-size: 12px; }
+@keyframes cowork-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--cp-highlight); }
+  50% { box-shadow: 0 0 0 6px var(--cp-highlight); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .step-dot.active.running { animation: cowork-pulse 1.4s ease-in-out infinite; }
+}
 .ask { border: 1px solid var(--cp-accent); background: var(--cp-accent-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
 .ask h4 { margin: 0 0 10px; font-size: 16px; }
 .ask-link { display: inline-block; color: var(--cp-link); text-decoration: none; margin-top: 13px; font-size: 13px; }
 .session-complete { border: 1px solid var(--cp-border); background: var(--cp-surface-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
 .session-complete h4 { margin: 0 0 6px; }
 .session-complete p { color: var(--cp-text-muted); margin: 0; line-height: 1.5; }
+.redirect-state { border: 1px solid var(--cp-accent); background: var(--cp-accent-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
+.redirect-state h4 { margin: 0 0 6px; }
+.redirect-state p { color: var(--cp-text-muted); margin: 0 0 12px; line-height: 1.5; }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice, .btn { border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 8px 11px; }
 .choice.on { border-color: var(--cp-accent); color: var(--cp-accent); }
@@ -173,20 +185,22 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
       <section class="work">
         <section class="cowork-frame">
           <div class="cowork-body">
-            <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><h3>Cowork workspace</h3><div class="cowork-status"><span class="credit-meter" data-testid="credit-meter">30.2 credits</span><span class="status-note" data-testid="cowork-finished">Cowork finished 8m ago</span><a class="persistent-link" data-testid="open-in-cowork-link" href="#" onclick="return false;">Open in Cowork ↗</a></div></div>
+            <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><h3>Cowork workspace</h3><div class="cowork-status"><span class="credit-meter" data-testid="credit-meter">30.2 credits</span><span class="live-running" data-testid="live-running" hidden>Cowork working · <span data-testid="elapsed-timer">0:42</span></span><span class="status-note" data-testid="cowork-finished">Cowork finished 8m ago</span><a class="persistent-link" data-testid="open-in-cowork-link" href="#" onclick="return false;">Open in Cowork ↗</a></div></div>
             <div class="mode-switch"><button class="on" data-testid="session-mode-interaction">Interaction</button><button data-testid="session-mode-no-interaction">No interaction</button></div>
             <div class="intent" data-testid="cowork-prompt" tabindex="0"><div class="intent-label"><span>Cowork prompt</span><em>Click to edit</em></div><div id="prompt-text">Research current FinOps support and roadmap guidance. Then draft a direct Teams follow-up grounded in the source conversation, without implying that roadmap support is committed.</div></div>
-            <div class="timeline">
-              <div class="event"><details data-testid="progress-details"><summary><small>0:03</small>Source conversation read</summary><p>Identified the open FinOps thread and the participants' unresolved questions.</p></details></div>
-              <div class="event"><details data-testid="progress-details"><summary><small>0:28</small>Deployment and governance guidance reviewed</summary><p>Reviewed Copilot Kit deployment guidance and current cost-governance references.</p></details></div>
-              <div class="event active"><details data-testid="progress-details"><summary><small>0:42</small>Scope decision needed</summary><p>Cowork needs to know whether the follow-up should ask only about current support or include roadmap guidance.</p></details></div>
+            <div class="timeline" data-testid="session-timeline">
+              <div class="event completed"><span class="step-dot" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small>0:03</small>Source conversation read <span class="tool-call" data-testid="tool-call-icon" role="img" aria-label="Teams tool call" title="Teams tool call">T</span></summary><p>Identified the open FinOps thread and the participants' unresolved questions.</p></details></div>
+              <div class="event completed"><span class="step-dot" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small>0:28</small>Related email context checked <span class="tool-call" data-testid="tool-call-icon" role="img" aria-label="Outlook tool call" title="Outlook tool call">O</span></summary><p>Checked the related Outlook thread for newer FinOps or governance guidance.</p></details></div>
+              <div class="event active" id="current-progress"><span class="step-dot active" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small id="current-step-time">0:42</small><span data-testid="live-status" aria-live="polite">Scope decision needed</span></summary><p>Cowork needs to know whether the follow-up should ask only about current support or include roadmap guidance.</p></details></div>
             </div>
-            <section class="ask" id="interaction-card">
+            <section class="ask" id="interaction-card" data-testid="interaction-card">
               <h4>Should the message ask only about current support, or also the roadmap?</h4>
               <div class="choices" role="group" aria-label="Follow-up scope"><button class="choice on" aria-pressed="true">Current + roadmap</button><button class="choice" aria-pressed="false">Current only</button><button class="choice" aria-pressed="false">Let Cowork decide</button></div>
               <div class="command" data-testid="cowork-command-strip"><button class="btn primary" id="continue">Answer and continue</button><button class="btn" id="redirect">Edit or redirect</button><button class="btn" id="stop">Stop</button></div>
             </section>
             <section class="session-complete" id="session-complete" data-testid="session-complete" hidden><h4>Draft completed without interruption</h4><p>Cowork reviewed the source, checked current guidance, and produced the follow-up without needing a decision. The timeline remains available above.</p></section>
+            <section class="redirect-state" id="redirect-state" data-testid="redirect-state" hidden><h4>Direction updated</h4><p>The previous result and interaction were cleared. Review the edited prompt above, then start a redirected Cowork turn.</p><button class="btn primary" id="send-direction" data-testid="send-direction">Send new direction</button></section>
+            <section class="session-complete" id="redirect-sent" data-testid="redirect-sent" hidden><h4>New direction sent</h4><p>Cowork is starting a new turn from the edited instruction. Previous result state remains cleared.</p></section>
           </div>
         </section>
       </section>
@@ -210,9 +224,25 @@ document.getElementById("continue").addEventListener("click", (event) => {
   event.currentTarget.disabled = true;
 });
 const prompt = document.querySelector("[data-testid='cowork-prompt']");
+const timeline = document.querySelector("[data-testid='session-timeline']");
+const interactionCard = document.getElementById("interaction-card");
+const sessionComplete = document.getElementById("session-complete");
+const redirectState = document.getElementById("redirect-state");
+const redirectSent = document.getElementById("redirect-sent");
+let directionChanged = false;
+function clearCurrentStateForRedirect() {
+  stopRunningState(false);
+  directionChanged = true;
+  timeline.hidden = true;
+  interactionCard.hidden = true;
+  sessionComplete.hidden = true;
+  redirectSent.hidden = true;
+  redirectState.hidden = false;
+}
 function editPrompt() {
   if (prompt.querySelector("textarea")) return;
   const text = document.getElementById("prompt-text");
+  const originalValue = text.textContent;
   const editor = document.createElement("textarea");
   editor.dataset.testid = "cowork-prompt-editor";
   editor.value = text.textContent;
@@ -224,6 +254,7 @@ function editPrompt() {
     replacement.id = "prompt-text";
     replacement.textContent = editor.value.trim() || "Add instructions for Cowork.";
     editor.replaceWith(replacement);
+    if (replacement.textContent !== originalValue) clearCurrentStateForRedirect();
   };
   editor.addEventListener("blur", save, { once: true });
   editor.addEventListener("keydown", (event) => {
@@ -246,6 +277,10 @@ document.getElementById("redirect").addEventListener("click", editPrompt);
 document.getElementById("stop").addEventListener("click", (event) => {
   event.currentTarget.textContent = "Stopped";
 });
+document.getElementById("send-direction").addEventListener("click", () => {
+  redirectState.hidden = true;
+  redirectSent.hidden = false;
+});
 const privateNotes = document.querySelector("[data-testid='private-notes']");
 const privateNoteText = privateNotes.querySelector(".private-note-text");
 const privateNoteEditor = privateNotes.querySelector("textarea");
@@ -266,16 +301,68 @@ privateNoteEditor.addEventListener("keydown", (event) => {
 });
 const interactionMode = document.querySelector("[data-testid='session-mode-interaction']");
 const noInteractionMode = document.querySelector("[data-testid='session-mode-no-interaction']");
-const interactionCard = document.getElementById("interaction-card");
-const sessionComplete = document.getElementById("session-complete");
 function setSessionMode(interactive) {
-  interactionCard.hidden = !interactive;
-  sessionComplete.hidden = interactive;
+  if (isRunning) return;
   interactionMode.classList.toggle("on", interactive);
   noInteractionMode.classList.toggle("on", !interactive);
+  if (directionChanged) return;
+  timeline.hidden = false;
+  redirectState.hidden = true;
+  redirectSent.hidden = true;
+  interactionCard.hidden = !interactive;
+  sessionComplete.hidden = interactive;
 }
 interactionMode.addEventListener("click", () => setSessionMode(true));
 noInteractionMode.addEventListener("click", () => setSessionMode(false));
+const liveRunning = document.querySelector("[data-testid='live-running']");
+const elapsedTimer = document.querySelector("[data-testid='elapsed-timer']");
+const finishedStatus = document.querySelector("[data-testid='cowork-finished']");
+const currentProgress = document.getElementById("current-progress");
+const currentDot = currentProgress.querySelector("[data-testid='step-dot']");
+const currentStepTime = document.getElementById("current-step-time");
+const liveStatus = document.querySelector("[data-testid='live-status']");
+let elapsedSeconds = 42;
+let elapsedInterval = null;
+let isRunning = false;
+function formatElapsed(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+function startRunningState() {
+  isRunning = true;
+  liveRunning.hidden = false;
+  finishedStatus.hidden = true;
+  interactionCard.hidden = true;
+  sessionComplete.hidden = true;
+  currentDot.classList.add("running");
+  liveStatus.textContent = "Reviewing current guidance";
+  elapsedInterval = window.setInterval(() => {
+    elapsedSeconds += 1;
+    const formatted = formatElapsed(elapsedSeconds);
+    elapsedTimer.textContent = formatted;
+    currentStepTime.textContent = formatted;
+  }, 1000);
+}
+function stopRunningState(showFinished) {
+  isRunning = false;
+  if (elapsedInterval) window.clearInterval(elapsedInterval);
+  elapsedInterval = null;
+  currentDot.classList.remove("running");
+  liveRunning.hidden = true;
+  finishedStatus.hidden = !showFinished;
+}
+window.addEventListener("cowork:progress", (event) => {
+  if (event.detail && event.detail.line) liveStatus.textContent = event.detail.line;
+});
+window.addEventListener("cowork:done", () => {
+  stopRunningState(true);
+  currentDot.classList.remove("active");
+  currentProgress.classList.remove("active");
+  currentProgress.classList.add("completed");
+});
+if (new URLSearchParams(window.location.search).get("mode") === "running") {
+  startRunningState();
+}
 </script>
 </body>
 </html>
