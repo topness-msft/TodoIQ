@@ -644,6 +644,9 @@ function renderSection(sectionId, sectionTasks) {
 
 // ── Select Task ────────────────────────────────────────────────────────
 function selectTask(taskId) {
+    if (selectedTaskId && selectedTaskId !== taskId) {
+        stopCoworkHandoffPoller(selectedTaskId);
+    }
     selectedTaskId = taskId;
     cwLoad(taskId, true);
 
@@ -867,7 +870,9 @@ function renderDetailPane(task) {
 }
 
 function clearDetailPane() {
+    var previousTaskId = selectedTaskId;
     selectedTaskId = null;
+    if (previousTaskId) stopCoworkHandoffPoller(previousTaskId);
     var pane = document.getElementById('detail-pane');
     pane.innerHTML = '<div class="empty-state">'
         + '<div class="empty-state-icon">&#128203;</div>'
@@ -2887,10 +2892,12 @@ function cwClearBuffers(taskId) {
     delete _cwAnswerBuf[taskId];
 }
 var _cwPollers = {};
+var _cwHandoffPollers = {};
 var _cwStartedAt = {};
 
 var CW_POLL_MS = 3000;
 var CW_POLL_MAX = 235;   // ~700s, just past the runner's 660s timeout
+var CW_HANDOFF_POLL_MS = 10000;
 
 function cwCurrentDraft(a) {
     if (!a) return '';
@@ -3416,6 +3423,11 @@ function renderCoworkCard(task) {
     }
 
     if (a && a.state === 'ready') {
+        if (a.handoff && a.handoff.state === 'running') {
+            startCoworkHandoffPoller(task.id, a.id);
+        } else {
+            stopCoworkHandoffPoller(task.id);
+        }
         var refining = !!_cwRefine[task.id];
         // Refine edits the draft IN PLACE: the same textarea, so there is only
         // ever one copy of the text on screen and no ambiguity about which one
@@ -3720,6 +3732,7 @@ function cwSendAnswer(taskId) {
         delete _cwAnswerSending[taskId];
         _cwActions[taskId] = res.d.action;
         cwRerender(taskId);
+        if (res.d.action.state === 'previewing') startCoworkPoller(taskId);
     })
     .catch(function(err) {
         delete _cwAnswerSending[taskId];
@@ -3765,6 +3778,58 @@ function stopCoworkPoller(taskId) {
     if (!poller) return;
     clearInterval(poller.timer);
     delete _cwPollers[taskId];
+}
+
+function startCoworkHandoffPoller(taskId, actionId) {
+    if (_cwHandoffPollers[taskId]) return;
+    _cwHandoffPollers[taskId] = {
+        actionId: actionId,
+        timer: setInterval(function() {
+            pollCoworkHandoffStatus(taskId);
+        }, CW_HANDOFF_POLL_MS)
+    };
+}
+
+function stopCoworkHandoffPoller(taskId) {
+    var poller = _cwHandoffPollers[taskId];
+    if (!poller) return;
+    clearInterval(poller.timer);
+    delete _cwHandoffPollers[taskId];
+}
+
+function pollCoworkHandoffStatus(taskId) {
+    var poller = _cwHandoffPollers[taskId];
+    var current = _cwActions[taskId];
+    if (!poller || selectedTaskId !== taskId
+            || !current || current.id !== poller.actionId
+            || current.state !== 'ready'
+            || !current.handoff || current.handoff.state !== 'running') {
+        stopCoworkHandoffPoller(taskId);
+        return;
+    }
+
+    fetch('/api/tasks/' + taskId + '/cowork')
+        .then(function(res) {
+            if (res.status === 404) return { action: null };
+            return res.json();
+        })
+        .then(function(data) {
+            var latestPoller = _cwHandoffPollers[taskId];
+            var action = data.action || null;
+            if (!latestPoller || selectedTaskId !== taskId || !action
+                    || action.id !== latestPoller.actionId) {
+                stopCoworkHandoffPoller(taskId);
+                return;
+            }
+            _cwActions[taskId] = action;
+            cwSyncTaskState(taskId, action);
+            renderTaskList();
+            if (!action.handoff || action.handoff.state !== 'running') {
+                stopCoworkHandoffPoller(taskId);
+            }
+            cwRerender(taskId);
+        })
+        .catch(function() {});
 }
 
 function pollCoworkStatus(taskId) {

@@ -464,6 +464,8 @@ if (typeof doSnooze === 'function') {
 const CW_POLL_MS = 3000;
 const CW_POLL_MAX = 235;   // ~700s, just past the runner's 660s timeout
 const _cwPollers = {};
+let CW_HANDOFF_POLL_MS = 10000;
+const _cwHandoffPollers = {};
 let _cwStartedAt = {};
 
 function cwApply(t, action) {
@@ -518,6 +520,11 @@ async function cwLoad(id, markSeen) {
     const data = res.status === 404 ? { action: null } : await res.json();
     cwApply(t, data.action);
     if (t.cw_state === 'previewing') cwStartPoller(id);
+    if (t.cw_state === 'ready' && t.cw_handoff?.state === 'running') {
+      cwStartHandoffPoller(id, t.cw_action_id);
+    } else {
+      cwStopHandoffPoller(id);
+    }
   } catch (e) {
     t.cw_state = 'idle';
   }
@@ -644,6 +651,44 @@ function cwStopPoller(id) {
   delete _cwPollers[id];
 }
 
+function cwStartHandoffPoller(id, actionId) {
+  if (_cwHandoffPollers[id]) return;
+  _cwHandoffPollers[id] = {
+    actionId,
+    timer: setInterval(() => cwPollHandoff(id), CW_HANDOFF_POLL_MS)
+  };
+}
+
+function cwStopHandoffPoller(id) {
+  const poller = _cwHandoffPollers[id];
+  if (!poller) return;
+  clearInterval(poller.timer);
+  delete _cwHandoffPollers[id];
+}
+
+async function cwPollHandoff(id) {
+  const poller = _cwHandoffPollers[id];
+  const t = cwTask(id);
+  if (!poller || selectedId !== id || !t
+      || t.cw_action_id !== poller.actionId
+      || t.cw_state !== 'ready' || t.cw_handoff?.state !== 'running') {
+    return cwStopHandoffPoller(id);
+  }
+
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`);
+    const data = res.status === 404 ? { action: null } : await res.json();
+    const latest = _cwHandoffPollers[id];
+    if (!latest || selectedId !== id || !data.action
+        || data.action.id !== latest.actionId) {
+      return cwStopHandoffPoller(id);
+    }
+    cwApply(t, data.action);
+    if (t.cw_handoff?.state !== 'running') cwStopHandoffPoller(id);
+    cwRerender(id);
+  } catch (e) { /* silent */ }
+}
+
 async function cwPoll(id) {
   const poller = _cwPollers[id];
   if (!poller) return;
@@ -668,6 +713,9 @@ async function cwPoll(id) {
     }
     if (t.cw_state !== 'previewing') {
       cwStopPoller(id);
+      if (t.cw_state === 'ready' && t.cw_handoff?.state === 'running') {
+        cwStartHandoffPoller(id, t.cw_action_id);
+      }
       cwRerender(id);
     }
   } catch (e) { /* silent */ }
@@ -700,6 +748,7 @@ cwConfirmDest = async function(id) {
 (function wrapSelectTaskForCowork() {
   const _prev = selectTask;
   selectTask = function(id) {
+    if (selectedId && selectedId !== id) cwStopHandoffPoller(selectedId);
     _prev(id);
     const t = cwTask(id);
     if (t && t.action_type && t.status !== 'suggested' &&

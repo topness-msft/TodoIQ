@@ -66,6 +66,7 @@ html[data-theme="dark"] {
   --cp-highlight: rgba(253, 142, 161, 0.12);
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--cp-bg); color: var(--cp-text); font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; }
 button { font: inherit; cursor: pointer; }
 .page { max-width: 1240px; margin: 0 auto; padding: 24px; }
@@ -78,6 +79,9 @@ button { font: inherit; cursor: pointer; }
 .check { width: 22px; height: 22px; border: 2px solid var(--cp-border-strong); border-radius: 50%; margin-top: 4px; }
 .top h2 { flex: 1; margin: 0; font-size: 24px; }
 .top-meta { color: var(--cp-text-muted); margin-top: 6px; font-size: 13px; }
+.task-actions { padding: 10px 18px; border-bottom: 1px solid var(--cp-border); display: flex; align-items: center; gap: 8px; background: var(--cp-bg-elevated); }
+.task-actions .spacer { flex: 1; }
+.task-actions span { color: var(--cp-text-muted); font-size: 12px; }
 .split { flex: 1; display: grid; grid-template-columns: minmax(300px, 40%) 1fr; min-height: 0; }
 .evidence { padding: 22px; border-right: 1px solid var(--cp-border); background: var(--cp-bg-elevated); overflow: auto; }
 .label { font-size: 11px; color: var(--cp-text-muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; margin-bottom: 8px; }
@@ -91,33 +95,57 @@ button { font: inherit; cursor: pointer; }
 .facts { margin-top: 16px; }
 .fact { display: flex; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--cp-border); font-size: 13px; }
 .fact b { min-width: 86px; }
+.person-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--cp-border); background: var(--cp-surface); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
+.chip::before { content: "✓"; color: var(--cp-success); font-weight: 700; }
+.chip select { appearance: auto; border: 0; outline: 0; background: transparent; color: var(--cp-text); font: inherit; cursor: pointer; max-width: 190px; }
 details { margin-top: 18px; border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 11px 12px; background: var(--cp-surface); }
 summary { cursor: pointer; font-weight: 600; }
 details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
-.work { padding: 22px; overflow: auto; }
+.work { padding: 18px; overflow: auto; }
+.cowork-frame { border: 1px solid var(--cp-accent); border-radius: 16px; overflow: hidden; background: var(--cp-surface); }
+.command { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 13px; margin-top: 13px; border-top: 1px solid var(--cp-border); }
+.command .spacer { flex: 1; }
+.cowork-body { padding: 18px; }
 .cowork-head { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
 .cowork-head img { width: 28px; height: 28px; }
 .cowork-head h3 { margin: 0; font-size: 20px; flex: 1; }
 .badge { font-size: 11px; color: var(--cp-accent); background: var(--cp-accent-soft); border-radius: 999px; padding: 4px 9px; text-transform: uppercase; font-weight: 700; }
-.intent { border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 13px; margin-bottom: 14px; line-height: 1.5; }
-.intent span { color: var(--cp-text-muted); display: block; font-size: 12px; margin-bottom: 4px; }
+.cowork-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.status-note { color: var(--cp-text-muted); font-size: 12px; }
+.credit-meter { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--cp-border); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
+.persistent-link { color: var(--cp-link); text-decoration: none; font-size: 13px; white-space: nowrap; }
+.mode-switch { display: flex; gap: 4px; margin: -4px 0 14px; }
+.mode-switch button { border: 0; background: transparent; color: var(--cp-text-muted); padding: 4px 7px; border-radius: 0.625rem; font-size: 12px; }
+.mode-switch button.on { background: var(--cp-accent-soft); color: var(--cp-accent); font-weight: 600; }
+.intent { border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 13px; margin-bottom: 14px; line-height: 1.5; cursor: text; }
+.intent-label { color: var(--cp-text-muted); display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin-bottom: 4px; }
+.intent-label em { color: var(--cp-link); font-style: normal; }
+.intent textarea { width: 100%; min-height: 82px; margin-top: 4px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 10px; resize: vertical; }
 .timeline { position: relative; padding-left: 25px; }
 .timeline::before { content: ""; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 1px; background: var(--cp-border); }
 .event { position: relative; margin-bottom: 16px; }
 .event::before { content: ""; position: absolute; left: -23px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--cp-surface); border: 2px solid var(--cp-border-strong); }
 .event.active::before { border-color: var(--cp-accent); background: var(--cp-accent); }
-.event small { color: var(--cp-text-muted); }
+.event small { color: var(--cp-text-muted); min-width: 48px; display: inline-block; }
 .event p { margin: 3px 0 0; line-height: 1.45; }
+.event details { margin: 0; border: 0; border-radius: 0; padding: 0; background: none; }
+.event summary { font-weight: 400; line-height: 1.45; list-style: none; }
+.event summary::-webkit-details-marker { display: none; }
+.event summary::after { content: "＋"; color: var(--cp-link); font-size: 11px; margin-left: 6px; }
+.event details[open] summary::after { content: "−"; }
+.event details p { margin: 7px 0 0 52px; }
 .ask { border: 1px solid var(--cp-accent); background: var(--cp-accent-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
 .ask h4 { margin: 0 0 10px; font-size: 16px; }
+.ask-link { display: inline-block; color: var(--cp-link); text-decoration: none; margin-top: 13px; font-size: 13px; }
+.session-complete { border: 1px solid var(--cp-border); background: var(--cp-surface-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
+.session-complete h4 { margin: 0 0 6px; }
+.session-complete p { color: var(--cp-text-muted); margin: 0; line-height: 1.5; }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice, .btn { border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 8px 11px; }
 .choice.on { border-color: var(--cp-accent); color: var(--cp-accent); }
 .btn.primary { background: var(--cp-accent); color: var(--cp-accent-fg); border-color: var(--cp-accent); font-weight: 600; }
-.sticky { border-top: 1px solid var(--cp-border); background: var(--cp-bg-elevated); padding: 12px 18px; display: flex; gap: 8px; align-items: center; }
-.sticky .spacer { flex: 1; }
-.sticky span { color: var(--cp-text-muted); font-size: 12px; }
-@media (max-width: 820px) { .page { padding: 12px; } .split { grid-template-columns: 1fr; } .evidence { border-right: 0; border-bottom: 1px solid var(--cp-border); } .sticky { flex-wrap: wrap; } }
+@media (max-width: 820px) { .page { padding: 12px; } .split { grid-template-columns: 1fr; } .evidence { border-right: 0; border-bottom: 1px solid var(--cp-border); } .task-actions { flex-wrap: wrap; } }
 </style>
 </head>
 <body>
@@ -128,37 +156,41 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
   </header>
   <section class="window">
     <header class="top"><span class="check"></span><div><h2>Follow up on Copilot Kit FinOps capabilities</h2><div class="top-meta">P2 · Due today · Follow-up</div></div></header>
+    <div class="task-actions" data-testid="task-lifecycle-strip"><button class="btn primary" data-life="Completed">Mark complete</button><button class="btn" data-life="Waiting">Waiting</button><button class="btn" data-life="Snoozed">Snooze</button><span class="spacer"></span><span id="life">Task remains active while Cowork works</span></div>
     <div class="split">
       <aside class="evidence">
         <div class="label">Source and evidence</div>
         <section class="source">
-          <div class="source-head"><span class="avatar">M</span><div><strong>Mehdi Slaoui Andaloussi</strong><span>Teams · April 22</span></div></div>
-          <div class="quote">“The kit is focused on end-to-end deployment. We should reconnect on the governance and operational pieces.”</div>
+          <div class="source-head"><span class="avatar">M</span><div><strong>Mehdi Slaoui Andaloussi</strong><span data-testid="source-channel-meta">Teams · April 22 · Last touch 110 days ago</span></div></div>
+          <div class="quote" data-testid="situation-summary">Mehdi and Phil aligned on the Copilot Kit deployment path, but the FinOps and governance position remained unresolved. The next useful step is to confirm current support and whether roadmap guidance can be shared.</div>
           <a href="#">Open source conversation</a>
         </section>
         <div class="facts">
-          <div class="fact"><b>People</b><span>Mehdi, Phil</span></div>
-          <div class="fact"><b>Topic</b><span>Copilot Kit, FinOps</span></div>
-          <div class="fact"><b>Last touch</b><span>110 days ago</span></div>
+          <div class="fact"><b>People</b><span class="person-pills"><label class="chip" data-testid="person-pill"><select data-testid="person-picker" aria-label="Resolve Mehdi"><option selected>Mehdi Slaoui Andaloussi</option><option>Mehdi Benjelloun</option><option>Mehdi El Amrani</option></select></label><label class="chip" data-testid="person-pill"><select data-testid="person-picker" aria-label="Resolve Phil"><option selected>Phil Topness</option><option>Phil Spencer</option><option>Philip Richardson</option></select></label></span></div>
         </div>
-        <details><summary>Private notes</summary><p>April discussion covered deployment. Avoid implying that FinOps is already on the roadmap.</p></details>
+        <details data-testid="private-notes"><summary>Private notes · click to edit</summary><div class="private-note-text">April discussion covered deployment. Avoid implying that FinOps is already on the roadmap.</div><textarea data-testid="private-notes-editor" hidden>April discussion covered deployment. Avoid implying that FinOps is already on the roadmap.</textarea></details>
       </aside>
       <section class="work">
-        <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><h3>Cowork</h3><span class="badge">Working</span></div>
-        <div class="intent"><span>Current intent</span>Research current FinOps support, then draft a direct Teams follow-up grounded in the source conversation.</div>
-        <div class="timeline">
-          <div class="event"><small>0:03</small><p>Read the source conversation and identified the open FinOps thread.</p></div>
-          <div class="event"><small>0:28</small><p>Reviewed Copilot Kit deployment guidance and cost-governance references.</p></div>
-          <div class="event active"><small>Needs your input</small><p>Cowork needs a scope decision before drafting.</p></div>
-        </div>
-        <section class="ask">
-          <h4>Should the message ask only about current support, or also the roadmap?</h4>
-          <div class="choices" role="group" aria-label="Follow-up scope"><button class="choice on" aria-pressed="true">Current + roadmap</button><button class="choice" aria-pressed="false">Current only</button><button class="choice" aria-pressed="false">Let Cowork decide</button></div>
-          <div class="choices" style="margin-top:12px"><button class="btn primary" id="continue">Answer and continue</button><button class="btn">Stop</button><button class="btn">Open in Cowork</button></div>
+        <section class="cowork-frame">
+          <div class="cowork-body">
+            <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><h3>Cowork workspace</h3><div class="cowork-status"><span class="credit-meter" data-testid="credit-meter">30.2 credits</span><span class="status-note" data-testid="cowork-finished">Cowork finished 8m ago</span><a class="persistent-link" data-testid="open-in-cowork-link" href="#" onclick="return false;">Open in Cowork ↗</a></div></div>
+            <div class="mode-switch"><button class="on" data-testid="session-mode-interaction">Interaction</button><button data-testid="session-mode-no-interaction">No interaction</button></div>
+            <div class="intent" data-testid="cowork-prompt" tabindex="0"><div class="intent-label"><span>Cowork prompt</span><em>Click to edit</em></div><div id="prompt-text">Research current FinOps support and roadmap guidance. Then draft a direct Teams follow-up grounded in the source conversation, without implying that roadmap support is committed.</div></div>
+            <div class="timeline">
+              <div class="event"><details data-testid="progress-details"><summary><small>0:03</small>Source conversation read</summary><p>Identified the open FinOps thread and the participants' unresolved questions.</p></details></div>
+              <div class="event"><details data-testid="progress-details"><summary><small>0:28</small>Deployment and governance guidance reviewed</summary><p>Reviewed Copilot Kit deployment guidance and current cost-governance references.</p></details></div>
+              <div class="event active"><details data-testid="progress-details"><summary><small>0:42</small>Scope decision needed</summary><p>Cowork needs to know whether the follow-up should ask only about current support or include roadmap guidance.</p></details></div>
+            </div>
+            <section class="ask" id="interaction-card">
+              <h4>Should the message ask only about current support, or also the roadmap?</h4>
+              <div class="choices" role="group" aria-label="Follow-up scope"><button class="choice on" aria-pressed="true">Current + roadmap</button><button class="choice" aria-pressed="false">Current only</button><button class="choice" aria-pressed="false">Let Cowork decide</button></div>
+              <div class="command" data-testid="cowork-command-strip"><button class="btn primary" id="continue">Answer and continue</button><button class="btn" id="redirect">Edit or redirect</button><button class="btn" id="stop">Stop</button></div>
+            </section>
+            <section class="session-complete" id="session-complete" data-testid="session-complete" hidden><h4>Draft completed without interruption</h4><p>Cowork reviewed the source, checked current guidance, and produced the follow-up without needing a decision. The timeline remains available above.</p></section>
+          </div>
         </section>
       </section>
     </div>
-    <footer class="sticky"><button class="btn primary" data-life="Completed">Mark complete</button><button class="btn" data-life="Waiting">Waiting</button><button class="btn" data-life="Snoozed">Snooze</button><span class="spacer"></span><span id="life">Task remains active while Cowork works</span></footer>
   </section>
 </main>
 <script>
@@ -177,6 +209,73 @@ document.getElementById("continue").addEventListener("click", (event) => {
   event.currentTarget.textContent = "Answer sent";
   event.currentTarget.disabled = true;
 });
+const prompt = document.querySelector("[data-testid='cowork-prompt']");
+function editPrompt() {
+  if (prompt.querySelector("textarea")) return;
+  const text = document.getElementById("prompt-text");
+  const editor = document.createElement("textarea");
+  editor.dataset.testid = "cowork-prompt-editor";
+  editor.value = text.textContent;
+  text.replaceWith(editor);
+  editor.focus();
+  editor.setSelectionRange(editor.value.length, editor.value.length);
+  const save = () => {
+    const replacement = document.createElement("div");
+    replacement.id = "prompt-text";
+    replacement.textContent = editor.value.trim() || "Add instructions for Cowork.";
+    editor.replaceWith(replacement);
+  };
+  editor.addEventListener("blur", save, { once: true });
+  editor.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      editor.blur();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      editor.blur();
+    }
+  });
+}
+prompt.addEventListener("click", editPrompt);
+prompt.addEventListener("keydown", (event) => {
+  if (event.target === prompt && event.key === "Enter") editPrompt();
+});
+document.getElementById("redirect").addEventListener("click", editPrompt);
+document.getElementById("stop").addEventListener("click", (event) => {
+  event.currentTarget.textContent = "Stopped";
+});
+const privateNotes = document.querySelector("[data-testid='private-notes']");
+const privateNoteText = privateNotes.querySelector(".private-note-text");
+const privateNoteEditor = privateNotes.querySelector("textarea");
+privateNotes.addEventListener("toggle", () => {
+  if (!privateNotes.open) return;
+  privateNoteText.hidden = true;
+  privateNoteEditor.hidden = false;
+  privateNoteEditor.focus();
+});
+privateNoteEditor.addEventListener("keydown", (event) => {
+  event.stopPropagation();
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    privateNoteText.textContent = privateNoteEditor.value.trim();
+    privateNoteText.hidden = false;
+    privateNoteEditor.hidden = true;
+  }
+});
+const interactionMode = document.querySelector("[data-testid='session-mode-interaction']");
+const noInteractionMode = document.querySelector("[data-testid='session-mode-no-interaction']");
+const interactionCard = document.getElementById("interaction-card");
+const sessionComplete = document.getElementById("session-complete");
+function setSessionMode(interactive) {
+  interactionCard.hidden = !interactive;
+  sessionComplete.hidden = interactive;
+  interactionMode.classList.toggle("on", interactive);
+  noInteractionMode.classList.toggle("on", !interactive);
+}
+interactionMode.addEventListener("click", () => setSessionMode(true));
+noInteractionMode.addEventListener("click", () => setSessionMode(false));
 </script>
 </body>
 </html>

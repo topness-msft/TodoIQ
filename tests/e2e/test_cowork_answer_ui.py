@@ -117,8 +117,17 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
         full_page=True,
     )
 
+    page.evaluate(
+        """() => {
+            window.answerRestartedCoworkPoller = false;
+            startCoworkPoller = () => {
+                window.answerRestartedCoworkPoller = true;
+            };
+        }"""
+    )
     page.locator('[data-testid="cw-answer-submit"]').click()
     page.wait_for_function("() => !document.querySelector('[data-testid=\"cw-blocked\"]')")
+    assert page.evaluate("window.answerRestartedCoworkPoller") is True
     assert posted == {
         "invocation_id": "invoke-1",
         "answers": {"0": "A", "1": "A\nB"},
