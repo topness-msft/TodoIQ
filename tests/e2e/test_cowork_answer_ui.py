@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from playwright.sync_api import Page, expect
 
@@ -101,8 +102,17 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     expect(blocked).to_contain_text("Which account should Cowork use?")
     expect(blocked.locator("img")).to_have_count(1)
     expect(page.locator('[data-testid="cw-answer"]')).to_have_count(2)
+    submit = page.locator('[data-testid="cw-answer-submit"]')
+    expect(submit).to_have_text("Answer and continue")
+    redirect = page.locator('[data-testid="cw-open-cowork"]')
+    expect(redirect).to_have_text("Edit or redirect")
+    expect(redirect).not_to_have_attribute("title", re.compile("draft", re.IGNORECASE))
     choices = page.locator('[data-testid="cw-choice"]')
     expect(choices).to_have_count(4)
+    expect(choices.nth(0)).to_have_accessible_name("Account A Primary tenant")
+    expect(choices.nth(1)).to_have_accessible_name("Account B Sandbox")
+    first_choice_box = choices.first.bounding_box()
+    assert first_choice_box and first_choice_box["height"] < 40
     choices.nth(0).click()
     expect(choices.nth(0)).to_have_attribute("aria-pressed", "true")
     choices.nth(1).click()
@@ -113,7 +123,18 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     choices.nth(3).click()
     page.wait_for_timeout(700)
     page.screenshot(
-        path=os.path.join(TEMP_DIR, "cowork-interaction-answer.png"),
+        path=os.path.join(TEMP_DIR, "cowork-interaction-actions-light.png"),
+        full_page=True,
+    )
+    page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
+    selected_bg = choices.nth(0).evaluate(
+        "element => getComputedStyle(element).backgroundColor"
+    )
+    assert selected_bg.startswith("rgba(")
+    selected_alpha = float(selected_bg.split(",")[-1].rstrip(")"))
+    assert 0 < selected_alpha < 0.3
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-interaction-actions-dark.png"),
         full_page=True,
     )
 
@@ -127,6 +148,9 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     )
     page.locator('[data-testid="cw-answer-submit"]').click()
     page.wait_for_function("() => !document.querySelector('[data-testid=\"cw-blocked\"]')")
+    expect(page.locator('[data-testid="cw-open-cowork"]')).to_have_text(
+        "Open in Cowork"
+    )
     assert page.evaluate("window.answerRestartedCoworkPoller") is True
     assert posted == {
         "invocation_id": "invoke-1",

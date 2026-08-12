@@ -3105,7 +3105,7 @@ function cwIntentBlock(task, editable) {
 // The audience a draft is written for. This is deliberately separate from the
 // Cowork conversation id: one is who would receive the message, the other is
 // which research session produced it.
-function cwOpenLink(a, label) {
+function cwOpenLink(a, label, title) {
     // One place that knows the deep-link shape, so the running card and the
     // finished card cannot drift apart.
     if (!a || !a.conversation_id) return '';
@@ -3119,9 +3119,10 @@ function cwOpenLink(a, label) {
         // Verified: a follow-up "send that now" made Cowork call PostMessage,
         // blocked only by our own config. So the handoff really is live, and
         // the button should say so.
-        + 'title="Continue this conversation in Cowork. The draft '
-        + 'is already there, and asking it to send will send for '
-        + 'real.">' + escapeHtml(label) + '</a>';
+        + 'title="' + escapeAttr(title
+            || 'Continue this conversation in Cowork. The draft is already '
+            + 'there, and asking it to send will send for real.')
+        + '">' + escapeHtml(label) + '</a>';
 }
 
 function cwDestBlock(action, task) {
@@ -3530,7 +3531,7 @@ function renderCoworkCard(task) {
                 : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>';
             var answerButton = interaction
                 ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
-                    + 'onclick="cwSendAnswer(' + task.id + ')">Answer Cowork</button>'
+                    + 'onclick="cwSendAnswer(' + task.id + ')">Answer and continue</button>'
                 : '';
             return cwShell('is-running', 'needs you', task,
                 cwIntentBlock(task, false)
@@ -3542,7 +3543,11 @@ function renderCoworkCard(task) {
                 + question
                 + '</div>',
                 answerButton
-                + cwOpenLink(a, 'Open in Cowork')
+                + cwOpenLink(
+                    a,
+                    'Edit or redirect',
+                    'Open this active conversation in Cowork to change direction.'
+                )
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
                 + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>');
@@ -3771,7 +3776,7 @@ function cwInteractionFields(taskId, interaction) {
                         + cwChoiceVisual(option) + '<span class="cw-choice-copy"><b>'
                         + escapeHtml(option.label) + '</b>'
                         + (option.description
-                            ? '<small>' + escapeHtml(option.description) + '</small>'
+                            ? '<small class="sr-only">' + escapeHtml(option.description) + '</small>'
                             : '')
                         + '</span></button>';
                 }).join('') + '</div>';
@@ -3805,12 +3810,14 @@ function cwChoiceEmoji(option) {
 }
 
 function cwChoiceVisual(option) {
-    var emoji = '<span class="cw-choice-emoji">' + cwChoiceEmoji(option) + '</span>';
+    var emoji = '<span class="cw-choice-emoji" aria-hidden="true">'
+        + cwChoiceEmoji(option) + '</span>';
     var imageUrl = cwSafeImageUrl(option.image_url);
     if (!imageUrl) return emoji;
     return '<img class="cw-choice-image" src="' + escapeAttr(imageUrl)
         + '" alt="" onerror="this.hidden=true;this.nextElementSibling.hidden=false">'
-        + '<span class="cw-choice-emoji" hidden>' + cwChoiceEmoji(option) + '</span>';
+        + '<span class="cw-choice-emoji" aria-hidden="true" hidden>'
+        + cwChoiceEmoji(option) + '</span>';
 }
 
 function cwSafeImageUrl(value) {

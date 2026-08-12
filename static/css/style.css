@@ -2955,31 +2955,30 @@ textarea.cw-draft {
     vertical-align: middle; margin: 0 10px 8px 0;
 }
 .cw-choice-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    display: flex; flex-wrap: wrap;
     gap: 8px; margin-top: 8px;
 }
 .cw-choice {
-    display: flex; align-items: center; gap: 10px; min-height: 58px;
-    padding: 9px 10px; text-align: left; cursor: pointer;
-    border: 1px solid var(--border-primary); border-radius: 8px;
+    display: inline-flex; align-items: center; gap: 7px; min-height: 34px;
+    max-width: 100%; padding: 5px 11px; text-align: left; cursor: pointer;
+    border: 1px solid var(--border-primary); border-radius: 999px;
     background: var(--bg-secondary); color: var(--text-primary);
 }
-.cw-choice:hover { border-color: #0f6cbd; background: var(--bg-tertiary); }
+.cw-choice:hover { border-color: var(--accent); background: var(--bg-tertiary); }
 .cw-choice[aria-pressed="true"] {
-    border-color: #0f6cbd; background: #e5f1fb;
-    box-shadow: inset 0 0 0 1px #0f6cbd;
+    border-color: var(--accent); background: var(--accent-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
 }
-.cw-choice:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
+.cw-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cw-choice-image, .cw-choice-emoji {
-    width: 40px; height: 40px; flex: 0 0 40px; border-radius: 8px;
+    width: 24px; height: 24px; flex: 0 0 24px; border-radius: 6px;
 }
 .cw-choice-image { object-fit: cover; }
 .cw-choice-emoji {
     display: inline-flex; align-items: center; justify-content: center;
-    background: var(--bg-tertiary); font-size: 22px;
+    background: var(--bg-tertiary); font-size: 15px;
 }
 .cw-choice-copy { display: flex; flex-direction: column; gap: 2px; }
-.cw-choice-copy small { color: var(--text-secondary); font-size: 11px; }
 
 /* Handoff status: what Cowork did after "Open in Cowork". `waiting` is the
    only one that earns colour - it means Cowork is blocked on the user, which
