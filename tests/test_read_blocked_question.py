@@ -6,8 +6,9 @@ from src.services import cowork_runner as cr
 class _Stream:
     status_code = 200
 
-    def __init__(self, lines):
+    def __init__(self, lines, owner):
         self.lines = lines
+        self.owner = owner
 
     def __enter__(self):
         return self
@@ -16,13 +17,16 @@ class _Stream:
         return False
 
     def iter_lines(self):
-        return iter(self.lines)
+        for line in self.lines:
+            self.owner.lines_consumed += 1
+            yield line
 
 
 class _Client:
     def __init__(self, lines):
         self.lines = lines
         self.calls = []
+        self.lines_consumed = 0
 
     def __enter__(self):
         return self
@@ -32,7 +36,7 @@ class _Client:
 
     def stream(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
-        return _Stream(self.lines)
+        return _Stream(self.lines, self)
 
 
 class ReadBlockedQuestionTest(unittest.TestCase):
@@ -43,7 +47,7 @@ class ReadBlockedQuestionTest(unittest.TestCase):
         self.addCleanup(lambda: setattr(cr, "_api_auth_fn", self._auth))
         self.addCleanup(lambda: setattr(cr, "_api_http_client_fn", self._client))
 
-    def test_it_replays_history_without_last_event_id(self):
+    def test_it_uses_a_fresh_subscription_without_replay_headers(self):
         client = _Client([
             "event: aq",
             'data: {"iid":"invoke-1","q":[{"id":"account","question":"Which account should I use?"}]}',
@@ -68,8 +72,39 @@ class ReadBlockedQuestionTest(unittest.TestCase):
         })
         method, url, kwargs = client.calls[0]
         self.assertEqual(method, "GET")
-        self.assertIn("conversationId=t%3Au%3Aconversation&since=0", url)
+        self.assertIn("conversationId=t%3Au%3Aconversation", url)
+        self.assertNotIn("since=", url)
         self.assertNotIn("Last-Event-Id", kwargs["headers"])
+
+    def test_snapshot_aq_returns_before_a_later_terminal_event(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"snapshot","replay":true,"q":['
+            '{"id":"scope","question":"Which scope?"}]}',
+            "event: rl",
+            'data: {"st":"fail"}',
+        ])
+        cr._api_http_client_fn = lambda: client
+
+        got = cr.read_blocked_question("t:u:conversation")
+
+        self.assertEqual(got["invocation_id"], "snapshot")
+        self.assertEqual(client.lines_consumed, 2)
+
+    def test_live_aq_waits_for_a_compatibility_boundary(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"live","replay":false,"q":['
+            '{"question":"Live question?"}]}',
+            "event: rpc",
+            'data: {"cnt":0,"ts":1}',
+        ])
+        cr._api_http_client_fn = lambda: client
+
+        got = cr.read_blocked_question("t:u:conversation")
+
+        self.assertEqual(got["invocation_id"], "live")
+        self.assertEqual(client.lines_consumed, 4)
 
     def test_it_discards_completed_prior_turn_text(self):
         client = _Client([
@@ -138,14 +173,20 @@ class ReadBlockedQuestionTest(unittest.TestCase):
         got = cr.read_blocked_question("t:u:conversation")
         self.assertEqual(got["invocation_id"], "snapshot")
 
-    def test_terminal_fail_closes_replay_without_rpc(self):
-        client = _Client([
-            "event: aq",
-            'data: {"iid":"failed","q":[{"question":"Never answer"}]}',
-            "event: rl", 'data: {"st":"fail"}',
-        ])
-        cr._api_http_client_fn = lambda: client
-        self.assertIsNone(cr.read_blocked_question("t:u:conversation"))
+    def test_terminal_run_closes_compatibility_replay_without_rpc(self):
+        for status in ("fail", "cancel"):
+            with self.subTest(status=status):
+                client = _Client([
+                    "event: aq",
+                    'data: {"iid":"failed","q":['
+                    '{"question":"Never answer"}]}',
+                    "event: rl",
+                    f'data: {{"st":"{status}"}}',
+                ])
+                cr._api_http_client_fn = lambda: client
+                self.assertIsNone(
+                    cr.read_blocked_question("t:u:conversation")
+                )
 
     def test_it_uses_web_client_answer_keys_and_preserves_producer_ids(self):
         client = _Client([
@@ -186,6 +227,8 @@ class ReadBlockedQuestionTest(unittest.TestCase):
             'data: {"iid":"partial","q":[{"question":"Maybe answered later?"}]}',
         ])
         cr._api_http_client_fn = lambda: client
+        # Without a snapshot marker or compatibility boundary, an aq is not
+        # authoritative on either the fresh or historical path.
         self.assertIsNone(cr.read_blocked_question("t:u:conversation"))
 
     def test_an_unreadable_replay_fails_soft(self):

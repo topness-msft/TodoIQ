@@ -2479,22 +2479,21 @@ def _safe_interaction_image_url(value):
 
 
 def read_blocked_question(conversation_id):
-    """Replay one conversation and return its current structured ``aq`` event.
+    """Read the current pending structured ``aq`` snapshot for one conversation.
 
-    This is deliberately separate from the live follow-up subscriber. Replaying
-    history on every follow-up would mix completed turns into the new result and
-    could stop on a prior terminal event. The read-only replay ends as soon as
-    the blocked state is found and never sends a turn.
+    A fresh subscription injects the runtime's authoritative pending-interactive
+    snapshot before live events. It is answer-aware and contains at most one
+    question, avoiding historical ``aq``/``aa`` reconciliation entirely.
     """
     if not conversation_id:
         return None
     pending_question = None
-    replay_complete = False
+    compatibility_boundary = False
     try:
         token, base, _tenant, _oid = _api_auth_fn()
         url = (
             f"{base}/v1/subscribe?conversationId="
-            f"{quote(conversation_id, safe='')}&since=0"
+            f"{quote(conversation_id, safe='')}"
         )
         headers = {
             "Authorization": f"Bearer {token}",
@@ -2508,7 +2507,7 @@ def read_blocked_question(conversation_id):
             ) as response:
                 if response.status_code != 200:
                     logger.warning(
-                        "blocked-question replay failed: HTTP %s",
+                        "blocked-question subscription failed: HTTP %s",
                         response.status_code,
                     )
                     return None
@@ -2529,7 +2528,10 @@ def read_blocked_question(conversation_id):
                     if not isinstance(data, dict):
                         continue
                     if kind == "aq":
-                        pending_question = _parse_aq_interaction(data)
+                        parsed = _parse_aq_interaction(data)
+                        if data.get("replay") is True:
+                            return parsed
+                        pending_question = parsed
                     elif kind == "aa":
                         if (
                             pending_question
@@ -2538,16 +2540,16 @@ def read_blocked_question(conversation_id):
                         ):
                             pending_question = None
                     elif kind == "rpc":
-                        replay_complete = True
+                        compatibility_boundary = True
                         break
                     elif kind == "rl":
                         state = data.get("st")
                         if state in _TERMINAL_RUN_STATES:
                             pending_question = None
                             break
-        return pending_question if replay_complete else None
+        return pending_question if compatibility_boundary else None
     except Exception:
-        logger.warning("could not replay blocked Cowork question", exc_info=True)
+        logger.warning("could not read blocked Cowork question", exc_info=True)
         return None
 
 
