@@ -1114,6 +1114,26 @@ html, body {
     font-size: 12px;
 }
 
+.detail-task-brief {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-primary);
+}
+
+.detail-task-brief-collapsed {
+    margin-top: 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.detail-task-brief-collapsed summary {
+    cursor: pointer;
+}
+
+.detail-task-brief-collapsed .detail-description {
+    margin-top: 10px;
+}
+
 .empty-state {
     display: flex;
     flex-direction: column;

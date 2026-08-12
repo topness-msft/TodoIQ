@@ -67,9 +67,16 @@ class TestOptionBStructure:
 
             expect(header).to_contain_text("Schedule Copilot Kit FinOps follow-up")
             expect(lifecycle).to_be_visible()
-            expect(evidence).to_contain_text("Source and evidence")
+            expect(evidence).to_contain_text("Source and context")
             expect(evidence).to_contain_text("Mehdi Slaoui Andaloussi")
             expect(evidence).to_contain_text("FinOps position remains unresolved")
+            expect(evidence).to_contain_text("Task brief")
+            expect(evidence).to_contain_text("Confirm current FinOps support")
+            expect(
+                evidence.locator(".detail-source-card").locator(
+                    f"#desc-display-{task_id}"
+                )
+            ).to_be_visible()
             expect(workspace.locator(".cw-card")).to_be_visible()
 
             evidence_box = evidence.bounding_box()
@@ -172,6 +179,122 @@ class TestOptionBSeparator:
         finally:
             _delete_task(page, base_url, task_id)
 
+
+class TestSourceContextCard:
+    def test_equivalent_source_and_description_render_once(
+        self, page: Page, base_url
+    ):
+        response = page.request.post(
+            f"{base_url}/api/tasks",
+            data={
+                "title": "Deduplicate source context",
+                "description": "Confirm the current FinOps position.",
+                "source_type": "meeting",
+                "source_snippet": "  confirm   THE current finops position.  ",
+                "coaching_text": "Draft the next-step recommendation for review.",
+                "parse_status": "parsed",
+            },
+        )
+        assert response.ok
+        task_id = response.json()["task"]["id"]
+        update = page.request.put(
+            f"{base_url}/api/tasks/{task_id}",
+            data={
+                "coaching_text": (
+                    "Draft the next-step recommendation for review."
+                )
+            },
+        )
+        assert update.ok
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            _open_task(page, base_url, task_id)
+            context = page.locator(".detail-source-card")
+            expect(context).to_contain_text("Source and context")
+            expect(context).to_contain_text("confirm THE current finops position")
+            expect(context.locator(".detail-source-link")).not_to_contain_text(
+                "confirm THE current finops position"
+            )
+            expect(context.get_by_text("Task brief", exact=True)).to_have_count(0)
+            expect(context.locator(f"#desc-display-{task_id}")).to_be_hidden()
+            editor_details = context.locator(".detail-task-brief-collapsed")
+            expect(editor_details).to_be_visible()
+            expect(editor_details.locator("summary")).to_have_text(
+                "Edit stored summary"
+            )
+            expect(page.locator(".detail-evidence")).not_to_contain_text(
+                "Draft the next-step recommendation"
+            )
+            expect(page.locator(".detail-workspace")).to_contain_text(
+                "Draft the next-step recommendation"
+            )
+
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "source-context-deduplicated-light.png"
+                ),
+                full_page=True,
+            )
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme', 'dark')"
+            )
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "source-context-deduplicated-dark.png"
+                ),
+                full_page=True,
+            )
+
+            editor_details.locator("summary").click()
+            page.evaluate(f"toggleDescriptionEdit({task_id})")
+            editor = context.locator(f"#desc-edit-{task_id}")
+            editor.fill("A refined task brief that adds new information.")
+            editor.blur()
+            expect(context.locator(".detail-task-brief")).to_contain_text(
+                "A refined task brief that adds new information."
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_manual_description_is_editable_inside_context_card(
+        self, page: Page, base_url
+    ):
+        response = page.request.post(
+            f"{base_url}/api/tasks",
+            data={
+                "title": "Manual context task",
+                "description": "Original manual task brief.",
+                "source_type": "manual",
+                "source_snippet": "Original manual task brief.",
+                "parse_status": "parsed",
+            },
+        )
+        assert response.ok
+        task_id = response.json()["task"]["id"]
+        try:
+            _open_task(page, base_url, task_id)
+            context = page.locator(".detail-source-card")
+            expect(context.locator(".detail-task-brief .detail-label")).to_contain_text(
+                "Task brief"
+            )
+            display = context.locator(f"#desc-display-{task_id}")
+            editor = context.locator(f"#desc-edit-{task_id}")
+            expect(display).to_have_text("Original manual task brief.")
+
+            page.evaluate(f"toggleDescriptionEdit({task_id})")
+            editor.fill("Updated manual task brief.")
+            page.evaluate(
+                f"renderDetailPane(tasks.find(task => task.id === {task_id}))"
+            )
+            expect(editor).to_be_visible()
+            expect(editor).to_have_value("Updated manual task brief.")
+            editor.blur()
+            expect(display).to_have_text("Updated manual task brief.")
+        finally:
+            _delete_task(page, base_url, task_id)
+
+
+class TestOptionBSeparatorKeyboard:
     def test_keyboard_resize_is_scoped_and_exposes_aria_values(
         self, page: Page, base_url
     ):

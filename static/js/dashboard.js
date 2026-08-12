@@ -748,7 +748,13 @@ function renderDetailPane(task) {
     var people = parsePeople(task.key_people);
     var sourcePerson = people.length ? people[0].name : '';
     var sourceLabel = sourcePerson || (task.source_type || 'Manual source');
-    var sourceSummary = task.source_snippet || task.description || 'No source evidence captured.';
+    var normalizedSource = (task.source_snippet || '')
+        .replace(/\s+/g, ' ').trim().toLowerCase();
+    var normalizedDescription = (task.description || '')
+        .replace(/\s+/g, ' ').trim().toLowerCase();
+    var showTaskBrief = (task.source_type || '').toLowerCase() === 'manual'
+        || !normalizedSource
+        || normalizedDescription !== normalizedSource;
 
     // Task identity stays full-width above the evidence/action workspace.
     var headerHtml = '<div class="detail-card detail-task-header">'
@@ -791,36 +797,52 @@ function renderDetailPane(task) {
         + '<button class="btn btn-refresh" onclick="refreshTask(' + task.id + ')" title="Re-parse with Claude + WorkIQ">&#8635; Refresh</button>'
         + '</div>';
 
-    var evidenceHtml = '<aside class="detail-evidence" aria-label="Source and evidence">'
+    var evidenceHtml = '<aside class="detail-evidence" aria-label="Source and context">'
         + '<div class="detail-card detail-source-card">'
-        + '<div class="detail-label">Source and evidence</div>'
+        + '<div class="detail-label">Source and context</div>'
         + '<div class="detail-source-head">'
         + '<img class="detail-source-avatar" src="/static/img/profile-placeholder.svg" alt="">'
         + '<div><strong>' + escapeHtml(sourceLabel) + '</strong>'
         + '<span>' + sourceTypeIcon(task.source_type) + ' ' + escapeHtml(task.source_type || 'manual') + '</span></div>'
-        + '</div>'
-        + '<div class="detail-source-quote">' + escapeHtml(sourceSummary) + '</div>'
-        + '<div class="detail-source-link">' + sourceMetaLink(task) + '</div>'
         + '</div>';
 
-    // Description (editable)
-    if (task.description) {
-        evidenceHtml += '<div class="detail-card"><div class="detail-label">Description'
+    if (task.source_snippet) {
+        evidenceHtml += '<div class="detail-source-quote">'
+            + escapeHtml(task.source_snippet)
+            + '</div>';
+    }
+    evidenceHtml += '<div class="detail-source-link">' + sourceMetaLink(task, false) + '</div>';
+
+    // Preserve the editable task brief only when it adds to the source. Manual
+    // tasks always retain their editable summary, even if source metadata matches.
+    if (showTaskBrief && task.description) {
+        evidenceHtml += '<div class="detail-task-brief"><div class="detail-label">Task brief'
             + '<button class="btn-edit-inline" onclick="toggleDescriptionEdit(' + task.id + ')" title="Edit description">&#9998;</button>'
             + '</div>'
             + '<div id="desc-display-' + task.id + '" class="detail-description">' + renderRichText(task.description, task.key_people) + '</div>'
             + '<textarea id="desc-edit-' + task.id + '" class="description-edit-textarea" style="display:none" '
             + 'onblur="saveDescription(' + task.id + ')">' + escapeHtml(task.description) + '</textarea>'
             + '</div>';
-    } else {
-        evidenceHtml += '<div class="detail-card"><div class="detail-label">Description'
+    } else if (showTaskBrief) {
+        evidenceHtml += '<div class="detail-task-brief"><div class="detail-label">Task brief'
             + '<button class="btn-edit-inline" onclick="toggleDescriptionEdit(' + task.id + ')" title="Add description">&#9998;</button>'
             + '</div>'
             + '<div id="desc-display-' + task.id + '" class="detail-description" style="color:#9e9e9e">No description</div>'
             + '<textarea id="desc-edit-' + task.id + '" class="description-edit-textarea" style="display:none" '
             + 'onblur="saveDescription(' + task.id + ')" placeholder="Add a description..."></textarea>'
             + '</div>';
+    } else {
+        evidenceHtml += '<details class="detail-task-brief-collapsed">'
+            + '<summary>Edit stored summary</summary>'
+            + '<div id="desc-display-' + task.id + '" class="detail-description">'
+            + renderRichText(task.description, task.key_people)
+            + '<button class="btn-edit-inline" onclick="toggleDescriptionEdit(' + task.id + ')" title="Edit task brief">&#9998;</button>'
+            + '</div>'
+            + '<textarea id="desc-edit-' + task.id + '" class="description-edit-textarea" style="display:none" '
+            + 'onblur="saveDescription(' + task.id + ')">' + escapeHtml(task.description) + '</textarea>'
+            + '</details>';
     }
+    evidenceHtml += '</div>';
 
     // Key People (pills + add)
     evidenceHtml += '<div class="detail-card">'
@@ -2575,15 +2597,17 @@ function toggleQuickHit(taskId) {
     });
 }
 
-function sourceMetaLink(task) {
+function sourceMetaLink(task, includeSnippet) {
     // Extract the original subject from source_id (format: type::email::subject)
     var subject = '';
     if (task.source_id) {
         var parts = task.source_id.split('::');
         if (parts.length >= 3) subject = parts.slice(2).join('::');
     }
-    // Use subject as link text, fall back to source_snippet, then source_type
-    var label = subject || (task.source_snippet ? truncate(task.source_snippet, 50) : (task.source_type || 'manual'));
+    // Detail cards already render the snippet as a quote; callers can omit it
+    // here so source metadata does not repeat the same content.
+    var snippetLabel = includeSnippet === false ? '' : task.source_snippet;
+    var label = subject || (snippetLabel ? truncate(snippetLabel, 50) : (task.source_type || 'manual'));
     if (task.source_url) {
         var icon = sourceTypeIcon(task.source_type);
         return icon + ' <a href="' + escapeHtml(task.source_url) + '" target="_blank" '
