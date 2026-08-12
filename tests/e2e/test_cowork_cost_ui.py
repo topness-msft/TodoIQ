@@ -12,8 +12,14 @@ this project, every time because only one was changed.
 """
 
 import json
+import os
 
 from playwright.sync_api import Page
+
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+TEMP_DIR = os.path.join(PROJECT_ROOT, "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 def _seed(page: Page, base_url: str) -> int:
@@ -71,6 +77,10 @@ class TestDashboardCost:
             _stub(page, tid, 30.231125)
             _open_dashboard(page, base_url, tid)
             assert "30.2 credits" in page.locator(".cw-card, .cw-shell").first.inner_text()
+            page.screenshot(
+                path=os.path.join(TEMP_DIR, "cowork-cost-dashboard.png"),
+                full_page=True,
+            )
         finally:
             _delete(page, base_url, tid)
 
@@ -113,6 +123,10 @@ class TestTodoCost:
             _stub(page, tid, 30.231125)
             _open_todo(page, base_url, tid)
             assert "30.2 credits" in page.locator(".cw-card").first.inner_text()
+            page.screenshot(
+                path=os.path.join(TEMP_DIR, "cowork-cost-todo.png"),
+                full_page=True,
+            )
         finally:
             _delete(page, base_url, tid)
 
