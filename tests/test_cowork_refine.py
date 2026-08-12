@@ -154,6 +154,63 @@ class TestContinuePreview(unittest.TestCase):
         self.assertTrue(cr.get_result(label)["error"])
 
 
+class TestAnswerInteraction(unittest.TestCase):
+    def setUp(self):
+        self._auth = cr._api_auth_fn
+        self._client = cr._api_http_client_fn
+        cr._api_auth_fn = lambda: ("tok", "https://island", "t", "u")
+        self.addCleanup(lambda: setattr(cr, "_api_auth_fn", self._auth))
+        self.addCleanup(lambda: setattr(cr, "_api_http_client_fn", self._client))
+
+    def test_it_posts_the_structured_answer_raw_event(self):
+        seen = {}
+
+        class Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def post(self, url, **kwargs):
+                seen.update(url=url, **kwargs)
+                return type("Response", (), {"status_code": 202})()
+
+        cr._api_http_client_fn = Client
+        cr.answer_interaction(
+            "t:u:conv", "invoke-1",
+            {"0": "A", "1": "Primary tenant"},
+        )
+        self.assertTrue(seen["url"].endswith("/v1/messages"))
+        self.assertEqual(seen["json"]["conversationId"], "t:u:conv")
+        content = seen["json"]["content"][0]
+        self.assertEqual(content["type"], "ask_user_answer")
+        self.assertEqual(content["rawEvent"]["invocationId"], "invoke-1")
+        self.assertEqual(
+            content["rawEvent"]["answers"],
+            {"0": "A", "1": "Primary tenant"},
+        )
+        self.assertEqual(seen["headers"]["X-Conversation-ID"], "t:u:conv")
+
+    def test_it_does_not_replace_the_existing_run_registry_entry(self):
+        cr._runs["cowork-preview-42"] = {"sentinel": True}
+        self.addCleanup(cr._runs.pop, "cowork-preview-42", None)
+
+        class Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def post(self, url, **kwargs):
+                return type("Response", (), {"status_code": 200})()
+
+        cr._api_http_client_fn = Client
+        cr.answer_interaction("t:u:conv", "invoke-1", {"account": "A"})
+        self.assertEqual(cr._runs["cowork-preview-42"], {"sentinel": True})
+
+
 class TestSubprocessCannotResume(unittest.TestCase):
     """Continuation exists only on the API transport. The CLI has no --resume
     and its stdout carries no conversation id, so a subprocess-produced row has

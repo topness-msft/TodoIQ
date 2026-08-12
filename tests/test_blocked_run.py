@@ -15,6 +15,7 @@ So the preview payload has to carry the same signal while previewing, which is
 the one state where it actually changes what the user should do.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -28,10 +29,22 @@ from src.handlers import cowork as handler  # noqa: E402
 class BlockedRunTest(unittest.TestCase):
     def setUp(self):
         self._orig = handler.HANDOFF_FN
+        self._question = handler.BLOCKED_QUESTION_FN
+        self._store = handler.BLOCKED_QUESTION_STORE_FN
+        self._update = handler.update_task_action
+        self._clear = handler.clear_blocked_question_if_unchanged
+        handler.BLOCKED_QUESTION_FN = lambda cid: None
+        handler.BLOCKED_QUESTION_STORE_FN = lambda action_id, question: {
+            "id": action_id, "blocked_question": question,
+        }
         self.addCleanup(self._restore)
 
     def _restore(self):
         handler.HANDOFF_FN = self._orig
+        handler.BLOCKED_QUESTION_FN = self._question
+        handler.BLOCKED_QUESTION_STORE_FN = self._store
+        handler.update_task_action = self._update
+        handler.clear_blocked_question_if_unchanged = self._clear
 
     def _enrich(self, state, handoff, conversation_id="t:u:abc"):
         handler.HANDOFF_FN = lambda cid: handoff
@@ -69,6 +82,100 @@ class BlockedRunTest(unittest.TestCase):
             "conversation_id": "t:u:abc",
         })
         self.assertFalse(out.get("waiting_on_user"))
+
+    def test_a_blocked_run_recovers_and_persists_the_question_once(self):
+        calls = []
+        interaction = {
+            "invocation_id": "invoke-1",
+            "questions": [{
+                "id": "account", "header": "",
+                "question": "Which account should I use?", "options": [],
+            }],
+        }
+        handler.BLOCKED_QUESTION_FN = lambda cid: interaction
+
+        def store(action_id, question):
+            calls.append((action_id, question))
+            return {
+                "id": action_id, "task_id": 2, "state": "previewing",
+                "conversation_id": "t:u:abc", "blocked_question": question,
+            }
+
+        handler.BLOCKED_QUESTION_STORE_FN = store
+        out = self._enrich("previewing", {
+            "state": "needs_user_input", "waiting_on_user": True,
+        })
+        self.assertEqual(out["interaction_request"], interaction)
+        self.assertEqual(json.loads(calls[0][1]), interaction)
+
+    def test_a_persisted_question_is_not_replayed_again(self):
+        handler.BLOCKED_QUESTION_FN = lambda cid: self.fail("unexpected replay")
+        out = handler._enrich({
+            "id": 1, "task_id": 2, "state": "previewing",
+            "conversation_id": "t:u:abc",
+            "blocked_question": json.dumps({
+                "invocation_id": "stored", "questions": [],
+            }),
+        })
+        self.assertEqual(out["interaction_request"]["invocation_id"], "stored")
+
+    def test_question_replay_failure_does_not_break_the_card(self):
+        def boom(cid):
+            raise RuntimeError("replay unavailable")
+
+        handler.BLOCKED_QUESTION_FN = boom
+        out = self._enrich("previewing", {
+            "state": "needs_user_input", "waiting_on_user": True,
+        })
+        self.assertTrue(out["waiting_on_user"])
+        self.assertIsNone(out.get("blocked_question"))
+
+    def test_answered_sentinel_clears_after_the_run_resumes(self):
+        calls = []
+        handler.HANDOFF_FN = lambda cid: {
+            "state": "running", "waiting_on_user": False,
+        }
+
+        def clear(action_id, blocked_question, answered_interaction):
+            calls.append((blocked_question, answered_interaction))
+            return True
+
+        handler.clear_blocked_question_if_unchanged = clear
+        out = handler._enrich({
+            "id": 1, "task_id": 2, "state": "previewing",
+            "conversation_id": "t:u:abc", "blocked_question": "",
+        })
+        self.assertIsNone(out["blocked_question"])
+        self.assertEqual(calls, [("", None)])
+
+    def test_answered_sentinel_suppresses_stale_waiting_status(self):
+        handler.HANDOFF_FN = lambda cid: {
+            "state": "needs_user_input", "waiting_on_user": True,
+        }
+        out = handler._enrich({
+            "id": 1, "task_id": 2, "state": "previewing",
+            "conversation_id": "t:u:abc", "blocked_question": "",
+        })
+        self.assertFalse(out["waiting_on_user"])
+
+    def test_external_answer_clears_the_persisted_question_after_resume(self):
+        calls = []
+        handler.HANDOFF_FN = lambda cid: {
+            "state": "running", "waiting_on_user": False,
+        }
+
+        def clear(action_id, blocked_question, answered_interaction):
+            calls.append((blocked_question, answered_interaction))
+            return True
+
+        handler.clear_blocked_question_if_unchanged = clear
+        out = handler._enrich({
+            "id": 1, "task_id": 2, "state": "previewing",
+            "conversation_id": "t:u:abc",
+            "blocked_question": "Old question?",
+        })
+        self.assertIsNone(out["blocked_question"])
+        self.assertEqual(calls, [("Old question?", None)])
 
 
 if __name__ == "__main__":

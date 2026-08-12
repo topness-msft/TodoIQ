@@ -21,6 +21,7 @@ from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
 from .handlers.cowork import (
     CoworkDestinationHandler,
+    CoworkAnswerHandler,
     CoworkHandler,
     CoworkRefineHandler,
 )
@@ -162,6 +163,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/skill", TaskSkillHandler),
             (r"/api/tasks/(\d+)/cowork", CoworkHandler),
             (r"/api/tasks/(\d+)/cowork/refine", CoworkRefineHandler),
+            (r"/api/tasks/(\d+)/cowork/answer", CoworkAnswerHandler),
             (r"/api/tasks/(\d+)/cowork/destination", CoworkDestinationHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),

@@ -14,22 +14,32 @@ Routes:
 import json
 import logging
 import re
+import threading
+import asyncio
 
 import tornado.web
+
+logger = logging.getLogger(__name__)
 
 from ..models import (
     ACTION_EDITABLE_FIELDS,
     DELIVERY_CHANNELS,
+    clear_blocked_question_if_unchanged,
+    claim_blocked_question_answer,
     confirm_destination,
     create_task_action,
     get_latest_task_action,
     get_task,
     list_task_actions,
     mark_task_action_seen,
+    restore_claimed_blocked_question,
+    set_blocked_question_if_missing,
     update_task_action,
 )
 from ..services.cowork_runner import (
     AlreadyRunning,
+    CoworkAnswerRejected,
+    answer_interaction,
     cancel_run,
     compose_prompt,
     compose_refine_prompt,
@@ -44,6 +54,7 @@ from ..services.cowork_runner import (
     parse_cowork_output,
     parse_source_url,
     preview_label,
+    read_blocked_question,
     start_preview,
 )
 from ..services.workspace_settings import api_transport_enabled
@@ -57,9 +68,14 @@ LOG_DIR_OVERRIDE = None
 # network. A real network call in the poll path once took the suite from 35s to
 # 313s, so this seam is not optional.
 HANDOFF_FN = None
+BLOCKED_QUESTION_FN = None
+BLOCKED_QUESTION_STORE_FN = None
+_question_recovering = set()
+_question_recovering_lock = threading.Lock()
 
 # Cancel seam, same reasoning: the unit suite must never post a real pause.
 CANCEL_FN = None
+ANSWER_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -290,6 +306,9 @@ def _enrich(action: dict) -> dict:
     if action is None:
         return action
 
+    action["interaction_request"] = _decode_interaction_request(
+        action.get("blocked_question")
+    )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
 
     if action.get("state") == "previewing" and action.get("conversation_id"):
@@ -299,11 +318,95 @@ def _enrich(action: dict) -> dict:
             status = None
         # Only ever claim the blocked case. An unreadable status must not be
         # rendered as "this is progressing normally".
-        action["waiting_on_user"] = bool(
+        runtime_waiting = bool(
             status and status.get("waiting_on_user")
         )
+        action["waiting_on_user"] = runtime_waiting
+        if runtime_waiting and action.get("blocked_question") == "":
+            # The answer POST succeeded; the cached task status can lag for up
+            # to 30 seconds. Do not reopen the prompt during that stale window.
+            action["waiting_on_user"] = False
+            _schedule_blocked_question_recovery(action)
+        elif runtime_waiting and action.get("blocked_question") is None:
+            question = _schedule_blocked_question_recovery(action)
+            if question:
+                action["blocked_question"] = question
+                action["interaction_request"] = question
+        elif (
+            status is not None
+            and not runtime_waiting
+            and action.get("blocked_question") is not None
+        ):
+            # Clear local-answer sentinels and externally answered questions
+            # only after a readable runtime status confirms the run resumed.
+            cleared = clear_blocked_question_if_unchanged(
+                action["id"],
+                action.get("blocked_question"),
+                action.get("answered_interaction"),
+            )
+            if cleared:
+                action["blocked_question"] = None
+                action["answered_interaction"] = None
+                action["interaction_request"] = None
 
     return action
+
+
+def _decode_interaction_request(raw):
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _recover_blocked_question(action):
+    action_id = action["id"]
+    try:
+        question = (BLOCKED_QUESTION_FN or read_blocked_question)(
+            action["conversation_id"]
+        )
+        if question:
+            encoded = json.dumps(question, separators=(",", ":"))
+            stored = (
+                BLOCKED_QUESTION_STORE_FN or set_blocked_question_if_missing
+            )(action_id, encoded)
+            return question if stored else None
+        return None
+    except Exception:
+        logger.warning("could not recover blocked question", exc_info=True)
+        return None
+    finally:
+        with _question_recovering_lock:
+            _question_recovering.discard(action_id)
+
+
+def _schedule_blocked_question_recovery(action):
+    """Recover replay text off the Tornado request thread.
+
+    Test seams run synchronously so unit tests stay deterministic. Production
+    performs the streaming read on a daemon thread and the next card poll picks
+    up the persisted question.
+    """
+    if BLOCKED_QUESTION_FN is not None:
+        return _recover_blocked_question(action)
+
+    action_id = action["id"]
+    with _question_recovering_lock:
+        if action_id in _question_recovering:
+            return None
+        _question_recovering.add(action_id)
+    threading.Thread(
+        target=_recover_blocked_question,
+        args=(dict(action),),
+        daemon=True,
+        name=f"cowork-question-{action_id}",
+    ).start()
+    return None
 
 
 def _finalise(action: dict) -> dict:
@@ -660,6 +763,104 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
 
         self.set_status(202)
         self.write(json.dumps({"action": _enrich(_clean(new_action))}))
+
+
+class CoworkAnswerHandler(tornado.web.RequestHandler):
+    """POST an answer into a preview currently blocked on the user."""
+
+    def _fail(self, code, message):
+        self.set_status(code)
+        self.write(json.dumps({"error": message}))
+
+    async def post(self, task_id):
+        tid = int(task_id)
+        action = get_latest_task_action(tid)
+        if not action:
+            return self._fail(404, "No Cowork preview for this task")
+
+        action = _enrich(action)
+        if action.get("state") != "previewing":
+            return self._fail(409, "That preview is not running")
+        if not action.get("conversation_id"):
+            return self._fail(409, "That preview has no Cowork conversation")
+        if not action.get("waiting_on_user"):
+            return self._fail(409, "Cowork is not waiting for an answer")
+
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except (json.JSONDecodeError, TypeError):
+            return self._fail(400, "Invalid JSON")
+        answers = body.get("answers")
+        invocation_id = str(body.get("invocation_id") or "")
+        interaction = action.get("interaction_request")
+        if not interaction:
+            return self._fail(409, "The Cowork question is still loading")
+        if invocation_id != str(interaction.get("invocation_id") or ""):
+            return self._fail(409, "That Cowork question is no longer current")
+        expected_ids = {
+            str(question.get("id"))
+            for question in interaction.get("questions") or []
+            if question.get("id")
+        }
+        if not isinstance(answers, dict):
+            return self._fail(400, "Answers are required")
+        cleaned_answers = {
+            str(key): str(value).strip()
+            for key, value in answers.items()
+            if str(key) in expected_ids and str(value).strip()
+        }
+        if set(cleaned_answers) != expected_ids:
+            return self._fail(400, "Every Cowork question requires an answer")
+
+        previous_question = action.get("blocked_question")
+        if not claim_blocked_question_answer(action["id"], previous_question):
+            return self._fail(409, "That Cowork question was already answered")
+
+        try:
+            await asyncio.to_thread(
+                (ANSWER_FN or answer_interaction),
+                action["conversation_id"],
+                interaction["invocation_id"],
+                cleaned_answers,
+            )
+        except Exception as exc:
+            if isinstance(exc, CoworkAnswerRejected):
+                restore_claimed_blocked_question(
+                    action["id"], previous_question
+                )
+                logger.error("Cowork rejected interaction answer", exc_info=True)
+                return self._fail(
+                    exc.status_code,
+                    f"Cowork rejected the answer: {exc}",
+                )
+            current_interaction = None
+            try:
+                current_interaction = await asyncio.to_thread(
+                    (BLOCKED_QUESTION_FN or read_blocked_question),
+                    action["conversation_id"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not reconcile Cowork interaction after answer failure",
+                    exc_info=True,
+                )
+            if isinstance(current_interaction, dict):
+                if current_interaction != interaction:
+                    set_blocked_question_if_missing(
+                        action["id"],
+                        json.dumps(current_interaction, separators=(",", ":")),
+                    )
+            logger.error("could not answer Cowork interaction", exc_info=True)
+            return self._fail(502, f"Could not send the answer to Cowork: {exc}")
+
+        action = get_latest_task_action(tid) or action
+        if action.get("state") == "previewing":
+            action["blocked_question"] = ""
+            action["answered_interaction"] = previous_question
+            action["interaction_request"] = None
+            action["waiting_on_user"] = False
+        self.set_status(202)
+        self.write(json.dumps({"action": _clean(action)}))
 
 
 class CoworkDestinationHandler(tornado.web.RequestHandler):

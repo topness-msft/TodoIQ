@@ -201,6 +201,16 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE task_actions ADD COLUMN parent_action_id INTEGER"
         )
         conn.commit()
+    if "blocked_question" not in action_cols:
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN blocked_question TEXT"
+        )
+        conn.commit()
+    if "answered_interaction" not in action_cols:
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN answered_interaction TEXT"
+        )
+        conn.commit()
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -333,6 +343,8 @@ CREATE TABLE IF NOT EXISTS task_actions (
     destination_display TEXT,
     destination_confirmed_at TEXT,
     destination_source TEXT,
+    blocked_question TEXT,
+    answered_interaction TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

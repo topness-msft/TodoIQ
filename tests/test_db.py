@@ -166,12 +166,19 @@ class TestTaskActionsSchema(unittest.TestCase):
             "seen_at", "island_url", "created_at", "updated_at",
             "delivery_channel", "destination_display",
             "destination_confirmed_at", "destination_source",
+            "blocked_question",
+            "answered_interaction",
             # A refine turn continues an existing Cowork conversation. It is
             # still its own row so the correction chain stays auditable, and
             # this points back at the attempt it refines.
             "parent_action_id",
         }
         self.assertEqual(cols, expected)
+
+    def test_blocked_question_is_nullable(self):
+        rows = self.conn.execute("PRAGMA table_info(task_actions)").fetchall()
+        column = next(r for r in rows if r["name"] == "blocked_question")
+        self.assertEqual(column["notnull"], 0)
 
     def test_phase1_states_are_accepted(self):
         for state in ("previewing", "ready", "failed"):
@@ -232,6 +239,136 @@ class TestTaskActionsSchema(unittest.TestCase):
         init_db(self.conn)
         row = self.conn.execute("SELECT draft FROM task_actions").fetchone()
         self.assertEqual(row["draft"], "hello")
+
+    def test_restart_recovery_fails_a_blocked_interaction_without_its_subscriber(self):
+        import src.db as db_module
+        from src.models import recover_stuck_previews
+
+        self._insert(
+            state="previewing",
+            blocked_question="Which account should I use?",
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertEqual(recover_stuck_previews(), 1)
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute("SELECT state FROM task_actions").fetchone()
+        self.assertEqual(row["state"], "failed")
+
+    def test_restart_recovery_still_fails_an_unblocked_preview(self):
+        import src.db as db_module
+        from src.models import recover_stuck_previews
+
+        self._insert(state="previewing")
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertEqual(recover_stuck_previews(), 1)
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute("SELECT state FROM task_actions").fetchone()
+        self.assertEqual(row["state"], "failed")
+
+    def test_late_question_recovery_cannot_overwrite_answered_sentinel(self):
+        import src.db as db_module
+        from src.models import set_blocked_question_if_missing
+
+        cursor = self._insert(
+            state="previewing",
+            blocked_question="",
+            answered_interaction="Stale question?",
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            updated = set_blocked_question_if_missing(
+                cursor.lastrowid, "Stale question?"
+            )
+        finally:
+            db_module.DB_PATH = original
+        self.assertIsNone(updated)
+        row = self.conn.execute(
+            "SELECT blocked_question, answered_interaction "
+            "FROM task_actions WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        self.assertEqual(row["blocked_question"], "")
+        self.assertEqual(row["answered_interaction"], "Stale question?")
+
+    def test_only_one_answer_can_claim_a_pending_question(self):
+        import src.db as db_module
+        from src.models import claim_blocked_question_answer
+
+        cursor = self._insert(
+            state="previewing", blocked_question="Choose A or B?"
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertTrue(claim_blocked_question_answer(
+                cursor.lastrowid, "Choose A or B?"
+            ))
+            self.assertFalse(claim_blocked_question_answer(
+                cursor.lastrowid, "Choose A or B?"
+            ))
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute(
+            "SELECT blocked_question, answered_interaction "
+            "FROM task_actions WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        self.assertEqual(row["blocked_question"], "")
+        self.assertEqual(row["answered_interaction"], "Choose A or B?")
+
+    def test_resume_cleanup_does_not_erase_a_concurrent_answer_claim(self):
+        import src.db as db_module
+        from src.models import clear_blocked_question_if_unchanged
+
+        cursor = self._insert(
+            state="previewing",
+            blocked_question="",
+            answered_interaction="New question?",
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertFalse(clear_blocked_question_if_unchanged(
+                cursor.lastrowid, "Old question?", None
+            ))
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute(
+            "SELECT blocked_question, answered_interaction "
+            "FROM task_actions WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        self.assertEqual(row["blocked_question"], "")
+        self.assertEqual(row["answered_interaction"], "New question?")
+
+    def test_stopped_action_cannot_claim_or_send_an_answer(self):
+        import src.db as db_module
+        from src.models import claim_blocked_question_answer
+
+        cursor = self._insert(
+            state="failed", blocked_question="Choose A or B?"
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertFalse(claim_blocked_question_answer(
+                cursor.lastrowid, "Choose A or B?"
+            ))
+        finally:
+            db_module.DB_PATH = original
 
 
 if __name__ == "__main__":

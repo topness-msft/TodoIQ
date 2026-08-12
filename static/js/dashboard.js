@@ -2571,6 +2571,12 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+function escapeAttr(str) {
+    return escapeHtml(String(str || ''))
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function truncate(str, maxLen) {
     if (!str) return '';
     return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
@@ -2865,13 +2871,20 @@ var _cwRefine = {};
 // re-render restores the edit instead of destroying it.
 var _cwDraftBuf = {};
 var _cwInstrBuf = {};
+var _cwAnswerBuf = {};
+var _cwAnswerSending = {};
 
 function cwBufferDraft(taskId, value) { _cwDraftBuf[taskId] = value; }
 function cwBufferInstr(taskId, value) { _cwInstrBuf[taskId] = value; }
+function cwBufferAnswer(taskId, questionId, value) {
+    if (!_cwAnswerBuf[taskId]) _cwAnswerBuf[taskId] = {};
+    _cwAnswerBuf[taskId][questionId] = value;
+}
 
 function cwClearBuffers(taskId) {
     delete _cwDraftBuf[taskId];
     delete _cwInstrBuf[taskId];
+    delete _cwAnswerBuf[taskId];
 }
 var _cwPollers = {};
 var _cwStartedAt = {};
@@ -3351,17 +3364,28 @@ function renderCoworkCard(task) {
         // working", which told Phil to keep waiting through 13 minutes of a run
         // that was blocked on him the whole time.
         if (a.waiting_on_user) {
+            var interaction = a.interaction_request;
+            var question = interaction
+                ? cwInteractionFields(task.id, interaction)
+                : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>';
+            var answerButton = interaction
+                ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
+                    + 'onclick="cwSendAnswer(' + task.id + ')">Answer Cowork</button>'
+                : '';
             return cwShell('is-running', 'needs you', task,
                 cwIntentBlock(task, false)
-                + '<div class="cw-blocked" data-testid="cw-blocked">'
+                + '<div class="cw-blocked" data-testid="cw-blocked" '
+                + 'data-cw-invocation="'
+                + escapeAttr(interaction ? interaction.invocation_id : '') + '">'
                 + '<b>Cowork is waiting for your answer.</b>'
-                + '<div class="cw-blocked-sub">It asked a question in the web app '
-                + 'and cannot go further until you reply. Nothing has been sent.'
-                + '</div></div>',
-                cwOpenLink(a, 'Answer in Cowork')
+                + (a.error ? '<div class="cw-error">' + escapeHtml(a.error) + '</div>' : '')
+                + question
+                + '</div>',
+                answerButton
+                + cwOpenLink(a, 'Open in Cowork')
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
-                + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
+                + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>');
         }
         return cwShell('is-running', 'read-only', task,
             cwIntentBlock(task, false)
@@ -3558,6 +3582,154 @@ function cwSaveDraft(taskId) {
     .catch(function(err) { console.error('Failed to save draft:', err); });
 }
 
+function cwInteractionFields(taskId, interaction) {
+    var buffered = _cwAnswerBuf[taskId] || {};
+    return (interaction.questions || []).map(function(question) {
+        var id = String(question.id || '');
+        var heading = question.header || question.question || 'Cowork question';
+        var prompt = question.header && question.question
+            ? '<div class="cw-blocked-sub">' + escapeHtml(question.question) + '</div>'
+            : '';
+        var value = buffered[id] || '';
+        var input;
+        if (question.options && question.options.length) {
+            input = '<div class="cw-choice-grid" data-testid="cw-answer" '
+                + 'data-cw-answer="' + escapeAttr(id) + '" '
+                + 'data-cw-multi="' + (question.multi_select ? '1' : '0') + '">'
+                + question.options.map(function(option) {
+                    var selected = value.split('\n').indexOf(option.value) !== -1
+                        ? 'true' : 'false';
+                    return '<button type="button" class="cw-choice" '
+                        + 'data-testid="cw-choice" data-cw-option="'
+                        + escapeAttr(option.value) + '" aria-pressed="' + selected + '" '
+                        + 'onclick="cwChooseOption(' + taskId + ', this)">'
+                        + cwChoiceVisual(option) + '<span class="cw-choice-copy"><b>'
+                        + escapeHtml(option.label) + '</b>'
+                        + (option.description
+                            ? '<small>' + escapeHtml(option.description) + '</small>'
+                            : '')
+                        + '</span></button>';
+                }).join('') + '</div>';
+        } else {
+            input = '<textarea class="cw-refine-box cw-answer-box" '
+                + 'data-testid="cw-answer" data-cw-answer="' + escapeAttr(id) + '" '
+                + 'placeholder="Type your answer..." '
+                + 'oninput="cwBufferAnswer(' + taskId
+                + ', this.getAttribute(\'data-cw-answer\'), this.value)">'
+                + escapeHtml(value) + '</textarea>';
+        }
+        var questionImage = cwSafeImageUrl(question.image_url);
+        var questionVisual = questionImage
+            ? '<img class="cw-question-image" src="' + escapeAttr(questionImage)
+                + '" alt="">'
+            : '';
+        return '<div class="cw-blocked-question">' + questionVisual
+            + '<b>' + escapeHtml(heading)
+            + '</b>' + prompt + input + '</div>';
+    }).join('');
+}
+
+function cwChoiceEmoji(option) {
+    var text = ((option.label || '') + ' ' + (option.description || '')).toLowerCase();
+    if (/account|tenant|company|work/.test(text)) return '\u{1F3E2}';
+    if (/scope|access|permission|secure/.test(text)) return '\u{1F510}';
+    if (/calendar|meeting|time|schedule/.test(text)) return '\u{1F4C5}';
+    if (/email|message|reply/.test(text)) return '\u2709\uFE0F';
+    if (/file|document|report/.test(text)) return '\u{1F4C4}';
+    return '\u2728';
+}
+
+function cwChoiceVisual(option) {
+    var emoji = '<span class="cw-choice-emoji">' + cwChoiceEmoji(option) + '</span>';
+    var imageUrl = cwSafeImageUrl(option.image_url);
+    if (!imageUrl) return emoji;
+    return '<img class="cw-choice-image" src="' + escapeAttr(imageUrl)
+        + '" alt="" onerror="this.hidden=true;this.nextElementSibling.hidden=false">'
+        + '<span class="cw-choice-emoji" hidden>' + cwChoiceEmoji(option) + '</span>';
+}
+
+function cwSafeImageUrl(value) {
+    if (!value) return '';
+    try {
+        var url = new URL(value);
+        return url.protocol === 'https:' ? url.href : '';
+    } catch (_err) {
+        return '';
+    }
+}
+
+function cwChooseOption(taskId, button) {
+    var field = button.closest('[data-cw-answer]');
+    if (!field) return;
+    var multi = field.getAttribute('data-cw-multi') === '1';
+    if (!multi) {
+        field.querySelectorAll('[data-cw-option]').forEach(function(choice) {
+            choice.setAttribute('aria-pressed', 'false');
+        });
+    }
+    var wasSelected = button.getAttribute('aria-pressed') === 'true';
+    button.setAttribute('aria-pressed', String(multi ? !wasSelected : true));
+    cwBufferAnswer(
+        taskId,
+        field.getAttribute('data-cw-answer'),
+        cwAnswerValue(field)
+    );
+}
+
+function cwAnswerValue(field) {
+    if (field.matches('.cw-choice-grid')) {
+        return Array.from(field.querySelectorAll('[aria-pressed="true"]')).map(
+            function(option) { return option.getAttribute('data-cw-option'); }
+        ).join('\n');
+    }
+    return field.value || '';
+}
+
+function cwSendAnswer(taskId) {
+    if (_cwAnswerSending[taskId]) return;
+    var answers = {};
+    var fields = document.querySelectorAll('[data-cw-answer]');
+    var blocked = document.querySelector('[data-testid="cw-blocked"]');
+    fields.forEach(function(field) {
+        var value = cwAnswerValue(field).trim();
+        if (value) answers[field.getAttribute('data-cw-answer')] = value;
+    });
+    if (!fields.length || Object.keys(answers).length !== fields.length) return;
+    _cwAnswerSending[taskId] = true;
+    var button = document.querySelector('[data-testid="cw-answer-submit"]');
+    if (button) button.disabled = true;
+    fetch('/api/tasks/' + taskId + '/cowork/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            invocation_id: blocked ? blocked.getAttribute('data-cw-invocation') : '',
+            answers: answers
+        })
+    })
+    .then(function(r) {
+        return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+    })
+    .then(function(res) {
+        if (!res.ok) {
+            delete _cwAnswerSending[taskId];
+            var a = _cwActions[taskId];
+            if (a) a.error = (res.d && res.d.error) || 'Could not answer Cowork.';
+            return cwRerender(taskId);
+        }
+        delete _cwAnswerBuf[taskId];
+        delete _cwAnswerSending[taskId];
+        _cwActions[taskId] = res.d.action;
+        cwRerender(taskId);
+    })
+    .catch(function(err) {
+        delete _cwAnswerSending[taskId];
+        console.error('Failed to answer Cowork:', err);
+        var a = _cwActions[taskId];
+        if (a) a.error = 'Could not answer Cowork. Check your connection and try again.';
+        cwRerender(taskId);
+    });
+}
+
 function cwCopyDraft(taskId) {
     var text = cwCurrentDraft(_cwActions[taskId]);
     if (!text) return;
@@ -3615,6 +3787,9 @@ function pollCoworkStatus(taskId) {
         .then(function(data) {
             var action = data.action || null;
             if (!action) return;
+            var wasWaiting = !!(_cwActions[taskId] && _cwActions[taskId].waiting_on_user);
+            var previousQuestion = _cwActions[taskId]
+                ? _cwActions[taskId].blocked_question : null;
             _cwActions[taskId] = action;
             cwSyncTaskState(taskId, action);
             renderTaskList();
@@ -3623,6 +3798,10 @@ function pollCoworkStatus(taskId) {
             if (action.progress && action.progress.length) {
                 var el = document.getElementById('cw-live-' + taskId);
                 if (el) el.textContent = action.progress[action.progress.length - 1];
+            }
+            if (wasWaiting !== !!action.waiting_on_user
+                    || previousQuestion !== action.blocked_question) {
+                cwRerender(taskId);
             }
             if (action.state !== 'previewing') {
                 stopCoworkPoller(taskId);

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from urllib.parse import unquote, quote
+from urllib.parse import unquote, quote, urlparse
 import json
 
 __all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
@@ -1761,6 +1761,72 @@ def continue_preview(task_id, conversation_id, instruction, *, log_dir=None) -> 
     return label
 
 
+def answer_interaction(conversation_id, invocation_id, answers):
+    """Answer an ``aq`` event on the existing live run.
+
+    The preview's original subscriber remains connected while the runtime is in
+    ``needs_user_input``. Posting the answer wakes that run; opening a second
+    follow-up subscriber would conflict with the registry and duplicate events.
+
+    This mirrors the Cowork web client's ``ask_user_answer`` raw event. Answer
+    keys are stringified question indexes and multi-select values are joined
+    with newlines.
+    """
+    if not conversation_id:
+        raise ValueError("A conversation id is required to answer Cowork.")
+    if not invocation_id:
+        raise ValueError("An interaction invocation id is required.")
+    cleaned = {
+        str(key): str(value).strip()
+        for key, value in (answers or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not cleaned:
+        raise ValueError("At least one answer is required.")
+
+    token, base, _tenant, _oid = _api_auth_fn()
+    body = {
+        "conversationId": conversation_id,
+        "role": "user",
+        "content": [{
+            "type": "ask_user_answer",
+            "rawEvent": {
+                "invocationId": invocation_id,
+                "answers": cleaned,
+            },
+        }],
+    }
+    client = _api_http_client_fn()
+    with client:
+        response = client.post(
+            f"{base}/v1/messages",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "X-Conversation-ID": conversation_id,
+            },
+            json=body,
+            timeout=15,
+        )
+    if 400 <= response.status_code < 500:
+        raise CoworkAnswerRejected(response.status_code)
+    if response.status_code not in (200, 202):
+        raise RuntimeError(
+            f"POST /v1/messages returned HTTP {response.status_code}"
+        )
+    return True
+
+
+class CoworkAnswerRejected(RuntimeError):
+    """The runtime definitively rejected an answer without accepting it."""
+
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(
+            f"POST /v1/messages returned HTTP {status_code}"
+        )
+
+
 def _record_progress(label, raw_line) -> None:
     """Append one CLI stderr line to a run's progress ring, if it is user-facing.
 
@@ -2340,6 +2406,138 @@ def _api_payload_from_events(events, conversation_id):
         "sse_events": sse_events,
         "callback_exchanges": [],
     }
+
+
+def _parse_aq_interaction(data):
+    """Canonical interaction request using the Cowork web client's answer keys."""
+    if not isinstance(data, dict):
+        return None
+    invocation_id = str(data.get("iid") or data.get("invocationId") or "")
+    raw_questions = data.get("q", data.get("question"))
+    if not invocation_id or not raw_questions:
+        return None
+    if not isinstance(raw_questions, list):
+        raw_questions = [{
+            "id": data.get("questionId") or data.get("id") or "q-0",
+            "question": str(raw_questions),
+        }]
+
+    questions = []
+    for index, raw in enumerate(raw_questions):
+        if not isinstance(raw, dict):
+            raw = {"question": str(raw)}
+        question_id = str(index)
+        producer_id = str(raw.get("id") or "").strip()
+        prompt = str(raw.get("question") or "").strip()
+        header = str(raw.get("header") or "").strip()
+        image_url = _safe_interaction_image_url(
+            raw.get("imageUrl") or raw.get("image")
+        )
+        options = []
+        for option in raw.get("options") or []:
+            if isinstance(option, dict):
+                value = str(
+                    option.get("value") or option.get("label") or ""
+                ).strip()
+                label = str(option.get("label") or value).strip()
+                description = str(option.get("description") or "").strip()
+                option_image_url = _safe_interaction_image_url(
+                    option.get("imageUrl") or option.get("image")
+                )
+            else:
+                value = label = str(option).strip()
+                description = ""
+                option_image_url = ""
+            if value:
+                options.append({
+                    "value": value,
+                    "label": label,
+                    "description": description,
+                    "image_url": option_image_url,
+                })
+        if question_id and (prompt or header or options):
+            questions.append({
+                "id": question_id,
+                "producer_id": producer_id,
+                "header": header,
+                "question": prompt,
+                "options": options,
+                "multi_select": bool(raw.get("multiSelect")),
+                "image_url": image_url,
+            })
+    if not questions:
+        return None
+    return {"invocation_id": invocation_id, "questions": questions}
+
+
+def _safe_interaction_image_url(value):
+    """Keep explicit HTTPS images; raw HTML and active URL schemes stay inert."""
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    return url if parsed.scheme == "https" and parsed.netloc else ""
+
+
+def read_blocked_question(conversation_id):
+    """Replay one conversation and return its current structured ``aq`` event.
+
+    This is deliberately separate from the live follow-up subscriber. Replaying
+    history on every follow-up would mix completed turns into the new result and
+    could stop on a prior terminal event. The read-only replay ends as soon as
+    the blocked state is found and never sends a turn.
+    """
+    if not conversation_id:
+        return None
+    pending_question = None
+    try:
+        token, base, _tenant, _oid = _api_auth_fn()
+        url = (
+            f"{base}/v1/subscribe?conversationId="
+            f"{quote(conversation_id, safe='')}&since=0"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "text/event-stream",
+        }
+        deadline = time.monotonic() + 5
+        client = _api_http_client_fn()
+        with client:
+            with client.stream(
+                "GET", url, headers=headers, json=None, timeout=5,
+            ) as response:
+                if response.status_code != 200:
+                    logger.warning(
+                        "blocked-question replay failed: HTTP %s",
+                        response.status_code,
+                    )
+                    return None
+                kind = ""
+                for raw in response.iter_lines():
+                    if time.monotonic() >= deadline:
+                        break
+                    line = (raw or "").rstrip("\r\n")
+                    if line.startswith("event:"):
+                        kind = line[6:].strip()
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        data = json.loads(line[5:].strip())
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    if kind == "aq":
+                        pending_question = _parse_aq_interaction(data)
+                    elif kind == "rl":
+                        state = data.get("st")
+                        if state in _TERMINAL_RUN_STATES:
+                            pending_question = None
+        return pending_question
+    except Exception:
+        if pending_question:
+            return pending_question
+        logger.warning("could not replay blocked Cowork question", exc_info=True)
+        return None
 
 
 def _active_run_count() -> int:

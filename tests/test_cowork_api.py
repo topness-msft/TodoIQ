@@ -82,10 +82,12 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         self._base_cost_fn = cr._cost_snapshot_fn
         cr._cost_snapshot_fn = lambda: None
         self._base_handoff_fn = cowork_handler.HANDOFF_FN
+        self._base_question_fn = cowork_handler.BLOCKED_QUESTION_FN
         # Same reasoning as the cost seam: GET /v1/tasks is a network call and
         # the card GET runs in many tests. Default to "no handoff info", which
         # is exactly the additive-degrades-to-today path.
         cowork_handler.HANDOFF_FN = lambda _cid: None
+        cowork_handler.BLOCKED_QUESTION_FN = lambda _cid: None
         cr.reset_handoff_cache()
         # Tests must never read the user's real data/settings.json — with the
         # API transport flag on for dogfood, these tests made real network calls.
@@ -111,6 +113,7 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
 
         cr._cost_snapshot_fn = self._base_cost_fn
         cowork_handler.HANDOFF_FN = self._base_handoff_fn
+        cowork_handler.BLOCKED_QUESTION_FN = self._base_question_fn
         cr.api_transport_enabled = self._base_api_flag
         cr.tenant_barrier_precheck = self._base_precheck
         cr.reset_handoff_cache()
@@ -1157,3 +1160,217 @@ class TestRefineTurn(CoworkAPITestBase):
         own = set(vars(CoworkRefineHandler))
         self.assertEqual(own & {"execute", "send", "deliver"}, set())
         self.assertIn("post", own)
+
+
+class TestInteractionAnswer(CoworkAPITestBase):
+    def setUp(self):
+        super().setUp()
+        from src.handlers import cowork as handler_mod
+        self.handler = handler_mod
+        self._answer = handler_mod.ANSWER_FN
+        self.answers = []
+        handler_mod.HANDOFF_FN = lambda cid: {
+            "state": "needs_user_input",
+            "waiting_on_user": True,
+        }
+        handler_mod.BLOCKED_QUESTION_FN = lambda cid: "Use account A or B?"
+        handler_mod.ANSWER_FN = lambda cid, invocation_id, answers: (
+            self.answers.append((cid, invocation_id, answers)) or True
+        )
+        self.addCleanup(lambda: setattr(handler_mod, "ANSWER_FN", self._answer))
+
+    def _blocked(self):
+        from src.db import get_connection
+        from src.models import create_task_action
+
+        tid = self.make_task()
+        action = create_task_action(
+            tid,
+            action_type="follow-up",
+            conversation_id="t:u:blocked",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps({
+                "invocation_id": "invoke-1",
+                "questions": [{
+                    "id": "0", "producer_id": "account", "header": "",
+                    "question": "Use account A or B?", "options": [],
+                }],
+            }), action["id"]),
+        )
+        conn.commit()
+        conn.close()
+        return tid
+
+    def _answer_request(self, tid, answers=None):
+        return self.fetch(
+            f"/api/tasks/{tid}/cowork/answer",
+            method="POST",
+            body=json.dumps({
+                "invocation_id": "invoke-1",
+                "answers": answers or {"0": "Use A"},
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_it_answers_the_same_live_conversation(self):
+        tid = self._blocked()
+        response = self._answer_request(tid)
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.answers,
+            [("t:u:blocked", "invoke-1", {"0": "Use A"})],
+        )
+        body = json.loads(response.body)
+        self.assertFalse(body["action"]["waiting_on_user"])
+        self.assertEqual(body["action"]["blocked_question"], "")
+
+    def test_empty_answer_is_rejected(self):
+        tid = self._blocked()
+        self.assertEqual(self._answer_request(tid, {"0": "  "}).code, 400)
+        self.assertEqual(self.answers, [])
+
+    def test_stale_invocation_is_rejected(self):
+        tid = self._blocked()
+        response = self.fetch(
+            f"/api/tasks/{tid}/cowork/answer",
+            method="POST",
+            body=json.dumps({
+                "invocation_id": "invoke-old",
+                "answers": {"0": "Use A"},
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.answers, [])
+
+    def test_api_failure_keeps_the_answer_claimed_when_state_is_ambiguous(self):
+        tid = self._blocked()
+        self.handler.ANSWER_FN = lambda *_: (_ for _ in ()).throw(
+            RuntimeError("upstream unavailable")
+        )
+
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 502)
+        from src.models import get_latest_task_action
+
+        action = get_latest_task_action(tid)
+        self.assertEqual(action["blocked_question"], "")
+        self.assertIsNotNone(action["answered_interaction"])
+
+    def test_definitive_api_rejection_restores_the_question_for_retry(self):
+        tid = self._blocked()
+        from src.services.cowork_runner import CoworkAnswerRejected
+
+        self.handler.ANSWER_FN = lambda *_: (_ for _ in ()).throw(
+            CoworkAnswerRejected(403)
+        )
+
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 403)
+        from src.models import get_latest_task_action
+
+        action = get_latest_task_action(tid)
+        self.assertNotEqual(action["blocked_question"], "")
+        self.assertIsNone(action["answered_interaction"])
+
+    def test_concurrent_stop_state_wins_over_stale_answer_response(self):
+        tid = self._blocked()
+        from src.models import get_latest_task_action, update_task_action
+
+        def stop_then_accept(*_):
+            action = get_latest_task_action(tid)
+            update_task_action(
+                action["id"],
+                frozenset({"state", "error"}),
+                state="failed",
+                error="Stopped by user.",
+            )
+            return True
+
+        self.handler.ANSWER_FN = stop_then_accept
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(json.loads(response.body)["action"]["state"], "failed")
+
+    def test_api_failure_does_not_overwrite_a_newer_question(self):
+        tid = self._blocked()
+        from src.models import get_latest_task_action, set_blocked_question_if_missing
+
+        newer = json.dumps({
+            "invocation_id": "invoke-2",
+            "questions": [{
+                "id": "0", "producer_id": "next", "header": "",
+                "question": "A newer question?", "options": [],
+            }],
+        })
+
+        def fail_after_new_question(*_):
+            action = get_latest_task_action(tid)
+            set_blocked_question_if_missing(action["id"], newer)
+            raise RuntimeError("response timed out")
+
+        self.handler.ANSWER_FN = fail_after_new_question
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 502)
+        follow_up = self.fetch(f"/api/tasks/{tid}/cowork")
+        interaction = json.loads(follow_up.body)["action"]["interaction_request"]
+        self.assertEqual(interaction["invocation_id"], "invoke-2")
+
+    def test_ambiguous_api_failure_reconciles_the_upstream_question(self):
+        tid = self._blocked()
+        self.handler.BLOCKED_QUESTION_FN = lambda *_: {
+            "invocation_id": "invoke-2",
+            "questions": [{
+                "id": "0", "producer_id": "next", "header": "",
+                "question": "A newer question?", "options": [],
+            }],
+        }
+        self.handler.ANSWER_FN = lambda *_: (_ for _ in ()).throw(
+            TimeoutError("response timed out")
+        )
+
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 502)
+        follow_up = self.fetch(f"/api/tasks/{tid}/cowork")
+        interaction = json.loads(follow_up.body)["action"]["interaction_request"]
+        self.assertEqual(interaction["invocation_id"], "invoke-2")
+
+    def test_partial_answer_map_is_rejected(self):
+        tid = self._blocked()
+        from src.db import get_connection
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, blocked_question FROM task_actions WHERE task_id=?",
+            (tid,),
+        ).fetchone()
+        interaction = json.loads(row["blocked_question"])
+        interaction["questions"].append({
+            "id": "1", "producer_id": "reason", "header": "",
+            "question": "Why?", "options": [],
+        })
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps(interaction), row["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self._answer_request(tid, {"0": "Use A"}).code, 400)
+        self.assertEqual(self.answers, [])
+
+    def test_it_refuses_when_cowork_is_not_waiting(self):
+        tid = self._blocked()
+        self.handler.HANDOFF_FN = lambda cid: {
+            "state": "running", "waiting_on_user": False,
+        }
+        self.assertEqual(self._answer_request(tid).code, 409)
+        self.assertEqual(self.answers, [])

@@ -168,6 +168,10 @@ class TestFollowUpUsesTheDocumentedShape(ApiProtocolTestBase):
         client, _ = self._run(conversation_id="t:u:cw-existing")
         self.assertIn("conversationId=t%3Au%3Acw-existing", client.calls[0]["url"])
 
+    def test_a_first_turn_does_not_request_replay(self):
+        client, _ = self._run()
+        self.assertNotIn("since=", client.calls[0]["url"])
+
     def test_the_get_carries_no_body(self):
         client, _ = self._run(conversation_id="t:u:cw-existing")
         self.assertIsNone(client.calls[0]["json"])

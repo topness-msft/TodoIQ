@@ -451,6 +451,7 @@ _ACTION_INSERT_FIELDS = (
     "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
     "island_url", "delivery_channel", "destination_display", "destination_source",
     "destination_confirmed_at", "parent_action_id",
+    "blocked_question", "answered_interaction",
 )
 
 # Teams and email are the only transports TodoIQ can describe today. The value
@@ -603,6 +604,87 @@ def update_task_action(action_id: int, allowed: frozenset, **fields) -> dict | N
             "SELECT * FROM task_actions WHERE id = ?", (action_id,)
         ).fetchone()
         return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def set_blocked_question_if_missing(action_id: int, question: str) -> dict | None:
+    """Persist a new interaction unless it is the one just answered."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = ?, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND (blocked_question IS NULL OR "
+            "(blocked_question = '' AND COALESCE(answered_interaction, '') <> ?))",
+            (question, action_id, question),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def claim_blocked_question_answer(action_id: int, expected_question: str) -> bool:
+    """Atomically claim the pending interaction so only one answer is sent."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET answered_interaction = blocked_question, "
+            "blocked_question = '', "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND state = 'previewing' "
+            "AND blocked_question = ?",
+            (action_id, expected_question),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def restore_claimed_blocked_question(action_id: int, question: str) -> bool:
+    """Restore a definitively rejected answer if its claim is still current."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = ?, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND blocked_question = '' "
+            "AND answered_interaction = ?",
+            (question, action_id, question),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def clear_blocked_question_if_unchanged(
+    action_id: int,
+    blocked_question: str | None,
+    answered_interaction: str | None,
+) -> bool:
+    """Clear a resumed interaction without erasing a concurrent state change."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = NULL, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND blocked_question IS ? "
+            "AND answered_interaction IS ?",
+            (action_id, blocked_question, answered_interaction),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
     finally:
         conn.close()
 
