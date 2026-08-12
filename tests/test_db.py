@@ -168,12 +168,26 @@ class TestTaskActionsSchema(unittest.TestCase):
             "destination_confirmed_at", "destination_source",
             "blocked_question",
             "answered_interaction",
+            "interaction_mode",
+            "completed_at",
+            "had_interaction",
             # A refine turn continues an existing Cowork conversation. It is
             # still its own row so the correction chain stays auditable, and
             # this points back at the attempt it refines.
             "parent_action_id",
         }
         self.assertEqual(cols, expected)
+
+    def test_interaction_mode_defaults_to_interaction(self):
+        self.conn.execute("INSERT INTO task_actions (task_id) VALUES (1)")
+        row = self.conn.execute(
+            "SELECT interaction_mode FROM task_actions"
+        ).fetchone()
+        self.assertEqual(row["interaction_mode"], "interaction")
+
+    def test_interaction_mode_rejects_unknown_values(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(interaction_mode="surprise_me")
 
     def test_blocked_question_is_nullable(self):
         rows = self.conn.execute("PRAGMA table_info(task_actions)").fetchall()
@@ -293,7 +307,7 @@ class TestTaskActionsSchema(unittest.TestCase):
             db_module.DB_PATH = original
         self.assertIsNone(updated)
         row = self.conn.execute(
-            "SELECT blocked_question, answered_interaction "
+            "SELECT blocked_question, answered_interaction, had_interaction "
             "FROM task_actions WHERE id=?",
             (cursor.lastrowid,),
         ).fetchone()
@@ -320,12 +334,13 @@ class TestTaskActionsSchema(unittest.TestCase):
         finally:
             db_module.DB_PATH = original
         row = self.conn.execute(
-            "SELECT blocked_question, answered_interaction "
+            "SELECT blocked_question, answered_interaction, had_interaction "
             "FROM task_actions WHERE id=?",
             (cursor.lastrowid,),
         ).fetchone()
         self.assertEqual(row["blocked_question"], "")
         self.assertEqual(row["answered_interaction"], "Choose A or B?")
+        self.assertEqual(row["had_interaction"], 1)
 
     def test_resume_cleanup_does_not_erase_a_concurrent_answer_claim(self):
         import src.db as db_module

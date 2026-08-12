@@ -452,6 +452,7 @@ _ACTION_INSERT_FIELDS = (
     "island_url", "delivery_channel", "destination_display", "destination_source",
     "destination_confirmed_at", "parent_action_id",
     "blocked_question", "answered_interaction",
+    "interaction_mode",
 )
 
 # Teams and email are the only transports TodoIQ can describe today. The value
@@ -592,6 +593,11 @@ def update_task_action(action_id: int, allowed: frozenset, **fields) -> dict | N
         return None
 
     sets = ", ".join(f"{k} = ?" for k in updates)
+    if updates.get("state") in {"ready", "failed"}:
+        sets += (
+            ", completed_at = COALESCE("
+            "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+        )
     conn = get_connection()
     try:
         conn.execute(
@@ -614,6 +620,7 @@ def set_blocked_question_if_missing(action_id: int, question: str) -> dict | Non
     try:
         cursor = conn.execute(
             "UPDATE task_actions SET blocked_question = ?, "
+            "had_interaction = 1, "
             "answered_interaction = NULL, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND (blocked_question IS NULL OR "
@@ -637,6 +644,7 @@ def claim_blocked_question_answer(action_id: int, expected_question: str) -> boo
     try:
         cursor = conn.execute(
             "UPDATE task_actions SET answered_interaction = blocked_question, "
+            "had_interaction = 1, "
             "blocked_question = '', "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND state = 'previewing' "
@@ -700,6 +708,8 @@ def recover_stuck_previews() -> int:
         cursor = conn.execute(
             "UPDATE task_actions SET state = 'failed', "
             "error = 'Interrupted by a server restart.', "
+            "completed_at = COALESCE("
+            "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')), "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE state = 'previewing'"
         )

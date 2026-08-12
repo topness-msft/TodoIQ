@@ -59,6 +59,11 @@ class TestRefinePromptIsMinimal(unittest.TestCase):
         prompt = compose_refine_prompt("shorter")
         self.assertIn("do not send", prompt.lower())
 
+    def test_no_interaction_mode_is_re_emitted_before_output(self):
+        prompt = compose_refine_prompt("shorter", interaction_mode="no_interaction")
+        self.assertIn("[INTERACTION]", prompt)
+        self.assertLess(prompt.index("[INTERACTION]"), prompt.index("[OUTPUT]"))
+
     def test_an_empty_instruction_is_rejected(self):
         for bad in ("", "   ", None):
             with self.subTest(bad=bad):
@@ -100,9 +105,16 @@ class TestContinuePreview(unittest.TestCase):
 
         self.runner = runner
 
-    def _run(self, cid="t:u:cw-abc", instruction="make it shorter"):
+    def _run(self, cid="t:u:cw-abc", instruction="make it shorter",
+             interaction_mode="interaction"):
         with mock.patch.object(cr, "_api_run_fn", self.runner):
-            label = cr.continue_preview(4242, cid, instruction, log_dir=self.tmp)
+            label = cr.continue_preview(
+                4242,
+                cid,
+                instruction,
+                interaction_mode=interaction_mode,
+                log_dir=self.tmp,
+            )
             cr.wait_for(label, timeout=10)
         return label
 
@@ -122,6 +134,10 @@ class TestContinuePreview(unittest.TestCase):
         self._run(instruction="aim it just at Greg")
         self.assertIn("aim it just at Greg", self.seen["prompt"])
         self.assertNotIn("[VOICE]", self.seen["prompt"])
+
+    def test_it_keeps_no_interaction_behavior_on_follow_up(self):
+        self._run(interaction_mode="no_interaction")
+        self.assertIn("[INTERACTION]", self.seen["prompt"])
 
     def test_the_result_shape_matches_every_other_run(self):
         label = self._run()

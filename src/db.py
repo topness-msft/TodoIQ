@@ -211,6 +211,30 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE task_actions ADD COLUMN answered_interaction TEXT"
         )
         conn.commit()
+    if "interaction_mode" not in action_cols:
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN interaction_mode TEXT "
+            "NOT NULL DEFAULT 'interaction'"
+        )
+        conn.commit()
+    if "completed_at" not in action_cols:
+        conn.execute("ALTER TABLE task_actions ADD COLUMN completed_at TEXT")
+        conn.execute(
+            "UPDATE task_actions SET completed_at = updated_at "
+            "WHERE state IN ('ready','failed') AND completed_at IS NULL"
+        )
+        conn.commit()
+    if "had_interaction" not in action_cols:
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN had_interaction INTEGER "
+            "NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "UPDATE task_actions SET had_interaction = 1 "
+            "WHERE blocked_question IS NOT NULL "
+            "OR answered_interaction IS NOT NULL"
+        )
+        conn.commit()
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -345,6 +369,11 @@ CREATE TABLE IF NOT EXISTS task_actions (
     destination_source TEXT,
     blocked_question TEXT,
     answered_interaction TEXT,
+    interaction_mode TEXT NOT NULL DEFAULT 'interaction'
+                          CHECK (interaction_mode IN ('interaction','no_interaction')),
+    completed_at     TEXT,
+    had_interaction  INTEGER NOT NULL DEFAULT 0
+                          CHECK (had_interaction IN (0,1)),
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

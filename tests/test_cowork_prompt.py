@@ -85,6 +85,27 @@ class TestSectionOrdering(unittest.TestCase):
         p = compose_prompt(make_task(), redirect_text="change it")
         self.assertEqual(sections(p)[-1], "[OUTPUT]")
 
+    def test_no_interaction_layer_follows_correction_and_precedes_output(self):
+        p = compose_prompt(
+            make_task(),
+            redirect_text="change it",
+            interaction_mode="no_interaction",
+        )
+        order = sections(p)
+        self.assertLess(order.index("[CORRECTION]"), order.index("[INTERACTION]"))
+        self.assertLess(order.index("[INTERACTION]"), order.index("[OUTPUT]"))
+
+    def test_no_interaction_requests_autonomous_completion_without_weakening_safety(self):
+        p = compose_prompt(make_task(), interaction_mode="no_interaction")
+        interaction = p[p.index("[INTERACTION]"):p.index("[OUTPUT]")]
+        self.assertIn("reasonable", interaction.lower())
+        self.assertIn("without pausing", interaction.lower())
+        self.assertIn("do not send", p.lower())
+
+    def test_default_interaction_mode_adds_no_behavior_override(self):
+        p = compose_prompt(make_task(), interaction_mode="interaction")
+        self.assertNotIn("[INTERACTION]", p)
+
 
 class TestVoiceLayer(unittest.TestCase):
     """The draft has to sound like Phil, and the register follows the transport.

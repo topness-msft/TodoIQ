@@ -503,6 +503,17 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(409, "A preview is already running for this task")
 
         redirect_text = (body.get("redirect_text") or "").strip() or None
+        interaction_mode = body.get("interaction_mode")
+        if interaction_mode is None:
+            previous = get_latest_task_action(tid)
+            interaction_mode = (
+                previous.get("interaction_mode") if previous else "interaction"
+            ) or "interaction"
+        if (
+            not isinstance(interaction_mode, str)
+            or interaction_mode not in {"interaction", "no_interaction"}
+        ):
+            return self._fail(400, "Invalid interaction mode")
         destination = parse_source_url(task.get("source_url"))
         resolved = _carry_forward_destination(
             tid, _resolve_destination(task, destination)
@@ -513,6 +524,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             destination,
             redirect_text=redirect_text,
             delivery_channel=resolved.get("delivery_channel"),
+            interaction_mode=interaction_mode,
         )
 
         # Minted BEFORE the run so Stop is addressable from the first second.
@@ -536,6 +548,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             destination_kind=destination.get("kind"),
             island_url=get_cached_cowork_island(),
             conversation_id=conversation_id,
+            interaction_mode=interaction_mode,
             **resolved,
         )
 
@@ -734,7 +747,10 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             intent=action.get("intent"),
             notes_snapshot=action.get("notes_snapshot"),
             redirect_text=instruction,
-            composed_prompt=compose_refine_prompt(instruction),
+            composed_prompt=compose_refine_prompt(
+                instruction,
+                interaction_mode=action.get("interaction_mode") or "interaction",
+            ),
             conversation_id=conversation_id,
             island_url=action.get("island_url"),
             parent_action_id=action["id"],
@@ -744,11 +760,16 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             destination_source=action.get("destination_source"),
             destination_confirmed_at=action.get("destination_confirmed_at"),
             delivery_channel=action.get("delivery_channel"),
+            interaction_mode=action.get("interaction_mode") or "interaction",
         )
 
         try:
             continue_preview(
-                tid, conversation_id, instruction, log_dir=LOG_DIR_OVERRIDE,
+                tid,
+                conversation_id,
+                instruction,
+                interaction_mode=action.get("interaction_mode") or "interaction",
+                log_dir=LOG_DIR_OVERRIDE,
             )
         except AlreadyRunning:
             return self._fail(409, "A preview is already running for this task")

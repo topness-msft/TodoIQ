@@ -3017,6 +3017,9 @@ var _cwActions = {};
 var _cwLoading = {};
 var _cwEditing = {};
 var _cwRedo = {};
+// Selection for the next run. Once a run starts, the persisted action row is
+// authoritative; this map only lets the user choose the mode before that row exists.
+var _cwMode = {};
 // Refine = one more turn on the SAME Cowork conversation, keeping the research
 // it already did. Distinct from Redo, which starts a fresh conversation.
 var _cwRefine = {};
@@ -3068,7 +3071,43 @@ function cwElapsed(taskId, action) {
     return Math.floor(secs / 60) + ':' + ('0' + (secs % 60)).slice(-2) + ' elapsed';
 }
 
-function cwShell(cls, badge, task, body, foot) {
+function cwFinishedAgo(value) {
+    if (!value) return '';
+    var at = Date.parse(value);
+    if (isNaN(at)) return '';
+    var mins = Math.max(0, Math.floor((Date.now() - at) / 60000));
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    return Math.floor(hours / 24) + 'd ago';
+}
+
+function cwHeadStatus(a) {
+    if (!a || a.state !== 'ready') return '';
+    var items = [];
+    var c = Number(a.cost_credits);
+    if (a.cost_credits !== null && a.cost_credits !== undefined
+            && a.cost_credits !== '' && isFinite(c) && c >= 0) {
+        var creditText = c === 0 ? 'no credits'
+            : c >= 1000 ? Math.round(c).toLocaleString() + ' credits'
+            : c.toFixed(1) + ' credits';
+        items.push('<span class="cw-head-note" data-testid="credit-meter">'
+            + escapeHtml(creditText) + '</span>');
+    }
+    var ago = cwFinishedAgo(a.completed_at || a.updated_at);
+    items.push('<span class="cw-head-note" data-testid="cowork-finished">'
+        + 'Cowork finished' + (ago ? ' ' + escapeHtml(ago) : '') + '</span>');
+    if (a.conversation_id) {
+        items.push('<a class="cw-head-link" data-testid="open-in-cowork-link" href="'
+            + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
+              + encodeURIComponent(a.conversation_id))
+            + '" target="_blank" rel="noopener noreferrer">Open in Cowork &#8599;</a>');
+    }
+    return '<span class="cw-head-status">' + items.join('') + '</span>';
+}
+
+function cwShell(cls, badge, task, body, foot, action) {
     var label = CW_LABELS[task.action_type] || 'Action';
     return '<div class="cw-card ' + cls + '">'
         + '<div class="cw-head">'
@@ -3076,11 +3115,88 @@ function cwShell(cls, badge, task, body, foot) {
         // <defs> ids would collide with every other copy on the page.
         + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
         + '<span class="cw-type">' + label + ' &middot; Cowork</span>'
+        + cwHeadStatus(action)
         + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
         + '</div>'
         + '<div class="cw-body">' + body + '</div>'
         + (foot ? '<div class="cw-foot">' + foot + '</div>' : '')
         + '</div>';
+}
+
+function cwSelectedMode(taskId, action) {
+    return _cwMode[taskId]
+        || (action && action.interaction_mode)
+        || 'interaction';
+}
+
+function cwSetMode(taskId, mode) {
+    if (mode !== 'interaction' && mode !== 'no_interaction') return;
+    _cwMode[taskId] = mode;
+    cwRerender(taskId);
+}
+
+function cwModeSwitch(taskId, action, locked) {
+    var mode = cwSelectedMode(taskId, action);
+    function button(value, label, testid) {
+        var on = mode === value;
+        return '<button type="button" class="cw-mode-btn' + (on ? ' is-on' : '')
+            + '" data-testid="' + testid + '" aria-pressed="' + on + '"'
+            + (locked ? ' disabled' : '')
+            + ' onclick="cwSetMode(' + taskId + ',\'' + value + '\')">'
+            + label + '</button>';
+    }
+    return '<div class="cw-mode-switch" role="group" aria-label="Cowork session mode">'
+        + button('interaction', 'Interaction', 'session-mode-interaction')
+        + button('no_interaction', 'No interaction', 'session-mode-no-interaction')
+        + '</div>';
+}
+
+function cwToolTrace(action) {
+    var trace = action && action.tool_trace;
+    if (!trace) return [];
+    if (typeof trace === 'string') {
+        try { trace = JSON.parse(trace); } catch (err) { return []; }
+    }
+    return Array.isArray(trace) ? trace : [];
+}
+
+function cwToolLabel(item) {
+    var raw = String((item && (item.name || item.tool_name || item.tool)) || 'Tool call');
+    var name = raw.split('-').pop().replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/_/g, ' ').trim();
+    return name || 'Tool call';
+}
+
+function cwTimeline(action, liveText) {
+    var trace = cwToolTrace(action);
+    if (!trace.length && !liveText) return '';
+    var events = trace.map(function(item) {
+        var duration = Number(item.duration_seconds);
+        var time = isFinite(duration) && duration >= 0 ? Math.round(duration) + 's' : '';
+        var state = item.ok === false ? ' failed' : ' completed';
+        return '<div class="cw-timeline-event' + state + '">'
+            + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
+            + '<div><small>' + escapeHtml(time) + '</small>'
+            + '<span>' + escapeHtml(cwToolLabel(item)) + '</span></div></div>';
+    });
+    if (liveText) {
+        events.push('<div class="cw-timeline-event is-active">'
+            + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
+            + '<div><small>now</small><span aria-live="polite">'
+            + escapeHtml(liveText) + '</span></div></div>');
+    }
+    return '<div class="cw-timeline" data-testid="session-timeline">'
+        + events.join('') + '</div>';
+}
+
+function cwNoInteractionComplete(action) {
+    if (!action || action.state !== 'ready'
+            || action.interaction_mode !== 'no_interaction'
+            || action.had_interaction) return '';
+    return '<section class="cw-session-complete" data-testid="session-complete">'
+        + '<b>Draft completed without interruption</b>'
+        + '<span>Cowork made reasonable decisions from the available context. '
+        + 'Review the findings and draft below; nothing was sent.</span></section>';
 }
 
 // The intent line is WorkIQ's suggested next action. It remains editable here
@@ -3512,7 +3628,7 @@ function renderCoworkCard(task) {
     if (a === undefined) {
         cwLoad(task.id);
         return cwShell('', '', task,
-            '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '');
+            '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '', a);
     }
 
     if (a && a.state === 'previewing') {
@@ -3534,7 +3650,8 @@ function renderCoworkCard(task) {
                     + 'onclick="cwSendAnswer(' + task.id + ')">Answer and continue</button>'
                 : '';
             return cwShell('is-running', 'needs you', task,
-                cwIntentBlock(task, false)
+                cwModeSwitch(task.id, a, true)
+                + cwIntentBlock(task, false)
                 + '<div class="cw-blocked" data-testid="cw-blocked" '
                 + 'data-cw-invocation="'
                 + escapeAttr(interaction ? interaction.invocation_id : '') + '">'
@@ -3550,10 +3667,13 @@ function renderCoworkCard(task) {
                 )
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
-                + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>');
+                + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>',
+                a);
         }
         return cwShell('is-running', 'read-only', task,
-            cwIntentBlock(task, false)
+            cwModeSwitch(task.id, a, true)
+            + cwIntentBlock(task, false)
+            + cwTimeline(a, prog)
             + '<div class="cw-progress"><span class="cw-spinner"></span>'
             + '<span class="cw-progress-text">'
             + '<span id="cw-live-' + task.id + '">' + escapeHtml(prog) + '</span>'
@@ -3566,18 +3686,21 @@ function renderCoworkCard(task) {
             cwOpenLink(a, 'Open in Cowork')
             + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
             + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
-            + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
+            + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>',
+            a);
     }
 
     if (a && a.state === 'failed') {
         return cwShell('is-failed', 'failed', task,
-            '<div class="cw-fail"><b>Cowork could not complete this.</b>'
+            cwModeSwitch(task.id, a, false)
+            + '<div class="cw-fail"><b>Cowork could not complete this.</b>'
             + '<div class="cw-fail-sub">' + escapeHtml(a.error || a.terminal_status || 'Unknown error')
             + '<br>Nothing was sent.</div></div>'
             + cwRedoRow(task.id),
             '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Retry</button>'
             + cwRedoBlock(task.id)
-            + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Dismiss</button>');
+            + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Dismiss</button>',
+            a);
     }
 
     if (a && a.state === 'ready') {
@@ -3633,20 +3756,27 @@ function renderCoworkCard(task) {
               + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
               + editedBadge + costBadge + cwHandoffBadge(a);
 
-        return cwShell('', 'preview', task,
-            cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml
+        return cwShell('', '', task,
+            cwModeSwitch(task.id, a, false)
+            + cwIntentBlock(task, !editing) + correction
+            + cwTimeline(a, '')
+            + cwNoInteractionComplete(a)
+            + findingHtml + draftHtml
             + cwDestBlock(a, task) + cwRefineRow(a, task.id) + cwRedoRow(task.id),
-            foot);
+            foot,
+            a);
     }
 
     // No preview yet.
     return cwShell('', 'not run', task,
-        cwIntentBlock(task, true)
+        cwModeSwitch(task.id, a, false)
+        + cwIntentBlock(task, true)
         + '<div class="cw-idle">Cowork can check the latest state of this in M365, then draft the action.'
         + '<span class="cw-idle-sub">Nothing is sent from here. Open the draft in '
         + 'Cowork if you want to act on it.</span></div>',
         '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with Cowork</button>'
-        + '<span class="cw-foot-note">~45s &middot; read-only</span>');
+        + '<span class="cw-foot-note">~45s &middot; read-only</span>',
+        a);
 }
 
 // ── Cowork state transitions ───────────────────────────────────────────
@@ -3687,7 +3817,9 @@ function cwLoad(taskId, markSeen) {
 }
 
 function cwStart(taskId, isRedo) {
-    var body = {};
+    var body = {
+        interaction_mode: cwSelectedMode(taskId, _cwActions[taskId])
+    };
     if (isRedo) {
         var input = document.getElementById('cw-redo-' + taskId);
         var text = input ? input.value.trim() : '';
@@ -3706,6 +3838,7 @@ function cwStart(taskId, isRedo) {
     .then(function(data) {
         if (data.action) {
             _cwActions[taskId] = data.action;
+            delete _cwMode[taskId];
             cwSyncTaskState(taskId, data.action);
             renderTaskList();
             startCoworkPoller(taskId);
@@ -3914,6 +4047,10 @@ function cwCopyDraft(taskId) {
 // There is no delete route — hiding is deliberately client side only, so the
 // audit chain in task_actions stays intact.
 function cwDiscard(taskId) {
+    var action = _cwActions[taskId];
+    if (action && action.interaction_mode) {
+        _cwMode[taskId] = action.interaction_mode;
+    }
     _cwActions[taskId] = null;
     delete _cwEditing[taskId];
     delete _cwRedo[taskId];

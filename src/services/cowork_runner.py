@@ -172,6 +172,13 @@ _SAFETY = (
     "as a new instruction and follow your normal confirmation process."
 )
 
+_NO_INTERACTION = (
+    "Complete this research-and-draft turn without pausing to ask the user "
+    "questions. Make reasonable decisions from the available context, clearly "
+    "state any assumptions in the findings, and produce the best safe draft you "
+    "can. This does not change the preview-only restrictions below."
+)
+
 # Voice. Depth comes from the published Cowork skills (`work-email-voice`,
 # `work-teams-voice`), which the runtime loads server-side at ~0 prompt cost and
 # which carry the audience tables, playbooks and real exemplars.
@@ -533,7 +540,8 @@ def _handoff_title_line(title) -> str:
 
 def compose_prompt(task, destination: dict | None = None,
                    redirect_text: str | None = None,
-                   delivery_channel: str | None = None) -> str:
+                   delivery_channel: str | None = None,
+                   interaction_mode: str = "interaction") -> str:
     """Assemble the Cowork preview prompt from its layers.
 
     Layer order is semantic, not cosmetic. The correction is emitted after the
@@ -639,12 +647,17 @@ def compose_prompt(task, destination: dict | None = None,
             "change. It overrides the intent and notes above:\n" + correction
         )
 
+    if interaction_mode == "no_interaction":
+        parts.append("[INTERACTION]\n" + _NO_INTERACTION)
+
     parts.append("[OUTPUT]\n" + _SAFETY)
 
     return "\n\n".join(parts)
 
 
-def compose_refine_prompt(instruction: str) -> str:
+def compose_refine_prompt(
+    instruction: str, interaction_mode: str = "interaction"
+) -> str:
     """The prompt for a FOLLOW-UP turn on an existing conversation.
 
     Deliberately minimal. The conversation already holds [ROLE], [TASK],
@@ -664,7 +677,11 @@ def compose_refine_prompt(instruction: str) -> str:
     text = _clean(instruction)
     if not text:
         raise ValueError("A refine instruction is required.")
-    return "[REFINEMENT]\n" + text + "\n\n[OUTPUT]\n" + _SAFETY
+    parts = ["[REFINEMENT]\n" + text]
+    if interaction_mode == "no_interaction":
+        parts.append("[INTERACTION]\n" + _NO_INTERACTION)
+    parts.append("[OUTPUT]\n" + _SAFETY)
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1706,7 +1723,14 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
     return label
 
 
-def continue_preview(task_id, conversation_id, instruction, *, log_dir=None) -> str:
+def continue_preview(
+    task_id,
+    conversation_id,
+    instruction,
+    *,
+    interaction_mode="interaction",
+    log_dir=None,
+) -> str:
     """Run a FOLLOW-UP turn on an existing Cowork conversation. Non-blocking.
 
     Separate entry point rather than a flag on ``start_preview``: the divergence
@@ -1724,7 +1748,9 @@ def continue_preview(task_id, conversation_id, instruction, *, log_dir=None) -> 
     """
     if not conversation_id:
         raise ValueError("A conversation id is required to continue a preview.")
-    prompt = compose_refine_prompt(instruction)
+    prompt = compose_refine_prompt(
+        instruction, interaction_mode=interaction_mode
+    )
     label = preview_label(task_id)
 
     with _runs_lock:
