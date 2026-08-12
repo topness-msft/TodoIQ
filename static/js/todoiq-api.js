@@ -5,6 +5,8 @@
  */
 
 // ── Data Layer ────────────────────────────────────────────
+const peopleSaveQueues = new Map();
+
 function normalizeTask(t) {
   if (typeof t.key_people === 'string') {
     try { t.key_people = JSON.parse(t.key_people); } catch(e) { t.key_people = []; }
@@ -51,6 +53,9 @@ async function fetchTasks() {
 function updateLocalTask(apiTask) {
   const t = normalizeTask(apiTask);
   const idx = tasks.findIndex(x => x.id === t.id);
+  if (idx >= 0 && peopleSaveQueues.has(t.id)) {
+    t.key_people = tasks[idx].key_people;
+  }
   if (idx >= 0) tasks[idx] = t;
   else tasks.unshift(t);
   refresh();
@@ -131,13 +136,40 @@ async function apiAction(id, body) {
   return data;
 }
 
-async function apiUpdate(id, fields) {
-  await fetch(`/api/tasks/${id}`, {
+async function apiUpdate(id, fields, applyLocal = true) {
+  const res = await fetch(`/api/tasks/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields)
   });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Update failed (${res.status})`);
+  if (applyLocal && data.task) updateLocalTask(data.task);
+  return data.task;
 }
+
+persistPeople = function(task) {
+  const taskId = task.id;
+  const keyPeople = JSON.stringify(task.key_people);
+  const previous = peopleSaveQueues.get(taskId) || Promise.resolve();
+  const save = previous
+    .catch(() => {})
+    .then(() => apiUpdate(taskId, { key_people: keyPeople }, false));
+  peopleSaveQueues.set(taskId, save);
+
+  save.then(updatedTask => {
+    if (peopleSaveQueues.get(taskId) !== save) return;
+    peopleSaveQueues.delete(taskId);
+    if (updatedTask) updateLocalTask(updatedTask);
+  }).catch(() => {
+    if (peopleSaveQueues.get(taskId) === save) {
+      peopleSaveQueues.delete(taskId);
+      toast('Failed to save people');
+      fetchTasks();
+    }
+  });
+  return save;
+};
 
 // ── Override mock functions with real API calls ────────────
 

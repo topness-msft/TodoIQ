@@ -34,6 +34,9 @@
   --ready-light: #dff6dd;
   --shadow: 0 2px 8px rgba(0,0,0,0.08);
   --radius: 8px;
+  --person-pill-bg: #17345f;
+  --person-pill-name: #6eb1ff;
+  --person-pill-secondary: #c0cad9;
 }
 
 .dark {
@@ -311,12 +314,12 @@ body {
 
 .people-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .person-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 9px; background: var(--bg-hover);
-  border-radius: 12px; font-size: 12px; color: var(--text);
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 6px 3px 4px; background: var(--person-pill-bg);
+  border-radius: 16px; font-size: 12px; color: var(--person-pill-name);
 }
 .person-avatar {
-  width: 18px; height: 18px; border-radius: 50%; background: var(--accent);
+  width: 20px; height: 20px; border-radius: 50%; background: var(--accent);
   color: #fff; font-size: 9px; font-weight: 600;
   display: flex; align-items: center; justify-content: center;
 }
@@ -666,14 +669,25 @@ textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.
 
 /* ── Person Chips (enhanced) ─────────────────────────── */
 .person-chip { position: relative; }
+.person-chip-select {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  border: 0; padding: 0; background: transparent; color: inherit;
+  font: inherit; cursor: pointer; text-align: left;
+}
+.person-chip-static { cursor: default; }
+.person-chip-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.person-chip-copy { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.person-chip-name { color: var(--person-pill-name); font-weight: 600; white-space: nowrap; }
+.person-chip-role { color: var(--person-pill-secondary); font-size: 10px; white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 .person-chip .person-remove {
-  display: none; margin-left: 2px; font-size: 10px; cursor: pointer; color: var(--text-muted);
+  opacity: 0; pointer-events: none; margin-left: 2px; font-size: 10px; cursor: pointer; color: var(--text-muted);
   border: none; background: none; padding: 0 2px; font-family: inherit; vertical-align: middle;
 }
-.person-chip:hover .person-remove { display: inline; }
+.person-chip:hover .person-remove,
+.person-chip:focus-within .person-remove { opacity: 1; pointer-events: auto; }
 .person-chip:hover .person-remove:hover { color: var(--danger); }
 .person-chip .person-alt-indicator {
-  font-size: 9px; cursor: pointer; color: var(--text-muted); margin-left: 1px;
+  font-size: 9px; cursor: pointer; color: var(--person-pill-secondary); margin-left: 1px;
 }
 .person-alt-dropdown {
   position: absolute; top: 100%; left: 0; z-index: 100; min-width: 200px;
@@ -682,7 +696,9 @@ textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.
 }
 .person-alt-dropdown .alt-header { font-size: 11px; color: var(--text-muted); padding: 4px 12px; }
 .person-alt-dropdown .alt-item {
-  display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 12px; border: 0; background: transparent; color: var(--text);
+  font-family: inherit; font-size: 12px; cursor: pointer; text-align: left;
 }
 .person-alt-dropdown .alt-item:hover { background: var(--bg-hover); }
 .person-alt-dropdown .alt-item .alt-role { font-size: 10px; color: var(--text-muted); }
@@ -1395,21 +1411,26 @@ function selectTask(id) {
         <div class="people-chips">${t.key_people.map((p,i)=>{
           const initials = p.name.split(' ').map(w=>w[0]).join('').slice(0,2);
           const hasAlts = p.alternatives?.length;
-          const altClick = hasAlts ? `onclick="event.stopPropagation();togglePersonAlts(${t.id},${i})" style="cursor:pointer"` : '';
+          const personContext = p.role || p.title || p.email || '';
+          const altClick = hasAlts ? `onclick="event.stopPropagation();togglePersonAlts(${t.id},${i})"` : '';
           const altIndicator = hasAlts ? `<span class="person-alt-indicator">▼</span>` : '';
+          const personContent = `<span class="person-avatar">${esc(initials)}</span><span class="person-chip-copy"><span class="person-chip-name">${esc(p.name)}</span>${personContext?`<span class="person-chip-role">${esc(personContext)}</span>`:''}</span>${altIndicator}`;
+          const personSelector = hasAlts
+            ? `<button type="button" class="person-chip-select" aria-label="Resolve ${escAttr(p.name)}" aria-haspopup="listbox" aria-expanded="false" ${altClick}>${personContent}</button>`
+            : `<span class="person-chip-select person-chip-static">${personContent}</span>`;
           const altDropdown = `<div class="person-alt-dropdown" id="person-alt-${t.id}-${i}" style="display:none">
             <div class="alt-header">Did you mean?</div>
-            ${(p.alternatives||[]).map(a=>`<div class="alt-item" onclick="event.stopPropagation();swapPerson(${t.id},${i},'${esc(a.name)}','${esc(a.email)}')">
-              <span>${a.name}</span><span class="alt-role">${a.role||''}</span></div>`).join('')}
+            ${(p.alternatives||[]).map(a=>`<button type="button" class="alt-item" role="option" aria-label="${escAttr(a.name)} ${escAttr(a.role||a.email||'')}" data-task-id="${t.id}" data-person-index="${i}" data-name="${escAttr(a.name)}" data-email="${escAttr(a.email||'')}" data-role="${escAttr(a.role||'')}" onclick="selectPersonAlternative(event,this)">
+              <span>${esc(a.name)}</span><span class="alt-role">${esc(a.role||a.email||'')}</span></button>`).join('')}
           </div>`;
-          return `<span class="person-chip"><span class="person-avatar">${initials}</span><span ${altClick}>${esc(p.name)}${altIndicator}</span><button class="person-remove" onclick="event.stopPropagation();removePerson(${t.id},${i})">✕</button>${altDropdown}</span>`;
+          return `<span class="person-chip" data-testid="person-picklist">${personSelector}<button type="button" class="person-remove" aria-label="Remove ${escAttr(p.name)}" onclick="event.stopPropagation();removePerson(${t.id},${i})">✕</button>${altDropdown}</span>`;
         }).join('')}</div>
-        <div class="person-add-row"><button class="person-add-btn" id="person-add-btn-${t.id}" onclick="event.stopPropagation();showPersonAdd(${t.id})">+ Add person</button>
-          <input class="person-add-input" id="person-add-input-${t.id}" style="display:none" placeholder="Name" onkeydown="if(event.key==='Enter'){event.stopPropagation();addPerson(${t.id},this.value);}" onblur="hidePersonAdd(${t.id})">
+        <div class="person-add-row"><button class="person-add-btn" id="person-add-btn-${t.id}" aria-label="Add person" onclick="event.stopPropagation();showPersonAdd(${t.id})">+ Add person</button>
+          <input class="person-add-input" data-testid="person-add-input" id="person-add-input-${t.id}" style="display:none" placeholder="Name" onkeydown="if(event.key==='Enter'){event.stopPropagation();addPerson(${t.id},this.value);}" onblur="hidePersonAdd(${t.id})">
         </div></div></div>`
     : `<div class="detail-row"><span class="row-icon">👤</span><div class="row-label">
-        <div class="person-add-row"><button class="person-add-btn" id="person-add-btn-${t.id}" onclick="event.stopPropagation();showPersonAdd(${t.id})">+ Add person</button>
-          <input class="person-add-input" id="person-add-input-${t.id}" style="display:none" placeholder="Name" onkeydown="if(event.key==='Enter'){event.stopPropagation();addPerson(${t.id},this.value);}" onblur="hidePersonAdd(${t.id})">
+        <div class="person-add-row"><button class="person-add-btn" id="person-add-btn-${t.id}" aria-label="Add person" onclick="event.stopPropagation();showPersonAdd(${t.id})">+ Add person</button>
+          <input class="person-add-input" data-testid="person-add-input" id="person-add-input-${t.id}" style="display:none" placeholder="Name" onkeydown="if(event.key==='Enter'){event.stopPropagation();addPerson(${t.id},this.value);}" onblur="hidePersonAdd(${t.id})">
         </div></div></div>`;
 
   const due = t.due_date
@@ -1836,10 +1857,11 @@ function saveSource(id) {
 }
 
 // ── People Helpers ────────────────────────────────────────
+function persistPeople(task) {}
 function removePerson(id, idx) {
   const t = tasks.find(t=>t.id===id); if(!t) return;
   t.key_people.splice(idx, 1);
-  toast('👤 Removed'); selectTask(id);
+  toast('👤 Removed'); selectTask(id); persistPeople(t);
 }
 function showPersonAdd(id) {
   const btn = document.getElementById('person-add-btn-'+id);
@@ -1860,21 +1882,36 @@ function addPerson(id, name) {
   name = name.trim(); if(!name) return;
   if (!t.key_people) t.key_people = [];
   t.key_people.push({name, email: name.toLowerCase().replace(/\s+/g,'.')+'@contoso.com', alternatives:[]});
-  toast('👤 Added '+name); selectTask(id);
+  toast('👤 Added '+name); selectTask(id); persistPeople(t);
 }
 function togglePersonAlts(id, idx) {
   const dd = document.getElementById('person-alt-'+id+'-'+idx);
-  if (dd) dd.style.display = dd.style.display==='none' ? 'block' : 'none';
+  const trigger = dd?.closest('.person-chip')?.querySelector('.person-chip-select');
+  if (dd) {
+    const opening = dd.style.display === 'none';
+    dd.style.display = opening ? 'block' : 'none';
+    trigger?.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  }
 }
-function swapPerson(id, idx, name, email) {
+function selectPersonAlternative(event, button) {
+  event.stopPropagation();
+  swapPerson(
+    Number(button.dataset.taskId),
+    Number(button.dataset.personIndex),
+    button.dataset.name,
+    button.dataset.email,
+    button.dataset.role
+  );
+}
+function swapPerson(id, idx, name, email, role) {
   const t = tasks.find(t=>t.id===id); if(!t) return;
   const old = t.key_people[idx];
   const oldAlts = old.alternatives || [];
   // Swap: current person becomes an alternative, selected alt becomes primary
   const newAlts = oldAlts.filter(a => a.name !== name);
-  newAlts.push({name: old.name, email: old.email, role: ''});
-  t.key_people[idx] = {name, email, alternatives: newAlts};
-  toast('👤 Swapped to '+name); selectTask(id);
+  newAlts.push({name: old.name, email: old.email, role: old.role || ''});
+  t.key_people[idx] = {name, email, role: role || '', alternatives: newAlts};
+  toast('👤 Swapped to '+name); selectTask(id); persistPeople(t);
 }
 
 // ── Parse Status ──────────────────────────────────────────
@@ -1980,6 +2017,7 @@ function toggleTheme(){document.body.classList.toggle('dark');document.getElemen
 function doSync(){const b=document.getElementById('sync-btn');b.classList.add('syncing');toast('🔄 Syncing with WorkIQ...');setTimeout(()=>{b.classList.remove('syncing');toast('✨ Sync complete — 2 new suggestions');},2000);}
 function toast(msg){const c=document.getElementById('toast-container'),t=document.createElement('div');t.className='toast';t.textContent=msg;c.appendChild(t);setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.remove(),300);},2500);}
 function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function escAttr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 // ── Resizable Split Pane ──────────────────────────────────
 function initResizeHandle() {

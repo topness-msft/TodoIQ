@@ -87,7 +87,7 @@ button { font: inherit; cursor: pointer; }
 .label { font-size: 11px; color: var(--cp-text-muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; margin-bottom: 8px; }
 .source { border: 1px solid var(--cp-border); background: var(--cp-surface); border-radius: 16px; padding: 16px; }
 .source-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
-.avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--cp-accent-soft); color: var(--cp-accent); display: grid; place-items: center; font-weight: 700; }
+.avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 1px solid var(--cp-border); }
 .source-head div { flex: 1; }
 .source-head span { display: block; color: var(--cp-text-muted); font-size: 12px; margin-top: 2px; }
 .quote { line-height: 1.55; color: var(--cp-text-soft); background: var(--cp-accent-soft); border-radius: 0.625rem; padding: 12px; }
@@ -150,6 +150,18 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
 .session-complete { border: 1px solid var(--cp-border); background: var(--cp-surface-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
 .session-complete h4 { margin: 0 0 6px; }
 .session-complete p { color: var(--cp-text-muted); margin: 0; line-height: 1.5; }
+.meeting-card { border: 1px solid var(--cp-border); background: var(--cp-surface); border-radius: 16px; margin-top: 18px; overflow: hidden; box-shadow: 0 1px 2px var(--cp-border); }
+.meeting-card-head { display: flex; align-items: start; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--cp-border); background: var(--cp-bg-elevated); }
+.meeting-card-icon { width: 30px; height: 30px; border: 1px solid var(--cp-border); border-radius: 0.625rem; display: grid; place-items: center; color: var(--cp-accent); font-size: 16px; }
+.meeting-card-title { flex: 1; }
+.meeting-card-title small { display: block; color: var(--cp-text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+.meeting-card-title h4 { margin: 0; font-size: 16px; }
+.draft-badge { color: var(--cp-accent); background: var(--cp-accent-soft); border-radius: 999px; padding: 4px 8px; font-size: 10px; font-weight: 700; }
+.meeting-fields { display: grid; grid-template-columns: 76px 1fr; gap: 9px 12px; padding: 14px 16px; font-size: 13px; }
+.meeting-fields dt { color: var(--cp-text-muted); }
+.meeting-fields dd { margin: 0; }
+.meeting-body { margin: 0 16px 14px; padding: 12px; border-left: 2px solid var(--cp-accent); background: var(--cp-surface-soft); color: var(--cp-text-soft); line-height: 1.5; font-size: 13px; }
+.meeting-card-actions { display: flex; gap: 8px; padding: 0 16px 14px; }
 .redirect-state { border: 1px solid var(--cp-accent); background: var(--cp-accent-soft); border-radius: 16px; padding: 16px; margin-top: 18px; }
 .redirect-state h4 { margin: 0 0 6px; }
 .redirect-state p { color: var(--cp-text-muted); margin: 0 0 12px; line-height: 1.5; }
@@ -167,13 +179,13 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
     <span class="option">Alternative B</span>
   </header>
   <section class="window">
-    <header class="top"><span class="check"></span><div><h2>Follow up on Copilot Kit FinOps capabilities</h2><div class="top-meta">P2 · Due today · Follow-up</div></div></header>
+    <header class="top"><span class="check"></span><div><h2>Schedule Copilot Kit FinOps follow-up</h2><div class="top-meta">P2 · Due today · Meeting</div></div></header>
     <div class="task-actions" data-testid="task-lifecycle-strip"><button class="btn primary" data-life="Completed">Mark complete</button><button class="btn" data-life="Waiting">Waiting</button><button class="btn" data-life="Snoozed">Snooze</button><span class="spacer"></span><span id="life">Task remains active while Cowork works</span></div>
     <div class="split">
       <aside class="evidence">
         <div class="label">Source and evidence</div>
         <section class="source">
-          <div class="source-head"><span class="avatar">M</span><div><strong>Mehdi Slaoui Andaloussi</strong><span data-testid="source-channel-meta">Teams · April 22 · Last touch 110 days ago</span></div></div>
+          <div class="source-head"><img class="avatar" data-testid="source-profile" src="/static/img/profile-placeholder.svg" alt="Profile image placeholder for Mehdi"><div><strong>Mehdi Slaoui Andaloussi</strong><span data-testid="source-channel-meta">Teams · April 22 · Last touch 110 days ago</span></div></div>
           <div class="quote" data-testid="situation-summary">Mehdi and Phil aligned on the Copilot Kit deployment path, but the FinOps and governance position remained unresolved. The next useful step is to confirm current support and whether roadmap guidance can be shared.</div>
           <a href="#">Open source conversation</a>
         </section>
@@ -187,15 +199,21 @@ details p { color: var(--cp-text-muted); line-height: 1.5; margin-bottom: 0; }
           <div class="cowork-body">
             <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><h3>Cowork workspace</h3><div class="cowork-status"><span class="credit-meter" data-testid="credit-meter">30.2 credits</span><span class="live-running" data-testid="live-running" hidden>Cowork working · <span data-testid="elapsed-timer">0:42</span></span><span class="status-note" data-testid="cowork-finished">Cowork finished 8m ago</span><a class="persistent-link" data-testid="open-in-cowork-link" href="#" onclick="return false;">Open in Cowork ↗</a></div></div>
             <div class="mode-switch"><button class="on" data-testid="session-mode-interaction">Interaction</button><button data-testid="session-mode-no-interaction">No interaction</button></div>
-            <div class="intent" data-testid="cowork-prompt" tabindex="0"><div class="intent-label"><span>Cowork prompt</span><em>Click to edit</em></div><div id="prompt-text">Research current FinOps support and roadmap guidance. Then draft a direct Teams follow-up grounded in the source conversation, without implying that roadmap support is committed.</div></div>
+            <div class="intent" data-testid="cowork-prompt" tabindex="0"><div class="intent-label"><span>Cowork prompt</span><em>Click to edit</em></div><div id="prompt-text">Find a 25-minute slot with Mehdi next week and draft a Teams meeting request to settle current FinOps support and roadmap guidance.</div></div>
             <div class="timeline" data-testid="session-timeline">
               <div class="event completed"><span class="step-dot" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small>0:03</small>Source conversation read <span class="tool-call" data-testid="tool-call-icon" role="img" aria-label="Teams tool call" title="Teams tool call">T</span></summary><p>Identified the open FinOps thread and the participants' unresolved questions.</p></details></div>
-              <div class="event completed"><span class="step-dot" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small>0:28</small>Related email context checked <span class="tool-call" data-testid="tool-call-icon" role="img" aria-label="Outlook tool call" title="Outlook tool call">O</span></summary><p>Checked the related Outlook thread for newer FinOps or governance guidance.</p></details></div>
-              <div class="event active" id="current-progress"><span class="step-dot active" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small id="current-step-time">0:42</small><span data-testid="live-status" aria-live="polite">Scope decision needed</span></summary><p>Cowork needs to know whether the follow-up should ask only about current support or include roadmap guidance.</p></details></div>
+              <div class="event completed"><span class="step-dot" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small>0:28</small>Calendar availability checked <span class="tool-call" data-testid="tool-call-icon" role="img" aria-label="Outlook tool call" title="Outlook tool call">O</span></summary><p>Found a shared 25-minute opening next Thursday afternoon.</p></details></div>
+              <div class="event active" id="current-progress"><span class="step-dot active" data-testid="step-dot"></span><details data-testid="progress-details"><summary><small id="current-step-time">0:42</small><span data-testid="live-status" aria-live="polite">Meeting request drafted</span></summary><p>The invitation is ready for review and has not been sent.</p></details></div>
             </div>
+            <section class="meeting-card" data-testid="meeting-request-card">
+              <div class="meeting-card-head"><span class="meeting-card-icon" aria-hidden="true">▣</span><div class="meeting-card-title"><small>Draft meeting request</small><h4>Copilot Kit FinOps follow-up</h4></div><span class="draft-badge">NOT SENT</span></div>
+              <dl class="meeting-fields"><dt>To</dt><dd>Mehdi Slaoui Andaloussi; Phil Topness</dd><dt>When</dt><dd>Thursday, Aug 20 · 2:00–2:25 PM · 25 minutes</dd><dt>Where</dt><dd>Microsoft Teams</dd></dl>
+              <div class="meeting-body">Align on current FinOps support for Copilot Kit, clarify what can be shared as roadmap guidance, and agree on the next customer-facing response.</div>
+              <div class="meeting-card-actions"><button class="btn primary">Open draft in Outlook</button><button class="btn">Edit request</button></div>
+            </section>
             <section class="ask" id="interaction-card" data-testid="interaction-card">
-              <h4>Should the message ask only about current support, or also the roadmap?</h4>
-              <div class="choices" role="group" aria-label="Follow-up scope"><button class="choice on" aria-pressed="true">Current + roadmap</button><button class="choice" aria-pressed="false">Current only</button><button class="choice" aria-pressed="false">Let Cowork decide</button></div>
+              <h4>Use the Thursday afternoon slot, or look for another time?</h4>
+              <div class="choices" role="group" aria-label="Meeting time"><button class="choice on" aria-pressed="true">Thu 2:00 PM</button><button class="choice" aria-pressed="false">Find another time</button><button class="choice" aria-pressed="false">Let Cowork decide</button></div>
               <div class="command" data-testid="cowork-command-strip"><button class="btn primary" id="continue">Answer and continue</button><button class="btn" id="redirect">Edit or redirect</button><button class="btn" id="stop">Stop</button></div>
             </section>
             <section class="session-complete" id="session-complete" data-testid="session-complete" hidden><h4>Draft completed without interruption</h4><p>Cowork reviewed the source, checked current guidance, and produced the follow-up without needing a decision. The timeline remains available above.</p></section>

@@ -87,6 +87,17 @@ class TestRiveterVisuals:
             "Teams · April 22 · Last touch 110 days ago"
         )
         expect(page.get_by_test_id("situation-summary")).to_be_visible()
+        source_profile = page.get_by_test_id("source-profile")
+        expect(source_profile).to_be_visible()
+        expect(source_profile).to_have_attribute("alt", "Profile image placeholder for Mehdi")
+        assert source_profile.evaluate("image => image.naturalWidth") > 0
+        meeting_card = page.get_by_test_id("meeting-request-card")
+        expect(meeting_card).to_be_visible()
+        expect(meeting_card).to_contain_text("Draft meeting request")
+        expect(meeting_card).to_contain_text("NOT SENT")
+        expect(meeting_card).to_contain_text("Microsoft Teams")
+        expect(meeting_card).to_contain_text("25 minutes")
+        expect(page.get_by_test_id("person-picker")).to_have_count(2)
         assert "Topic" not in page.locator(".fact b").all_inner_texts()
         assert "Last touch" not in page.locator(".fact b").all_inner_texts()
         lifecycle = page.get_by_test_id("task-lifecycle-strip")
@@ -164,6 +175,7 @@ class TestRiveterVisuals:
         page.evaluate(
             "document.documentElement.setAttribute('data-theme', 'dark')"
         )
+        expect(page.get_by_test_id("meeting-request-card")).to_be_visible()
         _capture(page, "rightpane-b-iteration-dark")
         page.get_by_test_id("cowork-prompt").click()
         dark_editor = page.get_by_test_id("cowork-prompt-editor")
