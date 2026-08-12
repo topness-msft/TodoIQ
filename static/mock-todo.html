@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TodoIQ</title>
+<title>Riveter</title>
+<link rel="icon" type="image/svg+xml" href="/static/img/coworker.svg">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -808,8 +809,8 @@ textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.
 <div class="app">
   <header class="header-bar">
     <div class="header-brand">
-      <div class="header-brand-icon">T</div>
-      <span>TodoIQ</span>
+      <div class="header-brand-icon">R</div>
+      <span>Riveter</span>
     </div>
     <div class="header-search">
       <span class="s-icon">🔍</span>
@@ -1290,9 +1291,9 @@ function renderRow(t, compact) {
     else if (t.status === 'suggested' && t.suggestion_refreshed_at) statusPill = '<span class="status-pill checked">Checked</span>';
 
     const cwIndicator = t.cw_state === 'previewing'
-      ? '<span class="cw-status-indicator cw-status-running" title="Cowork is working">✦</span>'
+      ? '<span class="cw-status-indicator cw-status-running" title="Cowork is working"><img src="/static/img/coworker.svg" width="14" height="14" alt="" aria-hidden="true"></span>'
       : (t.cw_state === 'ready' && !t.cw_seen_at
-        ? '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">✦</span>' : '');
+        ? '<span class="cw-status-indicator cw-status-unread" title="New Cowork update"><img src="/static/img/coworker.svg" width="14" height="14" alt="" aria-hidden="true"></span>' : '');
     return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})" title="Task #${t.id}">
       ${chk}<div class="task-body">
         <div class="task-line1">${priDot}<div class="task-title">${esc(t.title)}</div>${statusPill}${dueHtml}</div>
@@ -1930,7 +1931,7 @@ function showSmartComplete(id) {
   d.innerHTML = `<div class="smart-toast-title">✓ Task completed</div>
     <div class="smart-toast-sub">${action}</div>
     <div class="smart-toast-btns">
-      <button class="btn btn-ai" onclick="this.closest('.smart-toast').remove();toast('✨ ${btn.replace(/'/g,"\\'")} — sent via TodoIQ')">${btn}</button>
+      <button class="btn btn-ai" onclick="this.closest('.smart-toast').remove();toast('✨ ${btn.replace(/'/g,"\\'")} — sent via Riveter')">${btn}</button>
       <button class="btn btn-secondary" onclick="this.closest('.smart-toast').remove()">Skip</button>
     </div>`;
   c.appendChild(d);

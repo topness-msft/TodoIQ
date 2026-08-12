@@ -568,9 +568,9 @@ function renderSection(sectionId, sectionTasks) {
         var parseHtml = parseStatusIcon(task.parse_status);
         var enrichedHtml = '';
         if (task.cw_state === 'previewing') {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working">\u2726</span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">\u2726</span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         } else if (task.skill_output) {
             enrichedHtml = '<span class="enriched-icon" title="Skill enriched">\u26A1</span>';
         }
@@ -821,7 +821,7 @@ function renderDetailPane(task) {
     html += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
         + '<div class="notes-add-row">'
-        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Coworker)" '
+        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Cowork)" '
         + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTimestampedNote(' + task.id + ')}">'
         + '<button class="btn btn-sm notes-add-btn" onclick="addTimestampedNote(' + task.id + ')">+</button>'
         + '</div>'
@@ -2915,7 +2915,7 @@ function cwShell(cls, badge, task, body, foot) {
         // Referenced rather than inlined: the asset is gradient-based, and its
         // <defs> ids would collide with every other copy on the page.
         + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
-        + '<span class="cw-type">' + label + ' &middot; Coworker</span>'
+        + '<span class="cw-type">' + label + ' &middot; Cowork</span>'
         + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
         + '</div>'
         + '<div class="cw-body">' + body + '</div>'
@@ -2931,7 +2931,7 @@ function cwIntentBlock(task, editable) {
     var intent = task.coaching_text || '';
     if (!intent) return '';
     return '<div class="cw-intent">'
-        + '<span class="i-label">Asking Coworker to:</span> '
+        + '<span class="i-label">Asking Cowork to:</span> '
         + '<span id="coaching-display-' + task.id + '">' + escapeHtml(intent) + '</span>'
         + (editable
             ? '<span class="i-edit" onclick="toggleCoachingEdit(' + task.id + ')">Change</span>'
@@ -3155,7 +3155,7 @@ function cwHandoffAgo(ms) {
 function cwFindingBlock(finding, taskId) {
     if (!finding) return '';
     var expanded = Boolean(_cwFindingExpanded[taskId]);
-    return '<div class="cw-finding"><div class="cw-finding-label">What Coworker found</div>'
+    return '<div class="cw-finding"><div class="cw-finding-label">What Cowork found</div>'
         + '<div class="cw-finding-body' + (expanded ? '' : ' cw-finding-clamped')
         + '" id="cw-finding-' + taskId + '">'
         + renderCoworkMarkdown(_stripContextRefs(finding)) + '</div>'
@@ -3351,7 +3351,7 @@ function renderCoworkCard(task) {
     if (a === undefined) {
         cwLoad(task.id);
         return cwShell('', '', task,
-            '<div class="cw-idle">Checking for a previous Coworker preview\u2026</div>', '');
+            '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '');
     }
 
     if (a && a.state === 'previewing') {

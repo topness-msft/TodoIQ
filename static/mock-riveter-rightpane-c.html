@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Riveter right pane C - Conversation timeline</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("scoutTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef;
+  --cp-bg-elevated: #fcfbf8;
+  --cp-surface: #ffffff;
+  --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede;
+  --cp-border-strong: #919191;
+  --cp-text: #242424;
+  --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f;
+  --cp-accent: #b11f4b;
+  --cp-accent-hover: #9a1a41;
+  --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff;
+  --cp-success: #16a34a;
+  --cp-danger: #dc2626;
+  --cp-warning: #f59e0b;
+  --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+  --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86);
+  --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55);
+  --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a;
+  --cp-bg-elevated: #343231;
+  --cp-surface: #292929;
+  --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747;
+  --cp-border-strong: #5f5f5f;
+  --cp-text: #dedede;
+  --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0;
+  --cp-accent: #fd8ea1;
+  --cp-accent-hover: #fb7b91;
+  --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a;
+  --cp-success: #4ade80;
+  --cp-danger: #f87171;
+  --cp-warning: #fbbf24;
+  --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72);
+  --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04);
+  --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--cp-bg); color: var(--cp-text); font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.page { max-width: 1080px; margin: 0 auto; padding: 24px; }
+.intro { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 16px; }
+.intro h1 { margin: 0 0 4px; font-size: 22px; }
+.intro p { margin: 0; color: var(--cp-text-muted); }
+.option { border: 1px solid var(--cp-accent); color: var(--cp-accent); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
+.pane { min-height: 730px; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px var(--cp-border); }
+.task-head { padding: 18px 22px; border-bottom: 1px solid var(--cp-border); background: var(--cp-bg-elevated); }
+.task-head-top { display: flex; align-items: center; gap: 12px; }
+.task-head img { width: 26px; height: 26px; }
+.task-head h2 { margin: 0; flex: 1; font-size: 22px; }
+.menu { border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 6px 10px; }
+.meta { color: var(--cp-text-muted); font-size: 12px; margin: 8px 0 0 38px; }
+.conversation { max-width: 760px; margin: 0 auto; padding: 28px 22px 120px; }
+.message { display: flex; gap: 12px; margin-bottom: 22px; }
+.avatar { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 50%; display: grid; place-items: center; background: var(--cp-surface-soft); border: 1px solid var(--cp-border); font-weight: 700; }
+.avatar img { width: 20px; height: 20px; }
+.bubble { flex: 1; min-width: 0; }
+.byline { display: flex; gap: 8px; align-items: center; margin-bottom: 5px; }
+.byline strong { font-size: 13px; }
+.byline span { color: var(--cp-text-muted); font-size: 11px; }
+.bubble p { margin: 0; line-height: 1.55; }
+.system .bubble { border-left: 2px solid var(--cp-border); padding-left: 12px; color: var(--cp-text-muted); font-size: 13px; }
+.ask { border: 1px solid var(--cp-accent); border-radius: 16px; padding: 16px; background: var(--cp-accent-soft); }
+.ask h3 { margin: 0 0 8px; font-size: 17px; }
+.ask p { color: var(--cp-text-muted); margin-bottom: 12px; }
+.choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.choice { text-align: left; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 11px; }
+.choice.on { border-color: var(--cp-accent); background: var(--cp-highlight); }
+.actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.btn { border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 8px 11px; }
+.btn.primary { background: var(--cp-accent); color: var(--cp-accent-fg); border-color: var(--cp-accent); font-weight: 600; }
+.context { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 24px 46px; }
+details { border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 10px 12px; background: var(--cp-bg-elevated); }
+summary { cursor: pointer; color: var(--cp-text-muted); font-weight: 600; font-size: 13px; }
+details p { line-height: 1.5; margin-bottom: 0; font-size: 13px; }
+details a { color: var(--cp-link); }
+.composer { position: sticky; bottom: 0; max-width: 760px; margin: -96px auto 0; padding: 14px 22px 20px; background: var(--cp-overlay); border-top: 1px solid var(--cp-border); backdrop-filter: blur(8px); }
+.compose-box { display: flex; gap: 8px; border: 1px solid var(--cp-border-strong); border-radius: 16px; padding: 8px; background: var(--cp-surface); }
+.compose-box input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--cp-text); min-width: 0; }
+.compose-box button { border: 0; border-radius: 0.625rem; padding: 8px 12px; background: var(--cp-accent); color: var(--cp-accent-fg); }
+.lifecycle { display: flex; gap: 8px; margin-top: 8px; justify-content: center; align-items: center; }
+.lifecycle button { border: 0; background: transparent; color: var(--cp-text-muted); padding: 5px 8px; }
+.lifecycle span { color: var(--cp-text-muted); font-size: 12px; }
+@media (max-width: 680px) { .page { padding: 12px; } .conversation { padding-left: 14px; padding-right: 14px; } .choices, .context { grid-template-columns: 1fr; } .context { margin-left: 46px; } .composer { padding-left: 14px; padding-right: 14px; } }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="intro">
+    <div><h1>Conversation timeline</h1><p>Cowork messages and interruptions become the primary record. Source and notes are supporting drawers.</p></div>
+    <span class="option">Alternative C</span>
+  </header>
+  <article class="pane">
+    <header class="task-head">
+      <div class="task-head-top"><img src="/static/img/coworker.svg" alt=""><h2>Follow up on Copilot Kit FinOps capabilities</h2><button class="menu">More</button></div>
+      <div class="meta">Active · P2 · Due today</div>
+    </header>
+    <section class="conversation">
+      <div class="message">
+        <span class="avatar">P</span>
+        <div class="bubble"><div class="byline"><strong>You</strong><span>2:14 PM</span></div><p>Research whether FinOps is an existing or planned focus for the Copilot Kit, then draft a concise follow-up for Mehdi.</p></div>
+      </div>
+      <div class="context">
+        <details><summary>Source · Teams</summary><p>Mehdi discussed end-to-end deployment and suggested reconnecting on governance. <a href="#">Open conversation</a></p></details>
+        <details><summary>Notes · 1</summary><p>Avoid implying FinOps is already on the roadmap.</p></details>
+      </div>
+      <div class="message system"><span class="avatar">✓</span><div class="bubble"><p>Read the source conversation and reviewed the current Copilot Kit deployment guidance.</p></div></div>
+      <div class="message">
+        <span class="avatar"><img src="/static/img/coworker.svg" alt=""></span>
+        <div class="bubble">
+          <div class="byline"><strong>Cowork</strong><span>2:16 PM · needs your input</span></div>
+          <section class="ask">
+            <h3>What should the follow-up cover?</h3>
+            <p>Select one. I’ll use this to finish the research and draft.</p>
+            <div class="choices" role="group" aria-label="Follow-up scope"><button class="choice on" aria-pressed="true">Current support + roadmap</button><button class="choice" aria-pressed="false">Current support only</button><button class="choice" aria-pressed="false">Roadmap only</button><button class="choice" aria-pressed="false">Use your judgment</button></div>
+            <div class="actions"><button class="btn primary" id="answer">Answer and continue</button><button class="btn">Stop</button><button class="btn">Open in Cowork</button></div>
+          </section>
+        </div>
+      </div>
+    </section>
+    <footer class="composer">
+      <div class="compose-box"><input aria-label="Message Cowork" placeholder="Ask Cowork to refine, clarify, or continue..."><button>Send</button></div>
+      <div class="lifecycle"><button data-life="Completed">Mark complete</button><button data-life="Waiting">Waiting</button><button data-life="Snoozed">Snooze</button><span id="life">Active</span></div>
+    </footer>
+  </article>
+</main>
+<script>
+document.querySelectorAll(".choice").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll(".choice").forEach((choice) => {
+    choice.classList.remove("on");
+    choice.setAttribute("aria-pressed", "false");
+  });
+  button.classList.add("on");
+  button.setAttribute("aria-pressed", "true");
+}));
+document.querySelectorAll("[data-life]").forEach((button) => button.addEventListener("click", () => {
+  document.getElementById("life").textContent = button.dataset.life;
+}));
+document.getElementById("answer").addEventListener("click", (event) => {
+  event.currentTarget.textContent = "Answer sent";
+  event.currentTarget.disabled = true;
+});
+</script>
+</body>
+</html>

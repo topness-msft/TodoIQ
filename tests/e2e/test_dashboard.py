@@ -1,4 +1,4 @@
-"""E2E tests for the Coworker dashboard."""
+"""E2E tests for the Riveter dashboard."""
 
 import os
 import re
@@ -24,11 +24,20 @@ class TestDashboardLoads:
     """Test that the dashboard loads and shows the basic structure."""
 
     def test_homepage_renders(self, page: Page, base_url):
-        _step('Navigate to Coworker dashboard')
+        _step('Navigate to Riveter dashboard')
         page.goto(base_url + '/')
-        _step('Verify page title and app brand are Coworker')
-        expect(page).to_have_title(re.compile('Coworker'))
-        expect(page.locator('.app-title')).to_have_text('Coworker')
+        _step('Verify page title and app brand are Riveter')
+        expect(page).to_have_title('Riveter')
+        expect(page.locator('.app-title')).to_have_text('Riveter')
+        expect(page.locator('link[rel="icon"]')).to_have_attribute(
+            'href', '/static/img/coworker.svg'
+        )
+        expect(page.locator('link[rel="icon"]')).to_have_attribute(
+            'type', 'image/svg+xml'
+        )
+        assert page.request.get(
+            base_url + '/static/img/coworker.svg'
+        ).ok
         logo = page.locator('.riveter-logo')
         expect(logo).to_be_visible()
         expect(logo).to_have_attribute('src', '/static/img/riveter.png')

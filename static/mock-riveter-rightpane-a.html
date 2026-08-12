@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Riveter right pane A - Cowork workspace</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("scoutTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef;
+  --cp-bg-elevated: #fcfbf8;
+  --cp-surface: #ffffff;
+  --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede;
+  --cp-border-strong: #919191;
+  --cp-text: #242424;
+  --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f;
+  --cp-accent: #b11f4b;
+  --cp-accent-hover: #9a1a41;
+  --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff;
+  --cp-success: #16a34a;
+  --cp-danger: #dc2626;
+  --cp-warning: #f59e0b;
+  --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+  --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86);
+  --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55);
+  --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a;
+  --cp-bg-elevated: #343231;
+  --cp-surface: #292929;
+  --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747;
+  --cp-border-strong: #5f5f5f;
+  --cp-text: #dedede;
+  --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0;
+  --cp-accent: #fd8ea1;
+  --cp-accent-hover: #fb7b91;
+  --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a;
+  --cp-success: #4ade80;
+  --cp-danger: #f87171;
+  --cp-warning: #fbbf24;
+  --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72);
+  --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04);
+  --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--cp-bg); color: var(--cp-text); font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+.page { max-width: 1240px; margin: 0 auto; padding: 24px; }
+.intro { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 16px; }
+.intro h1 { margin: 0 0 4px; font-size: 22px; }
+.intro p { margin: 0; color: var(--cp-text-muted); }
+.option { border: 1px solid var(--cp-accent); color: var(--cp-accent); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
+.app { min-height: 730px; display: grid; grid-template-columns: 300px 1fr; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px var(--cp-border); }
+.rail { background: var(--cp-surface-soft); border-right: 1px solid var(--cp-border); padding: 16px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 24px; }
+.brand img { width: 26px; height: 26px; }
+.nav-label { color: var(--cp-text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin: 18px 8px 8px; }
+.task { padding: 12px; border-radius: 0.625rem; margin-bottom: 6px; border: 1px solid transparent; }
+.task.active { background: var(--cp-surface); border-color: var(--cp-border); }
+.task strong, .task span { display: block; }
+.task span { color: var(--cp-text-muted); font-size: 12px; margin-top: 4px; }
+.pane { min-width: 0; display: flex; flex-direction: column; }
+.command { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--cp-border); background: var(--cp-bg-elevated); }
+.command .spacer { flex: 1; }
+.btn { border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 7px 11px; }
+.btn:hover { border-color: var(--cp-border-strong); }
+.btn.primary { background: var(--cp-accent); color: var(--cp-accent-fg); border-color: var(--cp-accent); font-weight: 600; }
+.status { color: var(--cp-text-muted); font-size: 12px; }
+.content { padding: 26px 30px 36px; overflow: auto; }
+.title-row { display: flex; gap: 16px; align-items: start; }
+.title-row h2 { margin: 0; font-size: 25px; line-height: 1.25; flex: 1; }
+.meta { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 22px; }
+.chip { border: 1px solid var(--cp-border); background: var(--cp-surface-soft); border-radius: 999px; padding: 4px 9px; font-size: 12px; color: var(--cp-text-muted); }
+.chip a { color: var(--cp-link); text-decoration: none; }
+.cowork { border: 1px solid var(--cp-accent); border-radius: 16px; overflow: hidden; }
+.cowork-head { display: flex; gap: 9px; align-items: center; padding: 13px 16px; background: var(--cp-accent-soft); border-bottom: 1px solid var(--cp-border); }
+.cowork-head img { width: 20px; height: 20px; }
+.cowork-head strong { flex: 1; }
+.badge { color: var(--cp-accent); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.states { display: flex; gap: 4px; padding: 12px 16px 0; }
+.states button { border: 0; background: transparent; color: var(--cp-text-muted); padding: 6px 9px; border-bottom: 2px solid transparent; }
+.states button.on { color: var(--cp-accent); border-color: var(--cp-accent); }
+.state { display: none; padding: 18px 16px 16px; }
+.state.on { display: block; }
+.intent { color: var(--cp-text-muted); font-size: 13px; margin-bottom: 14px; }
+.result { background: var(--cp-surface-soft); border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 14px; line-height: 1.55; }
+.question { margin: 0 0 12px; font-size: 17px; }
+.choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.choice { text-align: left; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 12px; }
+.choice.selected { border-color: var(--cp-accent); background: var(--cp-accent-soft); }
+.cowork-actions { display: flex; gap: 8px; margin-top: 14px; }
+details { margin-top: 18px; border-top: 1px solid var(--cp-border); padding-top: 14px; }
+summary { cursor: pointer; color: var(--cp-text-muted); font-weight: 600; }
+textarea { width: 100%; min-height: 82px; margin-top: 10px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text); border-radius: 0.625rem; padding: 10px; }
+.principle { margin-top: 16px; color: var(--cp-text-muted); font-size: 12px; }
+@media (max-width: 800px) { .page { padding: 12px; } .app { grid-template-columns: 1fr; } .rail { display: none; } .command { flex-wrap: wrap; } .content { padding: 20px 16px; } .choices { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="intro">
+    <div><h1>Cowork-first workspace</h1><p>Lifecycle controls become a compact command strip. Source is metadata; notes collapse.</p></div>
+    <span class="option">Alternative A</span>
+  </header>
+  <section class="app">
+    <aside class="rail">
+      <div class="brand"><img src="/static/img/coworker.svg" alt=""><span>Riveter</span></div>
+      <div class="nav-label">My day</div>
+      <div class="task active"><strong>Follow up on Copilot Kit FinOps</strong><span>Cowork needs your input</span></div>
+      <div class="task"><strong>Review Q3 field feedback</strong><span>Draft ready</span></div>
+      <div class="task"><strong>Schedule Fabrikam architecture review</strong><span>Waiting</span></div>
+    </aside>
+    <article class="pane">
+      <div class="command">
+        <button class="btn primary" data-status="Completed">Mark complete</button>
+        <button class="btn" data-status="Waiting">Waiting</button>
+        <button class="btn" data-status="Snoozed">Snooze</button>
+        <span class="spacer"></span><span class="status" id="status">Active</span>
+      </div>
+      <div class="content">
+        <div class="title-row"><h2>Follow up on Copilot Kit FinOps capabilities</h2></div>
+        <div class="meta">
+          <span class="chip">P2</span><span class="chip">Due today</span>
+          <span class="chip">Source: <a href="#">Teams with Mehdi</a></span>
+        </div>
+        <section class="cowork">
+          <div class="cowork-head"><img src="/static/img/coworker.svg" alt=""><strong>Cowork workspace</strong><span class="badge">Needs input</span></div>
+          <div class="states" role="tablist" aria-label="Cowork state">
+            <button role="tab" aria-selected="false" aria-controls="ready" data-state="ready">Intent</button><button class="on" role="tab" aria-selected="true" aria-controls="question" data-state="question">Question</button><button role="tab" aria-selected="false" aria-controls="result" data-state="result">Result</button>
+          </div>
+          <div class="state" role="tabpanel" id="ready"><div class="intent">Ask Cowork to research whether FinOps is an existing or planned focus, then draft a concise Teams follow-up.</div><button class="btn primary">Start with Cowork</button></div>
+          <div class="state on" role="tabpanel" id="question">
+            <h3 class="question">What tone should I use with Mehdi?</h3>
+            <div class="choices" role="group" aria-label="Tone"><button class="choice selected" aria-pressed="true">Direct and brief</button><button class="choice" aria-pressed="false">Warm follow-up</button><button class="choice" aria-pressed="false">Detailed context</button><button class="choice" aria-pressed="false">Let Cowork choose</button></div>
+            <div class="cowork-actions"><button class="btn primary">Answer and continue</button><button class="btn">Stop</button><button class="btn">Open in Cowork</button></div>
+          </div>
+          <div class="state" role="tabpanel" id="result"><div class="intent">What Cowork found</div><div class="result"><strong>FinOps is not called out as a standalone workstream.</strong> The deployment guidance touches cost governance, but the roadmap signal is unclear. A short direct question is appropriate.</div><div class="cowork-actions"><button class="btn primary">Copy draft</button><button class="btn">Refine</button><button class="btn">Open in Cowork</button></div></div>
+        </section>
+        <details><summary>Notes and supporting context</summary><textarea>April discussion covered end-to-end deployment capabilities. Ask whether FinOps is already included or planned.</textarea></details>
+        <p class="principle">Design bet: Cowork is the task's working surface. Everything else supports or closes that work.</p>
+      </div>
+    </article>
+  </section>
+</main>
+<script>
+document.querySelectorAll("[data-state]").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll("[data-state]").forEach((tab) => {
+    tab.classList.remove("on");
+    tab.setAttribute("aria-selected", "false");
+  });
+  document.querySelectorAll(".state").forEach((panel) => panel.classList.remove("on"));
+  button.classList.add("on");
+  button.setAttribute("aria-selected", "true");
+  document.getElementById(button.dataset.state).classList.add("on");
+}));
+document.querySelectorAll(".choice").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll(".choice").forEach((choice) => {
+    choice.classList.remove("selected");
+    choice.setAttribute("aria-pressed", "false");
+  });
+  button.classList.add("selected");
+  button.setAttribute("aria-pressed", "true");
+}));
+document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => {
+  document.getElementById("status").textContent = button.dataset.status;
+}));
+</script>
+</body>
+</html>

@@ -54,6 +54,14 @@ class TestCoworkIndicators:
             )
             row = page.locator(f'.task-row[data-id="{task_id}"]')
             expect(row.locator(".cw-status-running")).to_be_visible()
+            expect(
+                row.locator(
+                    '.cw-status-running img[src="/static/img/coworker.svg"]'
+                )
+            ).to_have_count(1)
+            assert row.locator(".cw-status-running").evaluate(
+                "node => getComputedStyle(node).animationName"
+            ) != "none"
             expect(row.locator(".enriched-icon")).to_have_count(0)
 
             page.evaluate(
@@ -65,6 +73,11 @@ class TestCoworkIndicators:
                 """
             )
             expect(row.locator(".cw-status-unread")).to_be_visible()
+            expect(
+                row.locator(
+                    '.cw-status-unread img[src="/static/img/coworker.svg"]'
+                )
+            ).to_have_count(1)
             expect(row.locator(".enriched-icon")).to_have_count(0)
             box = row.locator(".cw-status-unread").bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
@@ -115,6 +128,14 @@ class TestCoworkIndicators:
             )
             row = page.locator(f'.task-row[title="Task #{task_id}"]')
             expect(row.locator(".cw-status-running")).to_be_visible()
+            expect(
+                row.locator(
+                    '.cw-status-running img[src="/static/img/coworker.svg"]'
+                )
+            ).to_have_count(1)
+            assert row.locator(".cw-status-running").evaluate(
+                "node => getComputedStyle(node).animationName"
+            ) != "none"
 
             page.evaluate(
                 f"""
@@ -124,6 +145,11 @@ class TestCoworkIndicators:
                 """
             )
             expect(row.locator(".cw-status-unread")).to_be_visible()
+            expect(
+                row.locator(
+                    '.cw-status-unread img[src="/static/img/coworker.svg"]'
+                )
+            ).to_have_count(1)
             box = row.locator(".cw-status-unread").bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
             page.screenshot(

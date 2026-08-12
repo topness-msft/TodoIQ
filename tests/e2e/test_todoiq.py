@@ -40,15 +40,22 @@ class TestTodoIQLoads:
         _step('Navigate to /todo')
         resp = page.goto(base_url + '/todo')
         assert resp.status == 200
-        _step('Verify page title is TodoIQ')
-        expect(page).to_have_title('TodoIQ')
+        _step('Verify page title and branding are Riveter')
+        expect(page).to_have_title('Riveter')
+        expect(page.locator('.header-brand')).to_contain_text('Riveter')
+        expect(page.locator('link[rel="icon"]')).to_have_attribute(
+            'href', '/static/img/coworker.svg'
+        )
+        expect(page.locator('link[rel="icon"]')).to_have_attribute(
+            'type', 'image/svg+xml'
+        )
         _screenshot(page, 'todoiq-01-loaded')
 
     def test_old_dashboard_still_works(self, page: Page, base_url):
         _step('Navigate to / (old dashboard)')
         resp = page.goto(base_url + '/')
         assert resp.status == 200
-        expect(page).to_have_title(re.compile('Coworker'))
+        expect(page).to_have_title('Riveter')
         _step('Both routes coexist')
 
     def test_sidebar_nav_renders(self, page: Page, base_url):
