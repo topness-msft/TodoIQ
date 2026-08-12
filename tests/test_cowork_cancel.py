@@ -51,6 +51,13 @@ class TestCancelIsTerminal(unittest.TestCase):
     def test_cancel_is_a_terminal_run_state(self):
         self.assertIn("cancel", cr._TERMINAL_RUN_STATES)
 
+    def test_ok_is_not_a_terminal_conversation_state(self):
+        self.assertNotIn("ok", cr._TERMINAL_RUN_STATES)
+        self.assertIn("ok", cr._TURN_COMPLETE_RUN_STATES)
+
+    def test_fail_is_a_terminal_run_state(self):
+        self.assertIn("fail", cr._TERMINAL_RUN_STATES)
+
     def test_terminal_status_reports_cancelled(self):
         payload = _api_payload_from_events(
             list(_iter_sse(CANCELLED_SSE)), "t:u:cw-1",

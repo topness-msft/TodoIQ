@@ -173,10 +173,10 @@ class TestFailureShapes(unittest.TestCase):
         parsed = parse_cowork_output(json.dumps(payload), "")
         self.assertIsInstance(parsed, dict)
 
-    def test_error_terminal_status_is_carried(self):
-        lines = ["event: rl", 'data: {"st":"error"}']
+    def test_fail_terminal_status_is_carried(self):
+        lines = ["event: rl", 'data: {"st":"fail"}']
         payload = _api_payload_from_events(list(_iter_sse(lines)), "t:u:c")
-        self.assertEqual(payload["terminal_status"], "error")
+        self.assertEqual(payload["terminal_status"], "fail")
 
 
 if __name__ == "__main__":
@@ -289,4 +289,3 @@ class TestFlagRouting(unittest.TestCase):
             cr.wait_for(label, timeout=10)
         self.assertGreater(len(seen["config"]["tool_names"]), 100)
         self.assertTrue(seen["config"]["static_results"])
-
