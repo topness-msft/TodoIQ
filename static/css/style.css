@@ -373,12 +373,9 @@ html, body {
 
 /* ── Input Bar (Outlook search-bar style) ──────────────────────────── */
 .input-bar {
-    padding: 8px 20px;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-primary);
-    border-right: 1px solid var(--border-primary);
-    flex-shrink: 0;
-    width: 400px;
+    padding: 8px 16px 8px 0;
+    flex: 1 1 auto;
+    min-width: 180px;
     box-sizing: border-box;
 }
 
@@ -2502,20 +2499,34 @@ html, body {
 
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
+    .top-bar {
+        height: auto;
+        min-height: 76px;
+        flex-wrap: wrap;
+        padding: 0 8px;
+    }
+
     .top-bar-left {
         width: auto;
         flex: 1 1 auto;
+        order: 1;
     }
 
     .riveter-logo {
-        width: min(260px, 65vw);
+        width: min(220px, 58vw);
         height: auto;
         max-height: 68px;
     }
 
+    .top-bar-right {
+        order: 2;
+    }
+
     .input-bar {
-        width: 100%;
-        border-right: none;
+        order: 3;
+        flex: 0 0 100%;
+        min-width: 0;
+        padding: 0 0 8px;
     }
 
     .main-content {

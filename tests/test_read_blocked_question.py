@@ -48,6 +48,7 @@ class ReadBlockedQuestionTest(unittest.TestCase):
             "event: aq",
             'data: {"iid":"invoke-1","q":[{"id":"account","question":"Which account should I use?"}]}',
             "event: rl", 'data: {"st":"needs_user_input"}',
+            "event: rpc", 'data: {"cnt":2,"ts":1}',
         ])
         cr._api_http_client_fn = lambda: client
 
@@ -74,10 +75,12 @@ class ReadBlockedQuestionTest(unittest.TestCase):
         client = _Client([
             "event: aq",
             'data: {"iid":"old","q":[{"id":"old","question":"Old?"}]}',
+            "event: aa", 'data: {"iid":"old","answers":{"0":"Done"}}',
             "event: rl", 'data: {"st":"ok"}',
             "event: aq",
             'data: {"iid":"new","q":[{"id":"choice","question":"Choose A or B?"}]}',
             "event: rl", 'data: {"st":"needs_user_input"}',
+            "event: rpc", 'data: {"cnt":5,"ts":1}',
         ])
         cr._api_http_client_fn = lambda: client
         got = cr.read_blocked_question("t:u:conversation")
@@ -89,10 +92,12 @@ class ReadBlockedQuestionTest(unittest.TestCase):
             "event: aq",
             'data: {"iid":"old","q":[{"id":"old","question":"Old question?"}]}',
             "event: rl", 'data: {"st":"needs_user_input"}',
+            "event: aa", 'data: {"iid":"old","answers":{"0":"Done"}}',
             "event: rl", 'data: {"st":"ok"}',
             "event: aq",
             'data: {"iid":"current","q":[{"id":"current","question":"Current question?"}]}',
             "event: rl", 'data: {"st":"needs_user_input"}',
+            "event: rpc", 'data: {"cnt":6,"ts":1}',
         ])
         cr._api_http_client_fn = lambda: client
         got = cr.read_blocked_question("t:u:conversation")
@@ -103,7 +108,41 @@ class ReadBlockedQuestionTest(unittest.TestCase):
         client = _Client([
             "event: aq",
             'data: {"iid":"done","q":[{"id":"done","question":"Finished?"}]}',
+            "event: aa", 'data: {"iid":"done","answers":{"0":"Done"}}',
             "event: rl", 'data: {"st":"ok"}',
+            "event: rpc", 'data: {"cnt":3,"ts":1}',
+        ])
+        cr._api_http_client_fn = lambda: client
+        self.assertIsNone(cr.read_blocked_question("t:u:conversation"))
+
+    def test_ok_run_lifecycle_does_not_clear_a_pending_question(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"pending","q":[{"question":"Still pending?"}]}',
+            "event: rl", 'data: {"st":"ok"}',
+            "event: rpc", 'data: {"cnt":2,"ts":1}',
+        ])
+        cr._api_http_client_fn = lambda: client
+        got = cr.read_blocked_question("t:u:conversation")
+        self.assertEqual(got["invocation_id"], "pending")
+
+    def test_rpc_returns_the_replay_snapshot_before_live_events(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"snapshot","q":[{"question":"Current?"}]}',
+            "event: rpc", 'data: {"cnt":1,"ts":1}',
+            "event: aq",
+            'data: {"iid":"live","q":[{"question":"Too late"}]}',
+        ])
+        cr._api_http_client_fn = lambda: client
+        got = cr.read_blocked_question("t:u:conversation")
+        self.assertEqual(got["invocation_id"], "snapshot")
+
+    def test_terminal_fail_closes_replay_without_rpc(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"failed","q":[{"question":"Never answer"}]}',
+            "event: rl", 'data: {"st":"fail"}',
         ])
         cr._api_http_client_fn = lambda: client
         self.assertIsNone(cr.read_blocked_question("t:u:conversation"))
@@ -118,6 +157,7 @@ class ReadBlockedQuestionTest(unittest.TestCase):
             '"imageUrl":"https://images.example.test/a.png"},{"label":"B"}]},'
             '{"id":"reason","question":"Why?","multiSelect":true,'
             '"options":[{"label":"Because A"},{"label":"Because B"}]}]}',
+            "event: rpc", 'data: {"cnt":1,"ts":1}',
         ])
         cr._api_http_client_fn = lambda: client
         got = cr.read_blocked_question("t:u:conversation")
@@ -139,6 +179,14 @@ class ReadBlockedQuestionTest(unittest.TestCase):
             "https://images.example.test/account.png",
         )
         self.assertTrue(got["questions"][1]["multi_select"])
+
+    def test_incomplete_replay_does_not_expose_an_unconfirmed_question(self):
+        client = _Client([
+            "event: aq",
+            'data: {"iid":"partial","q":[{"question":"Maybe answered later?"}]}',
+        ])
+        cr._api_http_client_fn = lambda: client
+        self.assertIsNone(cr.read_blocked_question("t:u:conversation"))
 
     def test_an_unreadable_replay_fails_soft(self):
         cr._api_http_client_fn = lambda: (_ for _ in ()).throw(

@@ -7,6 +7,13 @@
             <img src="/static/img/riveter.png" alt="Riveter" class="riveter-logo">
             <h1 class="app-title sr-only">Coworker</h1>
         </div>
+        <div class="input-bar">
+            <form id="add-task-form" class="input-bar-form" onsubmit="return false;">
+                <input type="text" id="task-input" class="task-input" placeholder="Add a task..." autocomplete="off">
+                <button type="submit" class="btn btn-primary" id="add-task-btn">Add</button>
+                <div id="person-filter" class="person-filter-bar"></div>
+            </form>
+        </div>
         <div class="top-bar-right">
             <span class="shortcuts-hint">Shortcuts: ?</span>
             <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">
@@ -23,15 +30,6 @@
             </span>
         </div>
     </header>
-
-    <!-- Input Bar -->
-    <div class="input-bar">
-        <form id="add-task-form" class="input-bar-form" onsubmit="return false;">
-            <input type="text" id="task-input" class="task-input" placeholder="Add a task..." autocomplete="off">
-            <button type="submit" class="btn btn-primary" id="add-task-btn">Add</button>
-            <div id="person-filter" class="person-filter-bar"></div>
-        </form>
-    </div>
 
     <!-- Main Content -->
     <div class="main-content">

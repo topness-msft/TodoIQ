@@ -45,10 +45,28 @@ class TestDashboardLoads:
         expect(input_bar).to_be_visible()
         input_box = page.locator('.input-bar').bounding_box()
         panel_box = page.locator('.left-panel').bounding_box()
+        controls_box = page.locator('.top-bar-right').bounding_box()
         assert input_box and panel_box
-        assert abs((input_box['x'] + input_box['width'])
-                   - (panel_box['x'] + panel_box['width'])) <= 2
+        assert controls_box
+        assert abs(input_box['x'] - (panel_box['x'] + panel_box['width'])) <= 2
+        assert 0 <= controls_box['x'] - (
+            input_box['x'] + input_box['width']
+        ) <= 2
         _screenshot(page, '02-input-bar')
+
+    def test_mobile_header_wraps_without_horizontal_overflow(
+        self, page: Page, base_url
+    ):
+        page.set_viewport_size({'width': 375, 'height': 720})
+        page.goto(base_url + '/')
+        logo_box = page.locator('.riveter-logo').bounding_box()
+        input_box = page.locator('.input-bar').bounding_box()
+        assert logo_box and input_box
+        assert input_box['y'] >= logo_box['y'] + logo_box['height'] - 2
+        assert page.evaluate(
+            '() => document.documentElement.scrollWidth'
+            ' <= document.documentElement.clientWidth'
+        )
 
     def test_empty_state(self, page: Page, base_url):
         _step('Navigate to dashboard')

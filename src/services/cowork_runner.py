@@ -2339,7 +2339,8 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
 # parse_cowork_output, _barrier_verdict, _canonical_tools, _extract_draft and
 # both UIs are untouched. Verified against real captures on 2026-08-10.
 
-_TERMINAL_RUN_STATES = ("ok", "error", "failed", "completed", "cancel")
+_TERMINAL_RUN_STATES = ("fail", "cancel")
+_TURN_COMPLETE_RUN_STATES = ("ok", "fail", "cancel")
 
 
 def _iter_sse(lines):
@@ -2394,7 +2395,7 @@ def _api_payload_from_events(events, conversation_id):
                         starts[tid]["duration_seconds"] = round(dur / 1000.0, 3)
         elif kind == "rl":
             state = data.get("st")
-            if state in _TERMINAL_RUN_STATES:
+            if state in _TURN_COMPLETE_RUN_STATES:
                 terminal = state
 
     return {
@@ -2488,6 +2489,7 @@ def read_blocked_question(conversation_id):
     if not conversation_id:
         return None
     pending_question = None
+    replay_complete = False
     try:
         token, base, _tenant, _oid = _api_auth_fn()
         url = (
@@ -2528,14 +2530,23 @@ def read_blocked_question(conversation_id):
                         continue
                     if kind == "aq":
                         pending_question = _parse_aq_interaction(data)
+                    elif kind == "aa":
+                        if (
+                            pending_question
+                            and str(data.get("iid") or "")
+                            == pending_question["invocation_id"]
+                        ):
+                            pending_question = None
+                    elif kind == "rpc":
+                        replay_complete = True
+                        break
                     elif kind == "rl":
                         state = data.get("st")
                         if state in _TERMINAL_RUN_STATES:
                             pending_question = None
-        return pending_question
+                            break
+        return pending_question if replay_complete else None
     except Exception:
-        if pending_question:
-            return pending_question
         logger.warning("could not replay blocked Cowork question", exc_info=True)
         return None
 
@@ -2827,7 +2838,7 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                 text = _api_progress_text(kind, data)
                 if text:
                     on_progress(text)
-                if kind == "rl" and data.get("st") in _TERMINAL_RUN_STATES:
+                if kind == "rl" and data.get("st") in _TURN_COMPLETE_RUN_STATES:
                     break
 
     if not events:
