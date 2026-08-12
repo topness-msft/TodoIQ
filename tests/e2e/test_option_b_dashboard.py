@@ -51,6 +51,36 @@ def _delete_task(page: Page, base_url: str, task_id: int) -> None:
     page.request.delete(f"{base_url}/api/tasks/{task_id}")
 
 
+def _rgb_channels(color: str) -> list[int]:
+    if color.startswith("#"):
+        return [int(color[index:index + 2], 16) for index in (1, 3, 5)]
+    return [int(channel) for channel in color[color.index("(") + 1:color.index(")")].split(",")[:3]]
+
+
+def _is_neutral(color: str, tolerance: int = 6) -> bool:
+    channels = _rgb_channels(color)
+    return max(channels) - min(channels) <= tolerance
+
+
+def _relative_luminance(color: str) -> float:
+    channels = [channel / 255 for channel in _rgb_channels(color)]
+    linear = [
+        channel / 12.92
+        if channel <= 0.04045
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    lighter, darker = sorted(
+        [_relative_luminance(foreground), _relative_luminance(background)],
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 class TestOptionBStructure:
     def test_evidence_and_action_layout_uses_real_task_data(
         self, page: Page, base_url
@@ -357,3 +387,79 @@ class TestOptionBSeparatorKeyboard:
             assert minimum["width"] >= 260
         finally:
             _delete_task(page, base_url, task_id)
+
+
+class TestCoworkDarkPalette:
+    def test_dark_surfaces_use_neutral_charcoal(self, page: Page, base_url):
+        page.goto(base_url + "/")
+        page.evaluate(
+            "document.documentElement.setAttribute('data-theme', 'dark')"
+        )
+        expect(page.locator("#task-input")).to_have_css(
+            "background-color", "rgb(30, 30, 30)"
+        )
+
+        body_bg = page.locator("body").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        top_bar_bg = page.locator(".top-bar").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        input_bg = page.locator("#task-input").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        dark_tokens = page.evaluate(
+            """() => {
+                const styles = getComputedStyle(document.documentElement);
+                return {
+                    accent: styles.getPropertyValue('--accent').trim(),
+                    bgHover: styles.getPropertyValue('--bg-hover').trim(),
+                    onAccent: styles.getPropertyValue('--on-accent').trim(),
+                    secondaryText: styles.getPropertyValue('--text-secondary').trim(),
+                    tertiaryText: styles.getPropertyValue('--text-tertiary').trim()
+                };
+            }"""
+        )
+
+        assert _is_neutral(body_bg)
+        assert 20 <= min(_rgb_channels(body_bg)) <= 60
+        assert _is_neutral(top_bar_bg)
+        assert 45 <= min(_rgb_channels(top_bar_bg)) <= 75
+        assert _is_neutral(input_bg, tolerance=8)
+        assert _contrast_ratio(dark_tokens["secondaryText"], top_bar_bg) >= 4.5
+        assert _contrast_ratio(
+            dark_tokens["secondaryText"], dark_tokens["bgHover"]
+        ) >= 4.5
+        assert _contrast_ratio(dark_tokens["accent"], top_bar_bg) >= 4.5
+        assert _contrast_ratio(
+            dark_tokens["onAccent"], dark_tokens["accent"]
+        ) >= 4.5
+        assert _contrast_ratio(dark_tokens["tertiaryText"], input_bg) >= 4.5
+        assert _contrast_ratio(dark_tokens["tertiaryText"], top_bar_bg) >= 4.5
+
+    def test_dark_quick_hit_border_uses_theme_token(self, page: Page, base_url):
+        task_id = _seed_task(page, base_url)
+        try:
+            _open_task(page, base_url, task_id)
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme', 'dark')"
+            )
+            border = page.locator(".quick-hit-toggle").evaluate(
+                "element => getComputedStyle(element).borderColor"
+            )
+            surface = page.locator(".detail-task-header").evaluate(
+                "element => getComputedStyle(element).backgroundColor"
+            )
+            assert _contrast_ratio(border, surface) >= 3
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_light_palette_remains_light(self, page: Page, base_url):
+        page.goto(base_url + "/")
+        page.evaluate(
+            "document.documentElement.setAttribute('data-theme', 'light')"
+        )
+        body_bg = page.locator("body").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        assert min(_rgb_channels(body_bg)) > 200

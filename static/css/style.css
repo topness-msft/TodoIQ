@@ -17,6 +17,7 @@
     --accent-active: #0c3b5e;
     --accent-bg: #ebf3fc;
     --accent-bg-hover: #d6e8f8;
+    --on-accent: #fff;
     --success: #0d7d3b;
     --success-bg: #e6f4ea;
     --danger: #bc2f32;
@@ -46,23 +47,24 @@
        affordance, and the calendar panel itself) in light mode on a dark
        field, leaving the affordance effectively invisible. */
     color-scheme: dark;
-    --bg-primary: #1a1a2e;
-    --bg-secondary: #16213e;
-    --bg-tertiary: #1a1a2e;
-    --bg-hover: #1e2a4a;
-    --bg-input: #0f1526;
+    --bg-primary: #292929;
+    --bg-secondary: #3d3b3a;
+    --bg-tertiary: #343231;
+    --bg-hover: #444241;
+    --bg-input: #1e1e1e;
     --text-primary: #e0e0e0;
-    --text-secondary: #a0a0b0;
-    --text-tertiary: #707088;
-    --text-detail: #c0c0d0;
+    --text-secondary: #b0b0b0;
+    --text-tertiary: #a8a8a8;
+    --text-detail: #c0c0c0;
     --border-primary: rgba(255,255,255,0.1);
     --border-secondary: rgba(255,255,255,0.12);
     --border-light: rgba(255,255,255,0.05);
-    --accent: #4da6ff;
-    --accent-hover: #3d96f0;
-    --accent-active: #2d86e0;
-    --accent-bg: rgba(77,166,255,0.12);
-    --accent-bg-hover: rgba(77,166,255,0.2);
+    --accent: #80c7ff;
+    --accent-hover: #71b9f4;
+    --accent-active: #5da9e5;
+    --accent-bg: rgba(128,199,255,0.12);
+    --accent-bg-hover: rgba(128,199,255,0.2);
+    --on-accent: #242424;
     --success: #34d67b;
     --success-bg: rgba(52,214,123,0.12);
     --danger: #f06060;
@@ -75,16 +77,16 @@
     --overdue-bg: rgba(240,96,96,0.12);
     --card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 6px rgba(0,0,0,0.2);
     --dropdown-shadow: 0 4px 16px rgba(0,0,0,0.4), 0 1px 4px rgba(0,0,0,0.3);
-    --coaching-bg: rgba(77,166,255,0.08);
+    --coaching-bg: rgba(128,199,255,0.08);
     --skill-output-bg: rgba(52,214,123,0.08);
-    --toggle-off: #404060;
+    --toggle-off: #505050;
     --scrollbar-thumb: rgba(255,255,255,0.15);
     --scrollbar-hover: rgba(255,255,255,0.25);
     --p1: #f06060;
     --p2: #f0a030;
     --p3: #4da6ff;
-    --p4: #808098;
-    --p5: #606078;
+    --p4: #808080;
+    --p5: #606060;
 }
 
 /* ── Reset & Base ────────────────────────────────────────────────────── */
@@ -358,7 +360,7 @@ html, body {
 
 .btn-primary {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     border-color: var(--accent);
 }
 
@@ -493,7 +495,7 @@ html, body {
     height: 22px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-size: 10px;
     font-weight: 600;
     display: inline-flex;
@@ -596,6 +598,7 @@ html, body {
 .person-filter-pill-active .person-pill-avatar,
 .person-filter-pill:hover .person-pill-avatar {
     background: var(--accent);
+    color: var(--on-accent);
 }
 
 .task-list {
@@ -711,40 +714,40 @@ html, body {
     flex-shrink: 0;
     font-size: 11px;
     margin-right: 3px;
-    color: var(--accent-color, #0078d4);
+    color: var(--accent);
     opacity: 0.8;
 }
 
 .quick-hit-toggle {
     background: none;
-    border: 1px solid var(--border-color, #e0e0e0);
+    border: 1px solid var(--text-secondary);
     border-radius: 4px;
     padding: 2px 8px;
     font-size: 13px;
     cursor: pointer;
-    color: var(--text-secondary, #666);
-    opacity: 0.5;
+    color: var(--text-secondary);
+    opacity: 1;
     transition: opacity 0.15s, color 0.15s;
 }
 .quick-hit-toggle:hover {
-    opacity: 0.8;
+    color: var(--text-primary);
 }
 .quick-hit-toggle.active {
     opacity: 1;
-    color: var(--accent-color, #0078d4);
-    border-color: var(--accent-color, #0078d4);
-    background: var(--accent-bg, rgba(0, 120, 212, 0.08));
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
 }
 
 /* Quick-hit filter pill in section header */
 .quick-filter-pill {
     background: none;
-    border: 1px solid var(--border-color, #e0e0e0);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     padding: 2px 10px;
     font-size: 11px;
     cursor: pointer;
-    color: var(--text-secondary, #666);
+    color: var(--text-secondary);
     margin-left: auto;
     white-space: nowrap;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
@@ -946,7 +949,7 @@ html, body {
 }
 
 .parse-status-badge.clickable:hover {
-    box-shadow: 0 0 0 2px rgba(77,166,255,0.25);
+    box-shadow: 0 0 0 2px var(--accent-bg-hover);
 }
 
 .parse-status-badge.unparsed.clickable:hover {
@@ -1297,7 +1300,7 @@ html, body {
 
 .btn-source-save {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .btn-source-save:hover {
@@ -1376,7 +1379,7 @@ html, body {
     height: 20px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-size: 10px;
     font-weight: 600;
     display: inline-flex;
@@ -1453,7 +1456,7 @@ html, body {
     height: 16px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-size: 8px;
     font-weight: 600;
     display: inline-flex;
@@ -1542,7 +1545,7 @@ html, body {
 
 .alternative-item.selected .alt-avatar {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .alternative-item.selected {
