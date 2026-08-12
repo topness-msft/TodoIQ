@@ -42,6 +42,10 @@
 }
 
 [data-theme="dark"] {
+    /* Without this Chromium paints native controls (the date/time picker
+       affordance, and the calendar panel itself) in light mode on a dark
+       field, leaving the affordance effectively invisible. */
+    color-scheme: dark;
     --bg-primary: #1a1a2e;
     --bg-secondary: #16213e;
     --bg-tertiary: #1a1a2e;
@@ -111,8 +115,8 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 48px;
-    padding: 0 20px;
+    height: 76px;
+    padding: 0 12px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-primary);
     flex-shrink: 0;
@@ -121,19 +125,33 @@ html, body {
 .top-bar-left {
     display: flex;
     align-items: center;
-    gap: 12px;
+    width: 388px;
+    flex: 0 0 388px;
 }
 
-.app-icon {
-    width: 28px;
-    height: 28px;
+.riveter-logo {
+    width: 300px;
+    height: 75px;
     object-fit: contain;
+    object-position: left center;
 }
 
 .app-title {
     font-size: 16px;
     font-weight: 600;
     color: var(--accent);
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .top-bar-right {
@@ -358,7 +376,10 @@ html, body {
     padding: 8px 20px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-primary);
+    border-right: 1px solid var(--border-primary);
     flex-shrink: 0;
+    width: 400px;
+    box-sizing: border-box;
 }
 
 .input-bar-form {
@@ -2118,7 +2139,7 @@ html, body {
 }
 
 .snooze-time-input {
-    width: 70px;
+    width: 90px;   /* 70px clipped "09:00 AM" to "09:0C" - see test_snooze_days */
     padding: 4px 6px;
     border: 1px solid var(--border-secondary);
     border-radius: 4px;
@@ -2481,6 +2502,22 @@ html, body {
 
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
+    .top-bar-left {
+        width: auto;
+        flex: 1 1 auto;
+    }
+
+    .riveter-logo {
+        width: min(260px, 65vw);
+        height: auto;
+        max-height: 68px;
+    }
+
+    .input-bar {
+        width: 100%;
+        border-right: none;
+    }
+
     .main-content {
         flex-direction: column;
     }
@@ -2497,4 +2534,291 @@ html, body {
         flex: 1;
         min-height: 0;
     }
+}
+
+/* === Cowork action card ================================================= */
+.cw-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+    box-shadow: var(--card-shadow);
+    /* .detail-pane is a flex container, so cards must not be shrunk to fit */
+    flex: 0 0 auto;
+}
+.cw-card.is-executed { border-color: var(--success); }
+.cw-card.is-failed   { border-color: var(--danger); }
+
+.cw-head {
+    display: flex; align-items: center; gap: 7px;
+    padding: 9px 14px;
+    background: var(--accent-bg);
+    border-bottom: 1px solid var(--border-primary);
+    font-size: 12px;
+}
+.cw-card.is-executed .cw-head { background: var(--skill-output-bg); }
+.cw-card.is-failed .cw-head   { background: var(--danger-bg, var(--accent-bg)); }
+/* Now an <img> of the Coworker mark rather than a glyph, so it needs a box.
+   The asset carries its own gradients, so the old colour rules no longer
+   apply to it; the executed state is still signalled by the badge. */
+.cw-spark { width: 16px; height: 16px; display: inline-block; vertical-align: -3px; flex: 0 0 auto; }
+.cw-type { font-weight: 600; color: var(--text-primary); }
+.cw-badge {
+    margin-left: auto;
+    font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 10px;
+    border: 1px solid var(--accent); color: var(--accent);
+}
+.cw-card.is-executed .cw-badge { border-color: var(--success); color: var(--success); }
+.cw-card.is-failed .cw-badge   { border-color: var(--danger);  color: var(--danger); }
+
+.cw-body { padding: 12px 14px; }
+
+/* intent line — WorkIQ's suggested next action */
+.cw-intent {
+    font-size: 12px; line-height: 1.5;
+    color: var(--text-secondary);
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border-primary);
+}
+.cw-intent .i-label { color: var(--text-secondary); opacity: .8; }
+.cw-intent .i-edit {
+    color: var(--accent); cursor: pointer; margin-left: 6px; white-space: nowrap;
+}
+.cw-intent .i-edit:hover { text-decoration: underline; }
+.cw-intent .i-muted { color: var(--text-secondary); }
+.cw-intent-box {
+    width: 100%; box-sizing: border-box;
+    font: inherit; font-size: 12px; line-height: 1.5;
+    color: var(--text-primary); background: var(--bg-primary);
+    border: 1px solid var(--accent); border-radius: 6px;
+    padding: 8px 10px; resize: vertical;
+}
+.cw-intent-actions { padding-top: 6px; }
+
+/* findings */
+.cw-finding {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 10px;
+    font-size: 13px; line-height: 1.55; color: var(--text-primary);
+}
+.cw-finding-label {
+    font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-secondary); margin-bottom: 6px;
+}
+.cw-finding-clamped {
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.cw-finding-toggle {
+    border: 0; background: transparent; color: var(--accent);
+    padding: 5px 0 0; cursor: pointer; font: inherit; font-size: 11px;
+}
+.cw-markdown { white-space: normal; }
+.cw-markdown p, .cw-finding-body p { margin: 0 0 7px; }
+.cw-markdown p:last-child, .cw-finding-body p:last-child { margin-bottom: 0; }
+.cw-markdown h2, .cw-finding-body h2 { font-size: 13px; margin: 8px 0 5px; }
+.cw-markdown ul, .cw-finding-body ul { margin: 4px 0 7px; padding-left: 20px; }
+.cw-markdown a, .cw-finding-body a { color: var(--accent); }
+
+/* draft */
+.cw-draft {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13px; line-height: 1.55; color: var(--text-primary);
+    white-space: pre-wrap;
+}
+.cw-draft.is-editing { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* .cw-draft styles both the rendered draft (a div, which fills its container)
+   and the editor (a textarea, which otherwise falls back to its ~20-character
+   cols default). Without this the edit box collapsed to a narrow column. */
+textarea.cw-draft {
+    width: 100%; box-sizing: border-box;
+    font: inherit; font-size: 13px; line-height: 1.55;
+    resize: vertical;
+}
+.cw-draft.is-dim { opacity: .55; }
+.cw-card.is-executed .cw-draft { background: var(--skill-output-bg); border-color: var(--success); }
+
+/* destination — the F9 wrong-audience guard */
+.cw-dest {
+    display: flex; gap: 8px; align-items: flex-start;
+    margin-top: 10px; padding: 9px 11px;
+    border: 1px solid var(--border-primary); border-radius: 6px;
+    background: var(--bg-primary);
+    font-size: 12px; color: var(--text-secondary);
+}
+.cw-dest.is-risky { border-color: var(--warning); background: var(--warning-bg, var(--accent-bg)); }
+.cw-dest b { color: var(--text-primary); }
+.cw-dest .d-icon { color: var(--text-secondary); }
+.cw-dest.is-risky .d-icon { color: var(--warning); }
+.cw-dest .d-note { display: block; margin-top: 3px; }
+.cw-dest-actions { display: inline-flex; align-items: center; gap: 8px; margin-top: 5px; }
+.cw-dest-badge { font-size: 11px; color: var(--success); }
+.cw-dest-chan {
+    display: inline-block; margin-left: 6px; padding: 1px 6px;
+    border: 1px solid var(--border-primary); border-radius: 999px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-secondary); background: var(--bg-secondary, transparent);
+}
+.cw-dest-btn {
+    font: inherit; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--border-primary); border-radius: 4px;
+    background: transparent; color: var(--accent); padding: 2px 8px;
+}
+.cw-dest-hint { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.cw-debug-id {
+    border: 0; background: transparent; color: var(--text-secondary);
+    cursor: help; margin-left: 5px; padding: 0; font-size: 12px;
+}
+
+/* progress */
+.cw-progress { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+.cw-progress-text { display: flex; flex-direction: column; font-size: 13px; color: var(--text-primary); }
+.cw-progress-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.cw-spinner {
+    width: 14px; height: 14px; flex: none;
+    border: 2px solid var(--border-primary); border-top-color: var(--accent);
+    border-radius: 50%; animation: cw-spin .8s linear infinite;
+}
+.cw-status-indicator {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; flex: 0 0 18px;
+    color: var(--accent); font-size: 14px; margin-top: 4px;
+}
+.cw-status-running { animation: cw-status-pulse 1.2s ease-in-out infinite; }
+.cw-status-unread {
+    border-radius: 50%; background: var(--accent-bg);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+@keyframes cw-status-pulse {
+    0%, 100% { opacity: .35; transform: scale(.8); }
+    50% { opacity: 1; transform: scale(1); }
+}
+@keyframes cw-spin { to { transform: rotate(360deg); } }
+
+/* receipt */
+.cw-receipt {
+    margin-top: 10px; padding: 9px 11px;
+    border: 1px solid var(--border-primary); border-radius: 6px;
+    background: var(--bg-primary); font-size: 12px;
+}
+.cw-receipt-head {
+    font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-secondary); margin-bottom: 6px;
+}
+.cw-receipt-line { display: flex; gap: 8px; align-items: center; color: var(--text-primary); }
+.cw-receipt-line.r-muted { color: var(--text-secondary); margin-top: 3px; }
+.r-ok { color: var(--success); }
+.r-tool { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.r-dur { margin-left: auto; color: var(--text-secondary); }
+
+.cw-idle { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.cw-idle-sub { display: block; font-size: 11px; margin-top: 4px; opacity: .8; }
+.cw-fail { font-size: 13px; color: var(--text-primary); }
+.cw-fail-sub { font-size: 12px; color: var(--text-secondary); margin-top: 5px; }
+.cw-fail-sub code { font-family: ui-monospace, Consolas, monospace; }
+
+/* footer */
+.cw-foot {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-primary);
+    background: var(--bg-primary);
+}
+.cw-btn {
+    font: inherit; font-size: 12px; font-weight: 500;
+    padding: 6px 12px; border-radius: 5px; cursor: pointer;
+    border: 1px solid var(--border-primary); background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+.cw-btn:hover { border-color: var(--accent); }
+.cw-btn-link { display: inline-flex; align-items: center; text-decoration: none; }
+.cw-btn-go {
+    background: var(--success); border-color: var(--success); color: #fff;
+}
+.cw-btn-go:hover { filter: brightness(1.08); border-color: var(--success); }
+.cw-btn-sec { color: var(--accent); border-color: var(--accent); background: transparent; }
+.cw-btn-ghost { color: var(--text-secondary); border-color: transparent; background: transparent; }
+.cw-foot-note { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
+
+/* Link to the conversation a draft is bound to. Deliberately quiet: the
+   broadcast warning beside it must stay the loudest thing in the row. */
+.cw-dest-open {
+    margin-left: 8px; font-size: 11px; color: #0f6cbd;
+    text-decoration: none; white-space: nowrap;
+}
+.cw-dest-open:hover { text-decoration: underline; }
+
+/* Refine: one more turn on the same Cowork conversation. Pre-populated with
+   the draft, so "change this bit" is typing over it rather than describing it. */
+.cw-refine {
+    margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+    background: var(--bg-tertiary, #faf9f8); border: 1px solid var(--border, #e1dfdd);
+}
+.cw-refine-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+.cw-refine-box {
+    width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
+    line-height: 1.45; padding: 8px 10px; border-radius: 4px;
+    border: 1px solid var(--border, #c8c6c4); resize: vertical;
+    background: var(--bg-primary, #fff); color: var(--text-primary, inherit);
+}
+.cw-refine-box:focus { outline: 2px solid #0f6cbd; outline-offset: -1px; }
+.cw-refine-actions { display: flex; gap: 14px; padding-top: 8px; }
+.cw-blocked-question {
+    margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-primary);
+    background: var(--bg-primary); color: var(--text-primary);
+}
+.cw-answer-box { margin-top: 8px; min-height: 72px; }
+.cw-question-image {
+    width: 40px; height: 40px; border-radius: 8px; object-fit: cover;
+    vertical-align: middle; margin: 0 10px 8px 0;
+}
+.cw-choice-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px; margin-top: 8px;
+}
+.cw-choice {
+    display: flex; align-items: center; gap: 10px; min-height: 58px;
+    padding: 9px 10px; text-align: left; cursor: pointer;
+    border: 1px solid var(--border-primary); border-radius: 8px;
+    background: var(--bg-secondary); color: var(--text-primary);
+}
+.cw-choice:hover { border-color: #0f6cbd; background: var(--bg-tertiary); }
+.cw-choice[aria-pressed="true"] {
+    border-color: #0f6cbd; background: #e5f1fb;
+    box-shadow: inset 0 0 0 1px #0f6cbd;
+}
+.cw-choice:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
+.cw-choice-image, .cw-choice-emoji {
+    width: 40px; height: 40px; flex: 0 0 40px; border-radius: 8px;
+}
+.cw-choice-image { object-fit: cover; }
+.cw-choice-emoji {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--bg-tertiary); font-size: 22px;
+}
+.cw-choice-copy { display: flex; flex-direction: column; gap: 2px; }
+.cw-choice-copy small { color: var(--text-secondary); font-size: 11px; }
+
+/* Handoff status: what Cowork did after "Open in Cowork". `waiting` is the
+   only one that earns colour - it means Cowork is blocked on the user, which
+   is how an approval prompt surfaces. The rest are quiet notes. */
+.cw-handoff {
+    margin-left: 8px; font-size: 11px; padding: 2px 8px;
+    border-radius: 10px; white-space: nowrap;
+}
+.cw-handoff-done, .cw-handoff-running {
+    color: var(--text-secondary); background: var(--bg-tertiary, rgba(127,127,127,.12));
+}
+.cw-handoff-waiting {
+    color: #8a5a00; background: #fff4d6; border: 1px solid #f0d090; font-weight: 600;
+}
+@media (prefers-color-scheme: dark) {
+    .cw-handoff-waiting { color: #ffd479; background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.35); }
 }

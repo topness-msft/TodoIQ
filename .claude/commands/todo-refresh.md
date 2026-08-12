@@ -108,12 +108,32 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 
 **Claude generates** (not from WorkIQ):
 - **source_id**: Composite dedup key from the original subject + first key person's **primary email** (must be `first.last@microsoft.com` format — resolve aliases via WorkIQ if needed): `{source_type}::{first_person_primary_email_lower}::{root_subject_first_50_lower}` (strip Re:/Fwd: prefixes; do NOT include date)
-- **coaching_text**: A brief 1-2 sentence actionable tip tailored to the action_type. Examples:
-  - `respond-email` → "Review the thread, then reply with your decision. Keep it concise — 2-3 sentences max."
-  - `follow-up` → "Check if there's been any reply since. If not, a brief nudge with a specific ask works best."
-  - `schedule-meeting` → "Check your calendar for open slots this week, then propose 2-3 times."
-  - `prepare` → "Review the agenda and jot down 2-3 talking points before the meeting."
-  - `general` → "Break this down — what's the very first concrete step?"
+- **coaching_text**: The **intent** for this task — the specific next action, in the
+  imperative, naming the person and the concrete ask. This field is handed to the action
+  layer verbatim as its instruction, so it must be *executable*, not advisory.
+
+  Derive it from `description`, `key_people`, and `source_snippet`. **Never** derive it
+  from `action_type` alone — `action_type` selects the verb, not the content.
+
+  Requirements:
+  - Name the person you are acting toward, and state the specific thing being asked for.
+  - Reference the concrete detail that makes this task distinguishable from every other
+    task of the same `action_type`.
+  - 1–3 sentences. No pleasantries, no meta-advice about how to communicate.
+  - Do **not** reuse the example text below. Two tasks must never share a
+    `coaching_text` string; if what you wrote would fit any other task unchanged, it is
+    too generic — rewrite it.
+
+  | | Example |
+  |---|---|
+  | ✅ Good | "Ask Brandon Knoertzer whether the team can pull the FY26 1:1 meeting targets as a concrete starting point for the PPCC exec panel, and offer to check with Stephanie instead if he'd prefer." |
+  | ✅ Good | "Reply in the group chat confirming you'll build the candidate shortlist, and ask Eu Nice Loh to define what qualifies as a good Agent Lineage candidate before you invest time in it." |
+  | ❌ Bad | "Check if there's been any reply since. If not, a brief nudge with a specific ask works best." — advisory, names nobody, states no ask, and fits any follow-up task. |
+  | ❌ Bad | "Review the thread, then reply with your decision. Keep it concise." — coaching about *how* to write, not *what* to say. |
+
+  If the source genuinely does not contain enough to state a specific ask, say what is
+  missing rather than falling back to a generic tip — e.g. "Determine who owns the PPCC
+  target list before following up; the thread does not name an owner."
 
 ### Fuzzy title matching helper
 
@@ -254,6 +274,62 @@ Track counts: `created`, `updated` (augmented existing), `skipped` (dismissed), 
 
 Check for tasks with `parse_status IN ('unparsed', 'queued')` — if any exist, run the same logic as `/todo-parse` to enrich them.
 
+## Step 4b: Upgrade legacy generic coaching_text
+
+Tasks created by earlier versions of this command were inserted with `parse_status='parsed'`, so they never reached `/todo-parse` Step 3b and still carry a canned per-`action_type` tip instead of a real intent. Because `coaching_text` is now handed to the action layer as its instruction, those tasks would drive a generic action.
+
+Find them by exact match against the retired example strings, plus any `coaching_text` shared by more than one open task:
+
+```python
+import sqlite3
+
+LEGACY = [
+    "Review the thread, then reply with your decision. Keep it concise — 2-3 sentences max.",
+    "Check if there's been any reply since. If not, a brief nudge with a specific ask works best.",
+    "Check your calendar for open slots this week, then propose 2-3 times.",
+    "Review the agenda and jot down 2-3 talking points before the meeting.",
+    "Break this down — what's the very first concrete step?",
+]
+
+conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn.row_factory = sqlite3.Row
+open_states = ('suggested', 'active', 'in_progress', 'waiting', 'snoozed')
+
+rows = conn.execute(
+    f"""SELECT id, title, description, source_snippet, key_people, action_type, coaching_text
+        FROM tasks
+        WHERE status IN ({','.join('?' * len(open_states))})
+          AND coaching_text IS NOT NULL AND TRIM(coaching_text) != ''
+          AND (
+                coaching_text IN ({','.join('?' * len(LEGACY))})
+             OR coaching_text IN (
+                    SELECT coaching_text FROM tasks
+                    WHERE coaching_text IS NOT NULL AND TRIM(coaching_text) != ''
+                    GROUP BY coaching_text HAVING COUNT(*) > 1
+                )
+          )""",
+    (*open_states, *LEGACY),
+).fetchall()
+conn.close()
+```
+
+For each row, regenerate `coaching_text` using the intent rules in Step 3b — same requirements, same good/bad bar. Use the task's own `description`, `source_snippet` and `key_people`; do **not** make a WorkIQ call per task (this runs inside a sync and the stored context is sufficient to state the ask).
+
+Write results back in one transaction:
+
+```python
+conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+conn.executemany(
+    "UPDATE tasks SET coaching_text=?, updated_at=? WHERE id=?",
+    [(new_text, now, task_id) for task_id, new_text in upgrades],
+)
+conn.commit()
+conn.close()
+```
+
+Track the count as `coaching_upgraded` and include it in the Step 5 summary. Once a task has been upgraded it will no longer match, so this converges and is safe to run on every sync.
+
 ## Step 5: Log the sync
 
 ```python
@@ -267,7 +343,8 @@ summary = json.dumps({
     "meeting": meeting_count,
     "created": created_count,
     "updated": updated_count,
-    "skipped": skipped_count
+    "skipped": skipped_count,
+    "coaching_upgraded": coaching_upgraded_count
 })
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
@@ -294,6 +371,8 @@ Teams/Chat   |   X   |    X    |    X    |    X
 Meeting      |   X   |    X    |    X    |    X
 ──────────────────────────────────────────────────
 Total        |   X   |    X    |    X    |    X
+
+Upgraded N legacy coaching intents.
 
 Review suggestions in the dashboard and promote tasks you want to work on.
 Dashboard: http://localhost:8766

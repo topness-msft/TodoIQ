@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Option 1 mock &middot; Hand off to Cowork</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  body { padding: 26px 30px 60px; background: var(--bg-secondary); }
+  .mockwrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; color: var(--text-primary); }
+  .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 26px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; align-items: start; }
+  .col > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+              color: var(--text-secondary); margin: 0 0 10px; font-weight: 600; }
+  .col.now > h2 { color: var(--text-secondary); }
+  .col.prop > h2 { color: var(--accent); }
+  .stack { display: flex; flex-direction: column; gap: 22px; }
+  .note { font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5; }
+  .note b { color: var(--text-primary); }
+  .divider { margin: 34px 0 22px; border-top: 1px solid var(--border-primary); }
+  .caption { font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
+
+  /* the popup window sketch */
+  .win { border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;
+         box-shadow: 0 10px 30px rgba(0,0,0,.18); background: var(--bg-primary); }
+  .win-bar { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+             background: var(--bg-secondary); border-bottom: 1px solid var(--border-primary); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border-primary); }
+  .win-url { font-size: 11px; color: var(--text-secondary); font-family: ui-monospace, monospace;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .win-body { padding: 16px; min-height: 260px; }
+  .cw-msg { font-size: 13px; color: var(--text-primary); line-height: 1.55; margin-bottom: 14px; }
+
+  /* first-party approval card sketch — this is the thing we DON'T have to build */
+  .approve { border: 1px solid var(--accent); border-radius: 8px; padding: 14px;
+             background: var(--accent-bg); }
+  .approve-h { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 10px;
+               display: flex; align-items: center; gap: 7px; }
+  .approve-row { font-size: 12px; color: var(--text-secondary); margin: 3px 0; }
+  .approve-row b { color: var(--text-primary); font-weight: 600; }
+  .approve-btns { display: flex; gap: 8px; margin-top: 13px; }
+  .ab { font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 5px; cursor: pointer;
+        border: 1px solid var(--border-primary); background: var(--bg-primary); color: var(--text-primary); }
+  .ab.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .ms-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+            border: 1px solid var(--accent); color: var(--accent); border-radius: 999px;
+            padding: 1px 7px; margin-left: auto; }
+  .callout { border: 1px solid var(--border-primary); padding: 12px 14px; margin: 18px 0 0;
+             background: var(--bg-primary); border-radius: 6px; font-size: 12.5px;
+             color: var(--text-primary); line-height: 1.6; }
+  .warn { background: var(--warning-bg, var(--accent-bg)); }
+</style>
+</head>
+<body>
+<div class="mockwrap">
+
+  <h1>Option 1 &mdash; hand execution to Cowork</h1>
+  <div class="sub">
+    TodoIQ stays the detector and drafter. Cowork web becomes the executor, and we
+    inherit its permission cards instead of rebuilding them.
+  </div>
+
+  <div class="cols">
+    <!-- ────────────────────────────── TODAY ────────────────────────────── -->
+    <div class="col now">
+      <h2>Today</h2>
+      <div class="cw-card">
+        <div class="cw-head">
+          <span class="cw-spark">&#10022;</span>
+          <span class="cw-label">Follow-up &middot; Cowork</span>
+          <span class="cw-badge">PREVIEW</span>
+        </div>
+        <div class="cw-body">
+          <div class="cw-intent"><span class="i-label">Asking Cowork to:</span>
+            Ask Mehdi whether FinOps is a focus for the Copilot Kit.</div>
+          <div class="cw-draft cw-markdown">
+            Mehdi - back in April we got into the Copilot Kit's end-to-end deployment
+            capabilities, and I'm now chasing the FinOps thread on that. Is FinOps an
+            existing or planned focus for the kit?
+          </div>
+          <div class="cw-dest">
+            <span class="d-icon">&#8627;</span>
+            <span><b>Drafted for:</b> Mehdi Slaoui Andaloussi
+              <span class="cw-dest-chan">TEAMS</span>
+              <span class="d-note">Direct Teams message to this recipient.</span>
+            </span>
+          </div>
+        </div>
+        <div class="cw-foot">
+          <button class="cw-btn cw-btn-go">Copy draft</button>
+          <button class="cw-btn cw-btn-sec">Edit</button>
+          <button class="cw-btn cw-btn-sec">&#8635; Redo</button>
+          <a class="cw-btn cw-btn-sec cw-btn-link" href="#">Open in Cowork</a>
+          <button class="cw-btn cw-btn-ghost">Hide</button>
+        </div>
+      </div>
+      <div class="note">
+        The draft is the end of the line. <b>You</b> copy it, switch to Teams, paste,
+        and send. <b>Open in Cowork</b> is a low-billing secondary link. TodoIQ never
+        learns whether the message actually went.
+      </div>
+    </div>
+
+    <!-- ──────────────────────────── PROPOSED ───────────────────────────── -->
+    <div class="col prop">
+      <h2>Proposed</h2>
+      <div class="stack">
+        <div class="cw-card">
+          <div class="cw-head">
+            <span class="cw-spark">&#10022;</span>
+            <span class="cw-label">Follow-up &middot; Cowork</span>
+            <span class="cw-badge">READY</span>
+          </div>
+          <div class="cw-body">
+            <div class="cw-intent"><span class="i-label">Asking Cowork to:</span>
+              Ask Mehdi whether FinOps is a focus for the Copilot Kit.</div>
+            <div class="cw-draft cw-markdown">
+              Mehdi - back in April we got into the Copilot Kit's end-to-end deployment
+              capabilities, and I'm now chasing the FinOps thread on that. Is FinOps an
+              existing or planned focus for the kit?
+            </div>
+            <div class="cw-dest">
+              <span class="d-icon">&#8627;</span>
+              <span><b>Drafted for:</b> Mehdi Slaoui Andaloussi
+                <span class="cw-dest-chan">TEAMS</span>
+                <span class="d-note">Direct Teams message to this recipient.</span>
+              </span>
+            </div>
+          </div>
+          <div class="cw-foot">
+            <button class="cw-btn cw-btn-go">Continue in Cowork &rarr;</button>
+            <button class="cw-btn cw-btn-sec">Copy draft</button>
+            <button class="cw-btn cw-btn-sec">Edit</button>
+            <button class="cw-btn cw-btn-sec">&#8635; Redo</button>
+            <button class="cw-btn cw-btn-ghost">Hide</button>
+            <span class="cw-foot-note">Cowork asks before it sends</span>
+          </div>
+        </div>
+
+        <div class="cw-card">
+          <div class="cw-head">
+            <span class="cw-spark">&#10022;</span>
+            <span class="cw-label">Follow-up &middot; Cowork</span>
+            <span class="cw-badge">HANDED OFF</span>
+          </div>
+          <div class="cw-body">
+            <div class="cw-intent"><span class="i-label">Asking Cowork to:</span>
+              Ask Mehdi whether FinOps is a focus for the Copilot Kit.</div>
+            <div class="cw-draft cw-markdown is-dim">
+              Mehdi - back in April we got into the Copilot Kit's end-to-end deployment
+              capabilities, and I'm now chasing the FinOps thread on that&hellip;
+            </div>
+            <div class="cw-dest">
+              <span class="d-icon">&#8627;</span>
+              <span><b>Continued in Cowork</b> at 21:47
+                <span class="d-note">Approve and send there. TodoIQ is not tracking the outcome.</span>
+              </span>
+            </div>
+          </div>
+          <div class="cw-foot">
+            <button class="cw-btn cw-btn-go">Reopen in Cowork</button>
+            <button class="cw-btn cw-btn-sec">Mark done</button>
+            <button class="cw-btn cw-btn-ghost">Hide</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        <b>Continue in Cowork</b> becomes the primary action and opens a sized,
+        reused window. The same conversation, so the research and draft are already
+        there. Approval and sending happen on Microsoft's surface.
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <p class="caption">
+    The popup, and the reason this option is attractive: the approval card below is
+    Microsoft's, not ours.
+  </p>
+
+  <div class="cols">
+    <div class="col">
+      <div class="win">
+        <div class="win-bar">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="win-url">m365.cloud.microsoft/agents/cowork#/task/&hellip;cw-3579c92b</span>
+        </div>
+        <div class="win-body">
+          <div class="cw-msg">
+            Here's the draft Teams message to Mehdi. Want me to send it?
+          </div>
+          <div class="approve">
+            <div class="approve-h">
+              <span>&#128274;</span> Send a Teams message?
+              <span class="ms-tag">First-party</span>
+            </div>
+            <div class="approve-row"><b>To:</b> Mehdi Slaoui Andaloussi</div>
+            <div class="approve-row"><b>Message:</b> Mehdi - back in April we got into
+              the Copilot Kit's end-to-end deployment capabilities&hellip;</div>
+            <div class="approve-btns">
+              <button class="ab primary">Allow</button>
+              <button class="ab">Deny</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="note">
+        Illustrative, not a screenshot. The point is that this card, the parameter
+        display, and the allow/deny gate already exist and are maintained by the
+        Cowork team.
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="callout">
+        <b>Why this is worth considering.</b> Phase 2B (our own human gate: nonce,
+        <code>draft_hash</code>, execute route, receipt) has been blocked for weeks
+        because no channel passes both gates &mdash; Teams <code>PostMessage</code>
+        emits no approval event, and calendar <code>CreateEvent</code> fails after
+        approval. Handing off sidesteps that entirely. We never build an execute
+        route, so <b>&ldquo;TodoIQ cannot write to M365&rdquo; stays literally true.</b>
+      </div>
+
+      <div class="callout warn">
+        <b>Open question that decides this.</b> Our previews run under the
+        <code>--tool-callback-config</code> write barrier. Nobody has yet tested
+        whether that barrier is client-side per-request (so the web session can
+        execute normally) or sticky on the conversation (so the handed-off session
+        would <i>also</i> refuse to send). <b>If it is sticky, option 1 does not
+        work for execution</b> and the handoff is only good for interactive
+        research. This is one probe and should be run before any build.
+      </div>
+
+      <div class="callout warn">
+        <b>Honest limitation either way.</b> Once handed off, TodoIQ has no receipt.
+        It cannot show &ldquo;sent&rdquo; without re-reading the conversation later, so the
+        mock says &ldquo;not tracking the outcome&rdquo; rather than implying a status it
+        does not have. Polling the conversation for a receipt is a possible
+        follow-up, not something to imply now.
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

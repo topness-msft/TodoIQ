@@ -13,6 +13,21 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 BASE_URL = 'http://127.0.0.1:18766'
 
 
+def pytest_collection_modifyitems(items):
+    """Mark everything under tests/e2e/ so pytest.ini can deselect it.
+
+    This hook is global, not per-directory, so the path check is required —
+    without it every test in the run gets marked.
+
+    These tests must not share a process with the Tornado AsyncHTTPTestCase
+    suite; see the comment in pytest.ini.
+    """
+    e2e_dir = os.path.dirname(__file__)
+    for item in items:
+        if str(item.fspath).startswith(e2e_dir):
+            item.add_marker(pytest.mark.e2e)
+
+
 def _wait_for_server(url, timeout=15):
     """Wait for the server to become ready."""
     deadline = time.time() + timeout

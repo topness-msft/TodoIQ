@@ -48,7 +48,7 @@ class TestTodoIQLoads:
         _step('Navigate to / (old dashboard)')
         resp = page.goto(base_url + '/')
         assert resp.status == 200
-        expect(page).to_have_title(re.compile('TodoNess'))
+        expect(page).to_have_title(re.compile('Coworker'))
         _step('Both routes coexist')
 
     def test_sidebar_nav_renders(self, page: Page, base_url):

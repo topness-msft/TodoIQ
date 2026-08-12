@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TodoIQ: Cowork Action Card (mock)</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --accent: #2564cf; --accent-light: #e8f0fe; --accent-hover: #1b4fa0;
+  --bg: #ffffff; --bg-hover: #f0f0f0; --bg-detail: #faf9f8; --bg-input: #f5f5f5;
+  --text: #242424; --text-secondary: #616161; --text-muted: #adadad;
+  --border: #e8e8e8; --success: #107c10; --danger: #d13438; --warning: #f7630c;
+  --ai: #8b5cf6; --ai-light: #f3f0ff; --ai-border: #d4c5f9;
+  --ready-green: #107c10; --ready-light: #dff6dd;
+  --shadow: 0 2px 8px rgba(0,0,0,0.08); --radius: 8px;
+}
+.dark {
+  --accent: #4a98f7; --accent-light: #1a3050;
+  --bg: #1f1f1f; --bg-hover: #383838; --bg-detail: #2b2b2b; --bg-input: #333333;
+  --text: #e8e8e8; --text-secondary: #c0c0c0; --text-muted: #8a8a8a;
+  --border: #4a4a4a;
+  --ai: #a78bfa; --ai-light: #2d2640; --ai-border: #5b4a8a;
+  --ready-green: #4caf50; --ready-light: #1e3a1e;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+body {
+  font-family: 'Segoe UI Variable', 'Segoe UI', -apple-system, system-ui, sans-serif;
+  background: var(--bg-detail); color: var(--text); font-size: 14px;
+  -webkit-font-smoothing: antialiased; padding: 24px; min-height: 100vh;
+}
+
+.mock-bar {
+  max-width: 1080px; margin: 0 auto 20px; display: flex; align-items: center;
+  gap: 8px; flex-wrap: wrap; padding: 12px 16px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.mock-bar .mb-title { font-size: 18px; font-weight: 600; margin-right: 8px; }
+.mock-bar .mb-note { font-size: 11px; color: var(--text-muted); width: 100%; margin-top: 4px; }
+.step-btn {
+  padding: 5px 11px; border-radius: 5px; font-size: 11px; font-weight: 600;
+  font-family: inherit; cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text-secondary);
+}
+.step-btn.on { background: var(--ai); color: #fff; border-color: var(--ai); }
+
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+
+.pane {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.pane-head {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.pane-body { padding: 14px 0; }
+
+/* ── task detail chrome (condensed from mock-todo) ── */
+.detail-header { display: flex; align-items: flex-start; gap: 10px; padding: 4px 20px 8px; }
+.detail-title { flex: 1; font-size: 18px; font-weight: 600; line-height: 1.35; }
+.task-check { width: 18px; height: 18px; border: 1.5px solid #b4b4b4; border-radius: 50%; margin-top: 2px; flex-shrink: 0; }
+.detail-row { display: flex; align-items: center; gap: 10px; padding: 7px 20px; font-size: 14px; color: var(--text-secondary); }
+.detail-row .row-icon { width: 18px; text-align: center; }
+.detail-sep { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+
+/* ── Cowork action card ── */
+.cw-card { margin: 8px 20px; border-radius: 8px; border: 1px solid var(--ai-border); background: var(--ai-light); overflow: hidden; }
+.cw-card.is-executed { border-color: var(--ready-green); background: var(--ready-light); }
+.cw-card.is-failed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.cw-card.is-running { border-style: dashed; }
+
+.cw-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px; font-size: 11px; font-weight: 600; color: var(--ai); }
+.cw-card.is-executed .cw-head { color: var(--ready-green); }
+.cw-card.is-failed .cw-head { color: var(--danger); }
+.cw-head .cw-type { flex: 1; }
+.cw-badge { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; padding: 2px 7px; border-radius: 10px; background: var(--bg); border: 1px solid currentColor; }
+
+.cw-body { padding: 0 14px 12px; font-size: 14px; line-height: 1.55; }
+
+/* running state */
+.cw-progress { display: flex; align-items: center; gap: 10px; padding: 14px 2px; color: var(--text-secondary); }
+.cw-spinner { width: 14px; height: 14px; border: 2px solid var(--ai-border); border-top-color: var(--ai); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.cw-progress-text { flex: 1; font-size: 14px; }
+.cw-progress-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, Consolas, monospace; }
+
+/* findings block */
+.cw-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; font-size: 14px; line-height: 1.5; }
+.cw-finding .f-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 5px; }
+.cw-finding strong { color: var(--text); }
+
+/* draft block */
+.cw-draft { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 6px; white-space: pre-wrap; }
+.cw-draft[contenteditable="true"] { outline: 2px solid var(--ai); outline-offset: 1px; }
+.cw-will { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; color: var(--text-secondary); padding: 8px 2px 2px; }
+.cw-will b { color: var(--text); font-weight: 600; }
+
+/* footer buttons */
+.cw-foot { display: flex; gap: 6px; align-items: center; padding: 0 14px 12px; flex-wrap: wrap; }
+.cw-btn { padding: 6px 13px; border-radius: 5px; font-size: 11px; font-weight: 600; font-family: inherit; cursor: pointer; border: none; transition: all .12s; }
+.cw-btn-primary { background: var(--ai); color: #fff; }
+.cw-btn-primary:hover { opacity: .85; }
+.cw-btn-go { background: var(--ready-green); color: #fff; }
+.cw-btn-go:hover { opacity: .85; }
+.cw-btn-sec { background: transparent; color: var(--ai); border: 1px solid var(--ai-border); }
+.cw-btn-sec:hover { background: var(--ai-light); }
+.cw-btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.cw-btn-ghost:hover { color: var(--text); }
+.cw-foot-note { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+
+/* receipt */
+.cw-receipt { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-top: 6px; }
+.cw-receipt-line { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 0; color: var(--text-secondary); }
+.cw-receipt-line .r-ok { color: var(--ready-green); font-weight: 700; }
+.cw-receipt-line .r-tool { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--text); }
+.cw-receipt-line .r-dur { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+.cw-receipt-head { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 6px; }
+
+/* trace pane */
+.trace { font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.6; padding: 0 16px 16px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+.trace .t-k { color: var(--ai); }
+.trace .t-warn { color: var(--warning); font-weight: 600; }
+.trace .t-ok { color: var(--ready-green); font-weight: 600; }
+
+.gate { margin: 0 16px 14px; padding: 10px 12px; border-radius: 6px; font-size: 11px; line-height: 1.5;
+  background: color-mix(in srgb, var(--warning) 10%, transparent); border: 1px solid var(--warning); color: var(--text); }
+.gate b { color: var(--warning); }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <span class="mb-title">Cowork action card: states</span>
+  <button class="step-btn" data-s="idle">1 · idle</button>
+  <button class="step-btn" data-s="previewing">2 · previewing</button>
+  <button class="step-btn" data-s="ready">3 · preview ready</button>
+  <button class="step-btn" data-s="editing">4 · editing</button>
+  <button class="step-btn" data-s="executing">5 · executing</button>
+  <button class="step-btn" data-s="executed">6 · executed</button>
+  <button class="step-btn" data-s="failed">7 · failed</button>
+  <button class="step-btn" onclick="document.body.classList.toggle('dark')">◐ theme</button>
+  <div class="mb-note">Content below is <b>real output</b> from the Phase 0 spike: task #2076,
+    <code>cowork send --json --deny-tools --ref person:bknoer@microsoft.com</code> → terminal_status <code>ok</code>, 42.3s.</div>
+</div>
+
+<div class="wrap">
+  <div class="pane">
+    <div class="pane-head">Detail pane</div>
+    <div class="pane-body">
+      <div class="detail-header">
+        <div class="task-check"></div>
+        <div class="detail-title">Follow up with Brandon Knoertzer on PPCC executive-target list</div>
+      </div>
+      <div class="detail-row"><span class="row-icon">⚑</span><span>Normal</span></div>
+      <div class="detail-row"><span class="row-icon">👤</span><span>Brandon Knoertzer</span></div>
+      <div class="detail-row"><span class="row-icon">💬</span><span>Teams chat · source</span></div>
+      <hr class="detail-sep">
+      <div id="card-slot"></div>
+    </div>
+  </div>
+
+  <div class="pane">
+    <div class="pane-head">What the backend does</div>
+    <div class="gate" id="gate"></div>
+    <div class="trace" id="trace"></div>
+  </div>
+</div>
+
+<script>
+// ── Real spike data ─────────────────────────────────────────
+const SPIKE = {
+  conversation_id: "72f988bf-86f1-41af-91ab-2d7cd011db47:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7:cw-b83c3290",
+  duration_seconds: 42.297,
+  terminal_status: "ok",
+  finding: "<strong>Brandon has not responded.</strong> Your message went out <strong>Wed, Jul 29 at 5:32 PM ET</strong> and is still the most recent in the thread — nothing back in Teams or email over 14 days.<br><br>His last message before your question (Jul 29, 4:55 PM) was the Stephanie update: registrations happen closer to the event so planning could be tricky; her suggestion was to find great customer stories and offer free tickets to any who aren't registered. He also asked you a question back — <strong>any top-of-mind customers for the event?</strong>",
+  draft: "Hey Brandon — circling back on this one. Any chance we can pull the FY26 1:1 meeting target list as a starting point for the PPCC exec panel? I'd rather hand the team something defined than a blank page — happy to ping Stephanie directly if that's easier on your end.",
+  tool_trace: [
+    { tool_name: "tool_search_tool", mcp: "tool_search_tool", duration_seconds: 0.2, ok: true },
+    { tool_name: "List chat messages", mcp: "mcp__m365_teams__ListChatMessages", duration_seconds: 2.1, ok: true },
+    { tool_name: "Search M365", mcp: "mcp__m365_search__SearchM365", duration_seconds: 1.9, ok: true }
+  ],
+  // real stderr heartbeat lines
+  heartbeat: [
+    ["0:01", "init: Connecting to container"],
+    ["0:04", "init: Ready"],
+    ["0:06", "init: Connecting MCP servers"],
+    ["0:19", "tool: tool_search_tool"],
+    ["0:26", "tool: mcp__m365_teams__ListChatMessages"],
+    ["0:26", "tool: mcp__m365_search__SearchM365"],
+    ["0:36", "thinking"],
+    ["0:37", "Searching for messages from Brandon"],
+    ["0:42", "done (ok)"]
+  ],
+  execute_trace: [
+    { tool_name: "Send chat message", mcp: "mcp__m365_teams__SendChatMessage", duration_seconds: 1.4, ok: true }
+  ]
+};
+
+let state = "idle", hbTimer = null, hbIdx = 0;
+
+// ── Card renderers ──────────────────────────────────────────
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function card(cls, badge, type, body, foot) {
+  return `<div class="cw-card ${cls}">
+    <div class="cw-head"><span>✦</span><span class="cw-type">${type}</span>
+      ${badge ? `<span class="cw-badge">${badge}</span>` : ''}</div>
+    <div class="cw-body">${body}</div>
+    ${foot ? `<div class="cw-foot">${foot}</div>` : ''}
+  </div>`;
+}
+
+const RENDER = {
+  idle: () => card('', 'not run', '💬 Follow-up · Cowork',
+    `<div style="text-align:center;padding:14px 0;color:var(--text-muted)">
+       Cowork can check whether Brandon replied, then draft the nudge.<br>
+       <span style="font-size:11px">Nothing is sent without your approval.</span>
+     </div>`,
+    `<button class="cw-btn cw-btn-primary" onclick="go('previewing')">Preview with Cowork</button>
+     <span class="cw-foot-note">~45s · read-only</span>`),
+
+  previewing: () => card('is-running', 'read-only', '💬 Follow-up · Cowork',
+    `<div class="cw-progress">
+       <div class="cw-spinner"></div>
+       <div style="flex:1">
+         <div class="cw-progress-text" id="hb-text">Connecting to container</div>
+         <div class="cw-progress-sub" id="hb-sub">0:01 elapsed</div>
+       </div>
+     </div>`,
+    `<button class="cw-btn cw-btn-ghost" onclick="go('idle')">Cancel</button>
+     <span class="cw-foot-note">--deny-tools · no writes possible</span>`),
+
+  ready: () => card('', 'preview', '💬 Follow-up · Cowork',
+    `<div class="cw-finding"><span class="f-label">What Cowork found</span>${SPIKE.finding}</div>
+     <div class="cw-draft">${esc(SPIKE.draft)}</div>
+     <div class="cw-will">↳ <span><b>If you approve:</b> Cowork posts this as a Teams chat message to
+       Brandon Knoertzer &lt;bknoer@microsoft.com&gt;.</span></div>`,
+    `<button class="cw-btn cw-btn-go" onclick="go('executing')">Send it</button>
+     <button class="cw-btn cw-btn-sec" onclick="go('editing')">Edit</button>
+     <button class="cw-btn cw-btn-sec" onclick="go('previewing')">↻ Redo</button>
+     <button class="cw-btn cw-btn-ghost" onclick="go('idle')">Discard</button>`),
+
+  editing: () => card('', 'editing', '💬 Follow-up · Cowork',
+    `<div class="cw-finding"><span class="f-label">What Cowork found</span>${SPIKE.finding}</div>
+     <div class="cw-draft" contenteditable="true" id="draft-edit">${esc(SPIKE.draft)}</div>
+     <div class="cw-will">↳ <span><b>Your edits are sent verbatim</b>, so Cowork will not rewrite them.</span></div>`,
+    `<button class="cw-btn cw-btn-go" onclick="go('executing')">Send edited</button>
+     <button class="cw-btn cw-btn-ghost" onclick="go('ready')">Cancel edit</button>`),
+
+  executing: () => card('is-running', 'sending', '💬 Follow-up · Cowork',
+    `<div class="cw-draft" style="opacity:.55">${esc(SPIKE.draft)}</div>
+     <div class="cw-progress">
+       <div class="cw-spinner"></div>
+       <div style="flex:1"><div class="cw-progress-text">Posting to Teams…</div>
+       <div class="cw-progress-sub">resuming cw-b83c3290</div></div>
+     </div>`, ''),
+
+  executed: () => card('is-executed', 'sent', '💬 Follow-up · Cowork',
+    `    <div class="cw-draft" style="background:var(--ready-light)">${esc(SPIKE.draft)}</div>
+     <div class="cw-receipt">
+       <div class="cw-receipt-head">Receipt · from tool_trace</div>
+       ${SPIKE.execute_trace.map(t => `<div class="cw-receipt-line">
+         <span class="r-ok">✓</span><span class="r-tool">${t.mcp}</span>
+         <span class="r-dur">${t.duration_seconds}s</span></div>`).join('')}
+       <div class="cw-receipt-line" style="margin-top:4px;border-top:1px solid var(--border);padding-top:6px">
+         <span>Sent to Brandon Knoertzer · today 10:51</span></div>
+     </div>`,
+    `<button class="cw-btn cw-btn-sec" onclick="alert('Opens the Teams thread')">Open in Teams</button>
+     <button class="cw-btn cw-btn-ghost" onclick="alert('Marks task complete')">Mark done</button>
+     <span class="cw-foot-note">idempotent: cannot re-send</span>`),
+
+  failed: () => card('is-failed', 'failed', '💬 Follow-up · Cowork',
+    `<div style="padding:10px 0 4px">
+       <b>Cowork could not complete this action.</b>
+       <div style="font-size:14px;color:var(--text-secondary);margin-top:6px">
+         terminal_status: <code>auth_expired</code><br>
+         Your Cowork session expired. Re-authenticate, then retry. Nothing was sent.
+       </div></div>`,
+    `<button class="cw-btn cw-btn-primary" onclick="go('previewing')">Retry</button>
+     <button class="cw-btn cw-btn-ghost" onclick="go('idle')">Dismiss</button>`)
+};
+
+// ── Backend trace pane ──────────────────────────────────────
+const GATE = {
+  idle: `<b>Gate:</b> no <code>task_actions</code> row exists. The execute endpoint would
+    reject a request for this task. Approval state lives in the DB, not the UI.`,
+  previewing: `<b>Safety:</b> two independent controls: <code>--deny-tools</code> <i>and</i> an
+    explicit “do not send anything” line in the prompt. Spike finding F3: <code>--deny-tools</code>
+    alone is <b>not</b> a guaranteed dry-run (read tools never request approval, so they ran).`,
+  ready: `<b>Gate:</b> a <code>task_actions</code> row now exists with phase=<code>preview</code>,
+    status=<code>ready</code>. Only now will the execute endpoint accept a call for this task.`,
+  editing: `<b>Note:</b> edited text is pinned verbatim into the execute prompt so the thing you
+    approved is the thing that gets sent (mitigates preview→execute drift).`,
+  executing: `<b>Live:</b> resuming the <i>same</i> conversation_id rather than starting fresh.
+    Cowork already holds the thread context and the approved draft.`,
+  executed: `<b>Gate:</b> <code>cowork_executed_at</code> is now stamped. Any further execute call
+    for this task+action is rejected at the DB layer, so a double-click cannot send twice.`,
+  failed: `<b>Gate:</b> no <code>cowork_executed_at</code> stamp, so retry is safe. Failure is
+    recorded on the <code>task_actions</code> row with the terminal_status.`
+};
+
+const TRACE = {
+  idle: () => `<span class="t-k">state</span>  cowork_status = idle
+<span class="t-k">rows</span>   task_actions: (none for task 2076)
+
+Waiting for user to request a preview.`,
+
+  previewing: () => `<span class="t-k">exec</span>   cowork send --json --deny-tools \\
+         --ref "person:bknoer@microsoft.com" \\
+         --prompt-file preview-2076.txt
+
+<span class="t-k">label</span>  cowork:preview:2076        <span class="t-warn">(dedup: one at a time)</span>
+<span class="t-k">stdout</span> → spike-2076-stdout.json   (clean JSON)
+<span class="t-k">stderr</span> → spike-2076-stderr.log    (heartbeat)
+       <span class="t-warn">must be separate handles; merging corrupts the JSON</span>
+
+<span class="t-k">row</span>    task_actions(task_id=2076, phase=preview, status=running)
+
+<span class="t-k">heartbeat</span> (parsed from stderr → drives the card)
+<span id="hb-log"></span>`,
+
+  ready: () => `<span class="t-k">exit</span>   0   <span class="t-ok">terminal_status = "ok"</span>   ${SPIKE.duration_seconds}s
+
+<span class="t-k">conversation_id</span>
+  ${SPIKE.conversation_id}
+
+<span class="t-k">tool_trace</span> (${SPIKE.tool_trace.length})
+${SPIKE.tool_trace.map(t => `  <span class="t-ok">ok</span>  ${t.mcp.padEnd(38)} ${t.duration_seconds}s`).join('\n')}
+
+<span class="t-warn">all 3 ran despite --deny-tools; read tools never ask for approval</span>
+
+<span class="t-k">persist</span>  text, tool_trace, terminal_status,
+         conversation_id, duration_seconds
+<span class="t-k">DROP</span>     sse_events (82 entries, most of the 21KB)
+
+<span class="t-k">row</span>      task_actions(phase=preview, status=<span class="t-ok">ready</span>)`,
+
+  editing: () => `<span class="t-k">local</span>  draft held client-side; no Cowork call yet.
+
+On "Send edited" the execute prompt becomes:
+
+  Resume conversation ${SPIKE.conversation_id.slice(-13)}
+  Send this message to Brandon Knoertzer, <span class="t-warn">verbatim</span>,
+  exactly as written below. Do not rewrite or re-tone it.
+  ---
+  &lt;edited text&gt;
+  ---`,
+
+  executing: () => `<span class="t-k">precheck</span>
+  SELECT 1 FROM task_actions
+   WHERE task_id=2076 AND action_type='follow-up'
+     AND phase='preview' AND status='ready'      <span class="t-ok">→ found</span>
+  SELECT cowork_executed_at FROM tasks WHERE id=2076
+                                                <span class="t-ok">→ NULL, ok to proceed</span>
+
+<span class="t-k">exec</span>   cowork send --json \\
+         --resume "${SPIKE.conversation_id.slice(-13)}" \\
+         --prompt-file execute-2076.txt
+
+       <span class="t-warn">no --deny-tools; the only path that omits it</span>
+
+<span class="t-k">row</span>    task_actions(phase=execute, status=running)`,
+
+  executed: () => `<span class="t-k">exit</span>   0   <span class="t-ok">terminal_status = "ok"</span>
+
+<span class="t-k">tool_trace</span> (receipt)
+${SPIKE.execute_trace.map(t => `  <span class="t-ok">ok</span>  ${t.mcp.padEnd(38)} ${t.duration_seconds}s`).join('\n')}
+
+<span class="t-k">write</span>  UPDATE tasks
+         SET cowork_executed_at = '2026-07-31T14:51:04Z',
+             cowork_status      = 'executed'
+       WHERE id = 2076
+
+<span class="t-k">row</span>    task_actions(phase=execute, status=<span class="t-ok">done</span>)
+<span class="t-k">ws</span>     broadcast { type: 'cowork_executed', task_id: 2076 }
+
+<span class="t-warn">further execute calls now rejected at the DB layer</span>`,
+
+  failed: () => `<span class="t-k">exit</span>   1   <span class="t-warn">terminal_status = "auth_expired"</span>
+
+<span class="t-k">row</span>    task_actions(phase=execute, status=failed,
+                     error_message='auth_expired')
+<span class="t-k">tasks</span>  cowork_executed_at stays NULL  <span class="t-ok">→ retry is safe</span>
+<span class="t-k">ws</span>     broadcast { type: 'cowork_failed', task_id: 2076 }
+
+<span class="t-k">health</span> GET /api/cowork-health → shells \`cowork auth status\`
+       → banner: "Reconnect Cowork"`
+};
+
+// ── State machine ───────────────────────────────────────────
+function go(s) {
+  state = s;
+  clearInterval(hbTimer); hbTimer = null;
+  document.getElementById('card-slot').innerHTML = RENDER[s]();
+  document.getElementById('gate').innerHTML = GATE[s];
+  document.getElementById('trace').innerHTML = TRACE[s]();
+  document.querySelectorAll('.step-btn[data-s]').forEach(b =>
+    b.classList.toggle('on', b.dataset.s === s));
+
+  if (s === 'previewing') runHeartbeat();
+  if (s === 'executing') setTimeout(() => { if (state === 'executing') go('executed'); }, 2200);
+}
+
+function runHeartbeat() {
+  hbIdx = 0;
+  const log = document.getElementById('hb-log');
+  hbTimer = setInterval(() => {
+    if (hbIdx >= SPIKE.heartbeat.length) {
+      clearInterval(hbTimer);
+      if (state === 'previewing') go('ready');
+      return;
+    }
+    const [t, msg] = SPIKE.heartbeat[hbIdx++];
+    const txt = document.getElementById('hb-text');
+    const sub = document.getElementById('hb-sub');
+    if (txt) txt.textContent = msg.replace(/^(init|tool): /, '');
+    if (sub) sub.textContent = t + ' elapsed';
+    if (log) log.innerHTML += `  [cowork] streaming - ${t} - ${msg}\n`;
+  }, 550);
+}
+
+document.querySelectorAll('.step-btn[data-s]').forEach(b =>
+  b.addEventListener('click', () => go(b.dataset.s)));
+
+go('idle');
+</script>
+</body>
+</html>

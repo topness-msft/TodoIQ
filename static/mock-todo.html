@@ -36,6 +36,9 @@
 }
 
 .dark {
+  /* Chromium otherwise paints native date/time controls in light mode on a
+     dark field, hiding the picker affordance. */
+  color-scheme: dark;
   --accent: #4a98f7; --accent-light: #1a3050; --accent-hover: #6aafff;
   --header-bg: #1a3a6a;
   --bg: #1f1f1f; --bg-sidebar: #2b2b2b; --bg-hover: #383838;
@@ -401,6 +404,74 @@ body {
 .ai-btn-secondary:hover { background: var(--ai-light); }
 
 /* (alt-picklist removed — Fix 5/7) */
+
+/* ── Cowork Action Card (Phase 1: preview only) ───────────────────────────────── */
+.cw-card { margin: 8px 20px; border-radius: 8px; border: 1px solid var(--ai-border); background: var(--ai-light); overflow: hidden; }
+.cw-card.is-failed { border-color: var(--danger); }
+.cw-card.is-running { border-style: dashed; }
+.cw-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px; font-size: 11px; font-weight: 600; color: var(--ai); }
+.cw-card.is-failed .cw-head { color: var(--danger); }
+.cw-head .cw-type { flex: 1; }
+.cw-badge { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; padding: 1px 7px; border-radius: 10px; background: var(--bg); border: 1px solid currentColor; }
+.cw-body { padding: 0 14px 12px; font-size: 14px; line-height: 1.55; }
+
+.cw-progress { display: flex; align-items: center; gap: 10px; padding: 12px 2px; color: var(--text-secondary); }
+.cw-spinner { width: 14px; height: 14px; border: 2px solid var(--ai-border); border-top-color: var(--ai); border-radius: 50%; animation: cwspin .7s linear infinite; flex-shrink: 0; }
+@keyframes cwspin { to { transform:rotate(360deg); } }
+.cw-status-indicator { display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex:0 0 18px;color:var(--ai);font-size:14px; }
+.cw-status-running { animation:cwstatus 1.2s ease-in-out infinite; }
+.cw-status-unread { border-radius:50%;background:var(--ai-bg);box-shadow:0 0 0 1px var(--ai); }
+@keyframes cwstatus { 0%,100%{opacity:.35;transform:scale(.8)} 50%{opacity:1;transform:scale(1)} }
+.cw-progress-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, Consolas, monospace; }
+
+.cw-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; }
+.cw-finding .f-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 5px; }
+.cw-finding-clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.cw-finding-toggle { border: 0; background: transparent; color: var(--ai); padding: 5px 0 0; cursor: pointer; font: inherit; font-size: 11px; }
+.cw-markdown { white-space: normal; }
+.cw-markdown p, .cw-finding-body p { margin: 0 0 7px; }
+.cw-markdown p:last-child, .cw-finding-body p:last-child { margin-bottom: 0; }
+.cw-markdown h2, .cw-finding-body h2 { font-size: 13px; margin: 8px 0 5px; }
+.cw-markdown ul, .cw-finding-body ul { margin: 4px 0 7px; padding-left: 20px; }
+.cw-markdown a, .cw-finding-body a { color: var(--ai); }
+
+.cw-draft { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 4px 0 6px; white-space: pre-wrap; }
+.cw-draft[contenteditable="true"] { outline: 2px solid var(--ai); outline-offset: 1px; }
+
+/* destination line (F9: no thread ref exists, so show the resolved target) */
+.cw-dest { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; padding: 8px 10px; margin: 6px 0 2px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); color: var(--text-secondary); }
+.cw-dest b { color: var(--text); font-weight: 600; }
+.cw-dest.is-risky { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); }
+.cw-debug-id { border: 0; background: transparent; color: var(--text-muted); cursor: help; margin-left: 5px; padding: 0; font-size: 12px; }
+.cw-dest-actions { display:inline-flex;align-items:center;gap:8px;margin-top:6px; }
+.cw-dest-badge { font-size:11px;color:var(--ready-green); }
+.cw-dest-chan { display:inline-block;margin-left:6px;padding:1px 6px;border:1px solid var(--border);border-radius:999px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted); }
+.cw-dest-btn { font:inherit;font-size:11px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--ai);padding:2px 8px; }
+.cw-dest-hint { font-size:11px;color:var(--text-muted);margin-top:4px; }
+.dest-modal-overlay { position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:2000; }
+.dest-modal { background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:18px;min-width:340px;box-shadow:var(--shadow); }
+.dest-modal-header { font-size:14px;font-weight:600;margin-bottom:12px;color:var(--text); }
+.dest-modal-label { display:block;font-size:11px;color:var(--text-muted);margin:10px 0 4px; }
+.dest-modal-input { width:100%;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--text); }
+.dest-modal-buttons { display:flex;justify-content:flex-end;gap:8px;margin-top:16px; }
+.cw-intent { font-size: 11px; line-height: 1.5; color: var(--text-secondary); padding: 0 0 8px; margin: 0 0 8px; border-bottom: 1px solid var(--border); }
+.cw-intent .i-label { color: var(--text-muted); }
+.cw-intent .i-edit { color: var(--ai); cursor: pointer; margin-left: 5px; white-space: nowrap; }
+.cw-intent .i-edit:hover { text-decoration: underline; }
+.cw-intent-box { width: 100%; box-sizing: border-box; font: inherit; font-size: 11px; line-height: 1.5; color: var(--text); background: var(--bg); border: 1px solid var(--ai); border-radius: 6px; padding: 7px 9px; resize: vertical; }
+
+.cw-foot { display: flex; gap: 6px; align-items: center; padding: 0 14px 12px; flex-wrap: wrap; }
+.cw-btn { padding: 6px 13px; border-radius: 5px; font-size: 11px; font-weight: 600; font-family: inherit; cursor: pointer; border: none; transition: all .12s; }
+.cw-btn-link { display:inline-flex;align-items:center;text-decoration:none; }
+.cw-btn-primary { background: var(--ai); color: #fff; }
+.cw-btn-go { background: var(--ready-green); color: #fff; }
+.cw-btn-primary:hover, .cw-btn-go:hover { opacity: .85; }
+.cw-btn-sec { background: transparent; color: var(--ai); border: 1px solid var(--ai-border); }
+.cw-btn-sec:hover { background: var(--ai-light); }
+.cw-btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.cw-btn-ghost:hover { color: var(--text); }
+.cw-foot-note { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+textarea.cw-draft { width: 100%; font: inherit; font-size: 14px; line-height: 1.55; color: var(--text); resize: vertical; outline: 2px solid var(--ai); outline-offset: 1px; }
 
 /* ── Overflow Menu ────────────────────────────────────── */
 .overflow-menu {
@@ -779,6 +850,7 @@ body {
 <div class="overflow-menu" id="overflow-menu"></div>
 <div class="toast-container" id="toast-container"></div>
 
+<script src="/static/js/markdown-utils.js"></script>
 <script>
 // ── Mock Data ──────────────────────────────────────────────
 const ACTION_LABELS = {
@@ -1217,12 +1289,17 @@ function renderRow(t, compact) {
     else if (t.status === 'suggested' && t._wa_status === 'unclear') statusPill = '<span class="status-pill unclear">Unclear</span>';
     else if (t.status === 'suggested' && t.suggestion_refreshed_at) statusPill = '<span class="status-pill checked">Checked</span>';
 
+    const cwIndicator = t.cw_state === 'previewing'
+      ? '<span class="cw-status-indicator cw-status-running" title="Cowork is working">✦</span>'
+      : (t.cw_state === 'ready' && !t.cw_seen_at
+        ? '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">✦</span>' : '');
     return `<div class="task-row${isDone?' completed':''}${t.id===selectedId?' selected':''}" onclick="selectTask(${t.id})" title="Task #${t.id}">
       ${chk}<div class="task-body">
         <div class="task-line1">${priDot}<div class="task-title">${esc(t.title)}</div>${statusPill}${dueHtml}</div>
         ${line2?`<div class="task-line2">${line2}</div>`:''}${ghost}
       </div>
       <div class="task-right">
+        ${cwIndicator}
         ${!isSug?`<span class="task-star${starred?' starred':''}" onclick="event.stopPropagation();toggleStar(${t.id})">${starred?'★':'☆'}</span>`:''}
         <button class="task-overflow" onclick="event.stopPropagation();showTaskOverflow(event,${t.id})">⋯</button>
       </div></div>`;
@@ -1257,7 +1334,11 @@ function buildLine2(t, isSug) {
   if (t.status==='in_progress') {
     parts.push('<span class="task-hint in-prog">▶ In Progress</span>');
   }
-  if (t.ai_output && !['completed','suggested','snoozed'].includes(t.status)) {
+  if (t.cw_state === 'ready') {
+    parts.push('<span class="task-hint ai-ready">✦ Draft ready to copy</span>');
+  } else if (t.cw_state === 'previewing') {
+    parts.push('<span class="task-hint ai-ready">✦ Cowork working…</span>');
+  } else if (t.ai_output && !['completed','suggested','snoozed'].includes(t.status)) {
     const hint = (t.action_type && ACTION_HINTS[t.action_type]) || '⚡ Ready';
     parts.push(`<span class="task-hint ai-ready">${hint}</span>`);
   }
@@ -1342,42 +1423,7 @@ function selectTask(id) {
     <button class="btn btn-ai" onclick="promoteTask(${t.id})">✨ Add to Tasks</button>
     <button class="btn btn-secondary" onclick="dismissTask(${t.id})">Dismiss</button></div>` : '';
 
-  // AI Action Card
-  let aiCard = '';
-  if (t.ai_output && t.action_type) {
-    const label = ACTION_LABELS[t.action_type] || '⚡ AI Action';
-
-    let body = '';
-    if (t.ai_slots) {
-      body = `<div class="time-slots">${t.ai_slots.map(s =>
-        `<div class="time-slot" onclick="this.querySelector('.slot-pick').textContent='Booking...';this.style.opacity=0.5;toast('📅 Sending invite for ${s.day} ${s.time}...')">
-          <span class="slot-day">${s.day}</span><span class="slot-time">${s.date}, ${s.time}</span>
-          <span style="color:var(--text-muted);font-size:11px">${s.note}</span>
-          <span class="slot-pick">Book ▸</span></div>`).join('')}</div>`;
-    } else {
-      const sentVia = ['respond-email','follow-up','awaiting-response'].includes(t.action_type)
-        ? '<div class="sent-via">Sent via TodoIQ</div>' : '';
-      body = `<div class="draft-block">${esc(t.ai_output)}${sentVia}</div>`;
-    }
-
-    const copyBtn = !t.ai_slots ? `<button class="ai-btn ai-btn-primary" onclick="copyAiOutput();this.textContent='Copied ✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button>` : '';
-    const openBtn = t.action_type==='respond-email' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Outlook</button>`
-      : t.action_type==='follow-up'||t.action_type==='awaiting-response' ? `<button class="ai-btn ai-btn-secondary" onclick="openWithDraft(${t.id})">Open in Teams</button>` : '';
-
-    aiCard = `<div class="ai-action-card">
-      <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span>
-        <button class="ai-btn ai-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="redoSkill(${t.id},'${t.action_type||'general'}',this)">↻ Redo</button></div>
-      <div class="ai-action-body">${body}</div>
-      <div class="ai-action-footer">${copyBtn}${openBtn}</div></div>`;
-  } else if (t.action_type && !t.ai_output) {
-    const label = ACTION_LABELS[t.action_type] || '⚡ AI Action';
-    aiCard = `<div class="ai-action-card" style="border-style:dashed" id="ai-card-${t.id}">
-      <div class="ai-action-header"><span>✦</span><span class="ai-type">${label}</span></div>
-      <div class="ai-action-body"><div style="text-align:center;padding:16px;color:var(--text-muted)">
-        No AI draft yet<br>
-        <span style="color:var(--accent);cursor:pointer;font-size:13px" onclick="redoSkill(${t.id},'${t.action_type}')">✦ Generate ${label}</span>
-      </div></div></div>`;
-  }
+  const aiCard = renderCoworkCard(t);
 
   const created = t.created_at ? new Date(t.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
 
@@ -1424,6 +1470,7 @@ function selectTask(id) {
     <div class="detail-notes"><textarea placeholder="Add a note" oninput="updateNotes(${t.id},this.value)">${esc(t.notes||'')}</textarea></div>
     <div class="detail-footer"><span>Created ${created}</span>
       <button class="detail-footer icon-btn" onclick="showDetailOverflow(event,${t.id})">⋯</button></div>`;
+  cwInitFindingToggle(t.id);
   renderTasks();
 }
 
@@ -1499,6 +1546,39 @@ function snoozeTask(id) {
   t.status='snoozed'; toast('😴 Snoozed');
   if(selectedId===id) closeDetail(); refresh();
 }
+function nextWeekdaySnoozeDays(now, count) {
+  // The next `count` weekdays after `now`. Weekends are skipped - these are
+  // 9 AM work reminders. Dates are formatted from local parts, never via
+  // toISOString(), which shifts a day west of UTC after ~5pm.
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const out = [];
+  const cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let offset = 0;
+  while (out.length < count && offset < 14) {
+    offset++;
+    cursor.setDate(cursor.getDate() + 1);
+    const dow = cursor.getDay();
+    if (dow === 0 || dow === 6) continue;
+    const y = cursor.getFullYear();
+    const m = String(cursor.getMonth() + 1).padStart(2, '0');
+    const d = String(cursor.getDate()).padStart(2, '0');
+    out.push({
+      offset,
+      label: dayNames[dow],
+      value: `${y}-${m}-${d}`,
+      title: cursor.toLocaleDateString('en-US',
+        { weekday: 'long', month: 'short', day: 'numeric' })
+    });
+  }
+  return out;
+}
+function openNativePicker(el) {
+  // <input type="date"> only drops its calendar when the small icon is hit;
+  // clicking the text just puts a caret in mm/dd/yyyy. Typing still works if
+  // showPicker is missing or the click is not treated as user activation.
+  try { if (el && typeof el.showPicker === 'function') el.showPicker(); }
+  catch (err) { /* fall back to typing */ }
+}
 function showSnoozePicker(e, id) {
   e.stopPropagation();
   const t = tasks.find(t=>t.id===id); if(!t) return;
@@ -1508,19 +1588,17 @@ function showSnoozePicker(e, id) {
   const picker = document.createElement('div');
   picker.className = 'snooze-picker';
   picker.id = 'snooze-picker';
-  // Build weekday buttons (remaining days this week)
-  const today = new Date();
-  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const todayDay = today.getDay();
+  // Build weekday buttons: always the next four weekdays, never a stub.
+  // The old loop was `for i in 1..5 if i > today.getDay()`, which shrank as the
+  // week wore on and rendered "No more weekdays" from Friday onward. It also
+  // derived its date string via toISOString(), which rolls forward a day when
+  // run in the evening west of UTC.
+  const snoozeDays = nextWeekdaySnoozeDays(new Date(), 4);
   let weekdayBtns = '';
-  for (let i = 1; i <= 5; i++) { // Mon-Fri
-    if (i > todayDay) {
-      const d = new Date(today); d.setDate(d.getDate() + (i - todayDay));
-      const isTomorrow = (i - todayDay) === 1;
-      const dateStr = d.toISOString().split('T')[0];
-      weekdayBtns += `<button class="sp-weekday${isTomorrow?' tomorrow':''}" onclick="doSnooze(${id},'${dateStr}','09:00')">${dayNames[i]}${isTomorrow?' ★':''}</button>`;
-    }
-  }
+  snoozeDays.forEach((d, i) => {
+    const lead = i === 0;
+    weekdayBtns += `<button class="sp-weekday${lead?' tomorrow':''}" title="${d.title}" onclick="doSnooze(${id},'${d.value}','09:00')">${d.label}${lead?' ★':''}</button>`;
+  });
   // OOF option
   let oofOption = '';
   if (t.key_people?.length) {
@@ -1530,20 +1608,19 @@ function showSnoozePicker(e, id) {
       oofOption = `<div class="sp-oof" onclick="doSnooze(${id},'${oofPerson.oof_until}','09:00')">💤 Until ${oofPerson.name.split(' ')[0]} returns (${oofDate})</div>`;
     }
   }
-  const tmrDate = new Date(today); tmrDate.setDate(tmrDate.getDate()+1);
-  const tmrStr = tmrDate.toISOString().split('T')[0];
+  const tmrStr = snoozeDays[0].value;
   picker.innerHTML = `
     <div class="sp-option" onclick="doSnoozeHours(${id},1)"><span class="sp-icon">⏰</span> 1 hour</div>
     <div class="sp-option" onclick="doSnoozeHours(${id},4)"><span class="sp-icon">🕓</span> 4 hours</div>
     <hr class="sp-sep">
-    <div class="sp-label">This week</div>
-    <div class="sp-weekdays">${weekdayBtns || '<span style="font-size:12px;color:var(--text-muted)">No more weekdays</span>'}</div>
+    <div class="sp-label">Upcoming</div>
+    <div class="sp-weekdays">${weekdayBtns}</div>
     <hr class="sp-sep">
     ${oofOption}
     <div class="sp-label">Pick date & time</div>
     <div class="sp-custom">
-      <input type="date" id="snooze-date" value="${tmrStr}">
-      <input type="time" id="snooze-time" value="09:00">
+      <input type="date" id="snooze-date" value="${tmrStr}" onclick="openNativePicker(this)">
+      <input type="time" id="snooze-time" value="09:00" onclick="openNativePicker(this)">
       <button onclick="doSnooze(${id},document.getElementById('snooze-date').value,document.getElementById('snooze-time').value)">Go</button>
     </div>`;
   document.body.appendChild(picker);
@@ -1940,6 +2017,598 @@ function showResizeHandle() {
 function hideResizeHandle() {
   document.getElementById('resize-handle').style.display = 'none';
 }
+
+// ── Cowork Action Card ─────────────────────────────────────────────────
+//
+// PHASE 1 IS PREVIEW ONLY. There is no execute route on the server, so this
+// card must never render a control implying something was or will be sent.
+// The mock's Approve/executing/executed states are Phase 2 and deliberately
+// absent here. The primary action is Copy draft.
+//
+// Render reads t.cw_* fields. In this standalone file the state transitions
+// below are in-memory; on /todo they are overridden by todoiq-api.js, which
+// fills the same fields from /api/tasks/<id>/cowork. Only the render is shared.
+
+const CW_LABELS = {
+  'respond-email': 'Reply',
+  'schedule-meeting': 'Scheduling',
+  'follow-up': 'Follow-up',
+  'awaiting-response': 'Follow-up',
+  'teams-message': 'Message',
+  'prepare': 'Prep',
+  'review-document': 'Review',
+  'general': 'Action',
+};
+
+// Keyed by the destination kinds parse_source_url produces server side.
+const CW_DEST = {
+  one_to_one: { risky: false, label: '1:1 Teams chat',
+                note: 'Linear conversation, so a reply lands in the same thread.' },
+  group:      { risky: true,  label: 'Group Teams chat',
+                note: 'Everyone in the chat would see this.' },
+  meeting:    { risky: true,  label: 'Meeting chat',
+                note: 'Everyone invited to the meeting would see this.' },
+  channel:    { risky: true,  label: 'Team channel',
+                note: 'This would be a public post to the whole team.' },
+  none:       { risky: false, label: 'No delivery destination selected',
+                note: 'Choose Teams or email before any future send action.' },
+  unknown:    { risky: true,  label: 'Unrecognised source',
+                note: 'The audience could not be determined from the source link.' },
+};
+
+// Transport, not audience shape. Kept deliberately orthogonal to CW_DEST.
+const CW_CHANNEL = {
+  teams: { label: 'Teams', note: 'Direct Teams message to this recipient.' },
+  email: { label: 'Email', note: 'Email to this recipient.' },
+};
+
+// Kinds derived from a Teams source already imply the Teams transport, so their
+// own note stays accurate. Anything else needs the transport spelled out.
+const CW_KIND_CHANNEL = {
+  one_to_one: 'teams', group: 'teams', meeting: 'teams', channel: 'teams',
+};
+
+// A scheduling task ends in a calendar invite, so the reply-mechanics note
+// reads wrong beside it. Audience binding is unchanged; only the mechanics
+// sentence swaps, and only where there is no broadcast warning to state.
+const CW_ACTION_NOTE = {
+  'schedule-meeting': 'Times are proposed here; the invite would go to the same person.',
+};
+
+// Fallback only. On /todo the kind comes from the server, where
+// parse_source_url is the single source of truth; this local derivation
+// exists so the file still renders when opened standalone.
+function cwLocalKind(t) {
+  const url = t.source_url || '';
+  if (!url) return 'none';
+  const conv = decodeURIComponent(url).split('/l/message/')[1] || '';
+  if (/unq\.gbl\.spaces/i.test(conv)) return 'one_to_one';
+  if (/thread\.v2/i.test(conv)) return 'group';
+  if (/thread\.skype/i.test(conv)) return 'channel';
+  if (/thread\.tacv2/i.test(conv)) return 'meeting';
+  return 'unknown';
+}
+
+// Audience binding. The Cowork conversation id identifies the research
+// session and is never treated as a delivery target.
+function cwDestBlock(t) {
+  const kind = t.cw_dest_kind || cwLocalKind(t);
+  const d = CW_DEST[kind] || CW_DEST.unknown;
+  const conv = t.cw_conversation_id || '';
+  const risky = d.risky || !!t.cw_is_broadcast;
+  const confirmed = !!t.cw_dest_confirmed_at;
+  const display = t.cw_dest_display || t.cw_dest_ref || d.label;
+  const chan = CW_CHANNEL[t.cw_delivery_channel] || null;
+  // A channel with no recipient is a voice preference, not a destination. Its
+  // note says "...to this recipient", so applying it where none is bound both
+  // contradicts the line above it and displaces the standing instruction to
+  // pick one. The instruction is a safety surface; it outranks the preference.
+  const hasRecipient = !!(t.cw_dest_ref || t.cw_dest_display);
+  // A broadcast warning outranks any transport note — never trade it away.
+  const note = (!risky && chan && hasRecipient
+      && t.cw_delivery_channel !== CW_KIND_CHANNEL[kind])
+    ? chan.note : d.note;
+  // A scheduling task ends in a calendar invite, so the reply-mechanics note
+  // reads wrong beside it. The AUDIENCE binding still stands - only the
+  // mechanics sentence changes, and a broadcast warning still outranks it.
+  const actionNote = CW_ACTION_NOTE[t.action_type];
+  const finalNote = (!risky && actionNote) ? actionNote : note;
+  // Link straight to the conversation this is drafted for, so checking who is
+  // actually in it is one click rather than a hunt through Teams.
+  const srcUrl = t.source_url || '';
+  const openLink = srcUrl
+    ? `<a class="cw-dest-open" href="${cwEscapeAttr(srcUrl)}" target="_blank" rel="noopener noreferrer" data-testid="dest-open">Open chat</a>`
+    : '';
+  return `<div class="cw-dest${risky ? ' is-risky' : ''}">
+    <span>${risky ? '⚠' : '↳'}</span>
+    <span><b>Drafted for:</b>
+    <span data-testid="${risky ? 'dest-risky' : 'dest-safe'}"><span data-testid="dest-status">${esc(display)}</span></span>
+    ${chan ? `<span class="cw-dest-chan" data-testid="dest-channel-chip">${esc(chan.label)}</span>` : ''}
+    ${openLink}
+    <br><span style="color:var(--text-muted)" data-testid="dest-note">${esc(finalNote)}</span>
+    <span class="cw-dest-actions">
+      ${confirmed ? '<span class="cw-dest-badge" data-testid="dest-confirmed">✓ audience confirmed</span>' : ''}
+      <button class="cw-dest-btn" type="button" data-testid="dest-change-btn"
+        onclick="cwOpenDestPicker(${t.id})">${confirmed ? 'Change' : 'Set destination'}</button>
+    </span>
+    ${conv ? `<button class="cw-debug-id" type="button" title="${cwEscapeAttr(conv)}" aria-label="Cowork troubleshooting ID">ⓘ</button>` : ''}</span></div>`;
+}
+
+function cwOpenDestPicker(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  cwCloseDestPicker();
+
+  const channel = t.cw_delivery_channel || 'teams';
+  const ref = t.cw_dest_ref || '';
+  const overlay = document.createElement('div');
+  overlay.id = 'dest-modal';
+  overlay.className = 'dest-modal-overlay';
+  overlay.innerHTML = `<div class="dest-modal" data-testid="dest-picker">
+    <div class="dest-modal-header">Confirm destination</div>
+    <label class="dest-modal-label">Channel</label>
+    <select id="dest-modal-channel" class="dest-modal-input" data-testid="dest-channel">
+      <option value="teams"${channel === 'teams' ? ' selected' : ''}>Teams</option>
+      <option value="email"${channel === 'email' ? ' selected' : ''}>Email</option>
+    </select>
+    <label class="dest-modal-label">Recipient or conversation</label>
+    <input type="text" id="dest-modal-ref" class="dest-modal-input" data-testid="dest-ref" value="${cwEscapeAttr(ref)}">
+    ${ref.indexOf('19:') === 0 ? '<div class="cw-dest-hint">Linked Teams conversation — leave as-is to reply in the original thread.</div>' : ''}
+    <label class="dest-modal-label">Shown as</label>
+    <input type="text" id="dest-modal-display" class="dest-modal-input" data-testid="dest-display" value="${cwEscapeAttr(t.cw_dest_display || '')}">
+    <div class="dest-modal-buttons">
+      <button class="cw-btn cw-btn-ghost" onclick="cwCloseDestPicker()">Cancel</button>
+      <button class="cw-btn cw-btn-go" data-testid="dest-confirm-btn" onclick="cwConfirmDest(${id})">Confirm</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) cwCloseDestPicker();
+  });
+}
+
+function cwCloseDestPicker() {
+  const existing = document.getElementById('dest-modal');
+  if (existing) existing.remove();
+}
+
+function cwDestPickerValues() {
+  const channel = document.getElementById('dest-modal-channel');
+  const ref = document.getElementById('dest-modal-ref');
+  const display = document.getElementById('dest-modal-display');
+  if (!channel || !ref || !display) return null;
+  const values = {
+    delivery_channel: channel.value,
+    destination_ref: ref.value.trim(),
+    destination_display: display.value.trim()
+  };
+  return (values.destination_ref && values.destination_display) ? values : null;
+}
+
+// Standalone behaviour. On /todo this is replaced by the API-backed version.
+function cwConfirmDest(id) {
+  const t = cwTask(id);
+  const values = cwDestPickerValues();
+  if (!t || !values) return;
+  t.cw_delivery_channel = values.delivery_channel;
+  t.cw_dest_ref = values.destination_ref;
+  t.cw_dest_display = values.destination_display;
+  t.cw_dest_confirmed_at = new Date().toISOString();
+  cwCloseDestPicker();
+  cwRerender(id);
+}
+
+const _cwFindingExpanded = {};
+
+function cwEscapeAttr(value) {
+  return String(value || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function cwFindingBlock(finding, taskId) {
+  if (!finding) return '';
+  const expanded = Boolean(_cwFindingExpanded[taskId]);
+  return `<div class="cw-finding"><span class="f-label">What Cowork found</span>
+    <div class="cw-finding-body${expanded ? '' : ' cw-finding-clamped'}" id="cw-finding-${taskId}">
+      ${renderCoworkMarkdown(_stripContextRefs(finding))}
+    </div>
+    <button class="cw-finding-toggle" id="cw-finding-toggle-${taskId}"
+      onclick="cwToggleFinding(${taskId})" style="display:none">${expanded ? 'Show less' : 'Show more'}</button>
+  </div>`;
+}
+
+function cwToggleFinding(taskId) {
+  const body = document.getElementById(`cw-finding-${taskId}`);
+  const button = document.getElementById(`cw-finding-toggle-${taskId}`);
+  if (!body || !button) return;
+  _cwFindingExpanded[taskId] = !_cwFindingExpanded[taskId];
+  body.classList.toggle('cw-finding-clamped', !_cwFindingExpanded[taskId]);
+  button.textContent = _cwFindingExpanded[taskId] ? 'Show less' : 'Show more';
+}
+
+function cwInitFindingToggle(taskId) {
+  const body = document.getElementById(`cw-finding-${taskId}`);
+  const button = document.getElementById(`cw-finding-toggle-${taskId}`);
+  if (!body || !button) return;
+  if (_cwFindingExpanded[taskId]) {
+    button.style.display = '';
+    button.textContent = 'Show less';
+    return;
+  }
+  button.style.display = body.scrollHeight > body.clientHeight + 1 ? '' : 'none';
+}
+
+// WorkIQ's suggested next action, editable before Cowork runs. This is the
+// only surviving affordance from the retired coaching card.
+function cwIntentBlock(t, editable) {
+  const intent = t.coaching_text || '';
+  if (!intent) return '';
+  if (t.cw_intent_editing) {
+    return `<div class="cw-intent"><textarea class="cw-intent-box" rows="3"
+      id="cw-intent-${t.id}">${esc(intent)}</textarea>
+      <div style="padding-top:6px">
+        <span class="i-edit" onclick="cwSaveIntent(${t.id})">Save</span>
+        <span class="i-edit" style="color:var(--text-muted)"
+          onclick="cwEditIntent(${t.id},false)">Cancel</span></div></div>`;
+  }
+  return `<div class="cw-intent"><span class="i-label">Asking Cowork to:</span>
+    ${esc(intent)}${editable
+      ? `<span class="i-edit" onclick="cwEditIntent(${t.id},true)">Change</span>` : ''}</div>`;
+}
+
+function cwRedoRow(t) {
+  if (!t.cw_redo_open) return '';
+  return `<div class="cw-intent" style="border-bottom:none;padding-top:8px">
+    <input class="cw-intent-box" id="cw-redo-${t.id}" type="text"
+      placeholder="Tell Cowork what to change… (e.g. look for times next week)"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();cwStart(${t.id},true)}">
+    <div style="padding-top:6px">
+      <span class="i-edit" onclick="cwStart(${t.id},true)">Run again</span>
+      <span class="i-edit" style="color:var(--text-muted)"
+        onclick="cwToggleRedo(${t.id},false)">Cancel</span></div></div>`;
+}
+
+function cwRedoBtn(t) {
+  // Only for the FAILED card. On a ready card Refine does the same job in ~30s
+  // while keeping the research, so offering both there was three overlapping
+  // controls (Refine / Redo / Start over).
+  return t.cw_redo_open ? ''
+    : `<button class="cw-btn cw-btn-sec"
+        title="Run again, telling Cowork what to change."
+        onclick="cwToggleRedo(${t.id},true)">↻ Redo</button>`;
+}
+
+function cwRefineBtn(t) {
+  // Only possible on the API transport: a subprocess-produced row carries no
+  // conversation id, so there is nothing to continue. That absence is the
+  // honest gate - no flag lookup needed in the UI.
+  if (!t.cw_conversation_id || t.cw_refine_open) return '';
+  return `<button class="cw-btn cw-btn-sec" data-testid="cw-refine-btn"
+      title="Ask Cowork to revise this, keeping everything it already researched. Much faster than starting over."
+      onclick="cwToggleRefine(${t.id},true)">Refine</button>`;
+}
+
+function cwRefineRow(t) {
+  if (!t.cw_refine_open) return '';
+  // Instruction only. The DRAFT is edited in place, in the card's own draft
+  // area, rather than duplicated into a second box below it - showing the same
+  // text twice made it ambiguous which copy was the real one.
+  return `<div class="cw-refine" data-testid="cw-refine-row">
+    <div class="cw-refine-label">Change the draft above, or say what to change here. Either is enough.</div>
+    <textarea class="cw-refine-box" id="cw-refine-${t.id}" rows="2"
+      oninput="cwBufferInstr(${t.id},this.value)"
+      placeholder="e.g. make it shorter and aim it just at Greg">${esc(t.cw_instr_buf || '')}</textarea>
+    <div class="cw-refine-actions">
+      <button class="cw-btn cw-btn-go" data-testid="cw-refine-send" onclick="cwSendRefine(${t.id})">Send to Cowork</button>
+      <button class="cw-btn cw-btn-ghost" onclick="cwToggleRefine(${t.id},false)">Cancel</button>
+    </div></div>`;
+}
+
+// Live, unsaved textarea contents. A WebSocket task_updated rebuilds the card
+// and would otherwise silently discard whatever the user was typing - which
+// really happened: an in-place draft edit vanished and only the instruction
+// reached Cowork.
+function cwBufferDraft(id, value) { const t = cwTask(id); if (t) t.cw_draft_buf = value; }
+function cwBufferInstr(id, value) { const t = cwTask(id); if (t) t.cw_instr_buf = value; }
+function cwClearBuffers(t) { if (t) { delete t.cw_draft_buf; delete t.cw_instr_buf; } }
+
+function cwToggleRefine(id, on) {
+  const t = cwTask(id);
+  if (!t) return;
+  t.cw_refine_open = on;
+  // Refine edits the draft in place, so leave any separate Edit mode.
+  if (on) t.cw_editing = false; else cwClearBuffers(t);
+  cwRerender(id);
+  if (on) {
+    const box = document.getElementById(`cw-refine-${id}`);
+    if (box) box.focus();
+  }
+}
+
+async function cwSendRefine(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  const box = document.getElementById(`cw-refine-${id}`);
+  const draftBox = document.getElementById(`cw-edit-${id}`);
+  // Read the live DOM first, but fall back to the buffer: a re-render between
+  // typing and clicking would otherwise lose the edit silently.
+  const instruction = ((box ? box.value : t.cw_instr_buf) || '').trim();
+  const edited = ((draftBox ? draftBox.value : t.cw_draft_buf) || '').trim();
+  const original = ((t.cw_draft_edited || t.cw_draft) || '').trim();
+
+  // Either an instruction or an in-place edit is enough to act on. Sending the
+  // edited draft verbatim is what makes "I rewrote it, now match this" work
+  // without the user having to describe the change in prose.
+  const changed = edited && edited !== original;
+  if (!instruction && !changed) return;
+
+  const payload = changed
+    ? (instruction ? instruction + '\n\n' : '')
+      + 'Here is my edited version. Use it as the basis for the revised draft:\n\n'
+      + edited
+    : instruction;
+
+  t.cw_refine_open = false;
+  t.cw_editing = false;
+  cwClearBuffers(t);
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork/refine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction: payload })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      t.cw_error = (data && data.error) || 'Could not continue.';
+      return cwRerender(id);
+    }
+    cwApply(t, data.action);
+    cwRerender(id);
+    cwStartPoller(id);
+  } catch (err) {
+    t.cw_error = 'Could not continue.';
+    cwRerender(id);
+  }
+}
+
+function cwCostBadge(t) {
+  // Mirrors format_cost() in cowork_runner.py. Nothing to show is the common
+  // case: the endpoint has a kill switch, and overlapping previews are not
+  // attributable because the credit counter is per user rather than per run.
+  const c = t && t.cw_cost_credits;
+  if (c === null || c === undefined || c === '') return '';
+  const n = Number(c);
+  if (!isFinite(n) || n < 0) return '';
+  const text = n === 0 ? 'no credits'
+    : n >= 1000 ? Math.round(n).toLocaleString() + ' credits'
+    : n.toFixed(1) + ' credits';
+  return `<span class="cw-foot-note" title="Credits consumed by this preview, measured from your month-to-date usage">${esc(text)}</span>`;
+}
+
+function cwHandoffBadge(t) {
+  // What happened AFTER "Open in Cowork". Absent for a preview that was never
+  // handed over, and absent whenever the lookup failed - this is additive, so
+  // no badge is the normal, correct resting state.
+  const h = t && t.cw_handoff;
+  if (!h || !h.state) return '';
+
+  let label, cls, title;
+  if (h.waiting_on_user) {
+    // The one worth interrupting for: Cowork is blocked on the user, which is
+    // how an approval prompt surfaces from the outside.
+    label = 'Cowork needs you';
+    cls = 'cw-handoff cw-handoff-waiting';
+    title = 'Cowork is waiting for your input in the web app';
+  } else if (h.state === 'running') {
+    label = 'Cowork working';
+    cls = 'cw-handoff cw-handoff-running';
+    title = 'Cowork is still working on this conversation';
+  } else if (h.state === 'completed') {
+    label = 'Cowork finished' + cwHandoffAgo(h.last_activity);
+    cls = 'cw-handoff cw-handoff-done';
+    title = 'Cowork finished this conversation';
+  } else {
+    return '';
+  }
+  return `<span class="${cls}" title="${esc(title)}">${esc(label)}</span>`;
+}
+
+function cwHandoffAgo(ms) {
+  // lastActivity is epoch milliseconds. Only ever a rough hint, so anything
+  // implausible renders as nothing rather than as a wrong number.
+  const n = Number(ms);
+  if (!isFinite(n) || n <= 0) return '';
+  const mins = Math.floor((Date.now() - n) / 60000);
+  if (mins < 0 || mins > 60 * 24 * 30) return '';
+  if (mins < 1) return ' just now';
+  if (mins < 60) return ` ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return ` ${hours}h ago`;
+  return ` ${Math.floor(hours / 24)}d ago`;
+}
+
+function cwCard(cls, badge, t, body, foot) {
+  const label = CW_LABELS[t.action_type] || 'Action';
+  return `<div class="cw-card ${cls}">
+    <div class="cw-head"><span>✦</span><span class="cw-type">${label} · Cowork</span>
+      ${badge ? `<span class="cw-badge">${badge}</span>` : ''}</div>
+    <div class="cw-body">${body}</div>
+    ${foot ? `<div class="cw-foot">${foot}</div>` : ''}</div>`;
+}
+
+function renderCoworkCard(t) {
+  if (!t.action_type || t.status === 'suggested') return '';
+  const s = t.cw_state || 'idle';
+
+  if (s === 'loading') return cwCard('', '', t,
+    `<div style="padding:10px 0 2px;color:var(--text-muted)">Checking for a previous Cowork preview…</div>`, '');
+
+  if (s === 'previewing') return cwCard('is-running', 'read-only', t,
+    `${cwIntentBlock(t, false)}
+     <div class="cw-progress"><div class="cw-spinner"></div><div style="flex:1">
+       <div id="cw-live-${t.id}">${esc((t.cw_progress && t.cw_progress.length)
+          ? t.cw_progress[t.cw_progress.length - 1]
+          : 'Cowork is reading M365')}</div>
+       <div class="cw-progress-sub" id="cw-hb-${t.id}">${esc(t.cw_elapsed || '')}</div></div></div>`,
+    `<span class="cw-foot-note">read-only preview · nothing is sent from here</span>
+     <button class="cw-btn cw-btn-ghost" data-testid="cw-stop" onclick="cwStopPreview(${t.id})">Stop</button>`);
+
+  if (s === 'failed') return cwCard('is-failed', 'failed', t,
+    `<div style="padding:8px 0 2px"><b>Cowork could not complete this.</b>
+     <div style="font-size:11px;color:var(--text-secondary);margin-top:5px">
+       ${esc(t.cw_error || t.cw_terminal_status || 'Unknown error')}<br>Nothing was sent.</div></div>
+     ${cwRedoRow(t)}`,
+    `<button class="cw-btn cw-btn-primary" onclick="cwStart(${t.id})">Retry</button>
+     ${cwRedoBtn(t)}
+     <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Dismiss</button>`);
+
+  if (s === 'ready') {
+    const draft = t.cw_draft_edited || t.cw_draft || '';
+    if (t.cw_editing) return cwCard('', 'editing', t,
+      `<textarea class="cw-draft" id="cw-edit-${t.id}" rows="8">${esc(draft)}</textarea>
+       ${cwDestBlock(t)}`,
+      `<button class="cw-btn cw-btn-go" onclick="cwSaveDraft(${t.id})">Save edit</button>
+       <button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(${t.id},false)">Cancel</button>`);
+
+    return cwCard('', 'preview', t,
+      `${cwIntentBlock(t, true)}
+       ${t.cw_redirect_text ? `<div class="cw-intent"><span class="i-label">Correction:</span> ${esc(t.cw_redirect_text)}</div>` : ''}
+       ${cwFindingBlock(t.cw_finding, t.id)}
+       ${t.cw_refine_open
+          ? `<textarea class="cw-draft" id="cw-edit-${t.id}" rows="8"
+               oninput="cwBufferDraft(${t.id},this.value)">${esc(t.cw_draft_buf !== undefined ? t.cw_draft_buf : draft)}</textarea>`
+          : `<div class="cw-draft cw-markdown">${renderCoworkMarkdown(draft)}</div>`}
+       ${cwDestBlock(t)}
+       ${cwRefineRow(t)}
+       ${cwRedoRow(t)}`,
+      t.cw_refine_open
+      // In refine mode the actions live in the refine row, so the footer only
+      // offers the way out.
+      ? `<button class="cw-btn cw-btn-ghost" onclick="cwToggleRefine(${t.id},false)">Cancel</button>`
+      : `<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(${t.id})">Copy draft</button>
+       <button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(${t.id},true)">Edit</button>
+       ${cwRefineBtn(t)}
+       ${t.cw_conversation_id ? '' : cwRedoBtn(t)}
+       <button class="cw-btn cw-btn-sec" data-testid="cw-start-over"
+         title="Abandon this conversation and research again from scratch"
+         onclick="cwStartOver(${t.id})">Start over</button>
+       ${t.cw_conversation_id ? `<a class="cw-btn cw-btn-sec cw-btn-link"
+         href="${esc('https://m365.cloud.microsoft/agents/cowork#/task/' + encodeURIComponent(t.cw_conversation_id))}"
+         target="_blank" rel="noopener noreferrer" data-testid="cw-open-cowork"
+         title="Continue this conversation in Cowork. The draft is already there, and asking it to send will send for real.">Finish in Cowork</a>` : ''}
+       <button class="cw-btn cw-btn-ghost" onclick="cwDiscard(${t.id})">Hide</button>
+       ${t.cw_draft_edited ? '<span class="cw-foot-note">edited by you</span>' : ''}${cwCostBadge(t)}${cwHandoffBadge(t)}`);
+  }
+
+  // idle
+  return cwCard('', 'not run', t,
+    `${cwIntentBlock(t, true)}
+     <div style="padding:10px 0 2px;color:var(--text-secondary)">
+       Cowork can check the latest state of this in M365, then draft the action.
+       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+         Nothing is sent from here. Open the draft in Cowork if you want to act on it.</div>
+     </div>`,
+    `<button class="cw-btn cw-btn-primary" onclick="cwStart(${t.id})">Preview with Cowork</button>
+     <span class="cw-foot-note">~45s · read-only</span>`);
+}
+
+// ── State transitions (overridden by todoiq-api.js on /todo) ───────────
+
+function cwTask(id) { return tasks.find(x => x.id === id); }
+function cwRerender(id) { if (selectedId === id) selectTask(id); renderTasks(); }
+
+function cwEditIntent(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_intent_editing = on;
+  cwRerender(id);
+}
+
+function cwSaveIntent(id) {
+  const t = cwTask(id); if (!t) return;
+  const box = document.getElementById(`cw-intent-${id}`);
+  if (box) t.coaching_text = box.value;
+  t.cw_intent_editing = false;
+  cwRerender(id);
+}
+
+function cwToggleEdit(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_editing = on;
+  cwRerender(id);
+}
+
+function cwToggleRedo(id, on) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_redo_open = on;
+  cwRerender(id);
+}
+
+// Each preview run spawns a fresh Cowork conversation, so starting over needs
+// no new machinery - only a control that says so. Redo reads as steering the
+// existing conversation, which left a clean restart inexpressible.
+function cwStartOver(id) {
+  const t = cwTask(id); if (!t) return;
+  const ok = window.confirm(
+    'Start a new Cowork conversation for this task?\n\n'
+    + 'The current draft is abandoned and research begins again from scratch, '
+    + 'with no correction carried over. The previous run stays in history, and '
+    + 'the audience you confirmed is kept.');
+  if (!ok) return;
+  t.cw_redo_open = false;
+  t.cw_editing = false;
+  cwStart(id);
+}
+
+function cwSaveDraft(id) {
+  const t = cwTask(id); if (!t) return;
+  const box = document.getElementById(`cw-edit-${id}`);
+  if (box) t.cw_draft_edited = box.value;
+  t.cw_editing = false;
+  cwRerender(id);
+}
+
+function cwCopyDraft(id) {
+  const t = cwTask(id); if (!t) return;
+  const text = t.cw_draft_edited || t.cw_draft || '';
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('Draft copied')).catch(() => {});
+  }
+}
+
+// There is no delete route — hiding is client side only, so the task_actions
+// audit chain stays intact.
+function cwDiscard(id) {
+  const t = cwTask(id); if (!t) return;
+  t.cw_state = 'idle';
+  t.cw_editing = false;
+  t.cw_redo_open = false;
+  cwRerender(id);
+}
+
+function cwStart(id, isRedo) {
+  const t = cwTask(id); if (!t) return;
+  if (isRedo) {
+    const box = document.getElementById(`cw-redo-${id}`);
+    const text = box ? box.value.trim() : '';
+    t.cw_redirect_text = text;
+  }
+  t.cw_redo_open = false;
+  t.cw_editing = false;
+  t.cw_state = 'previewing';
+  cwRerender(id);
+  // Standalone-mock behaviour only; todoiq-api.js replaces this wholesale.
+  setTimeout(() => {
+    const tt = cwTask(id);
+    if (!tt || tt.cw_state !== 'previewing') return;
+    tt.cw_state = 'ready';
+    if (!tt.cw_draft) {
+      tt.cw_finding = 'Checked Teams and email for recent activity on this task.';
+      tt.cw_draft = '(Cowork would draft the message here, grounded in the live M365 artifact.)';
+    }
+    cwRerender(id);
+  }, 2500);
+}
+
 </script>
 </body>
 </html>

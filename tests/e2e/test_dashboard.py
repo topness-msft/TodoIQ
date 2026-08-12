@@ -1,4 +1,4 @@
-"""E2E tests for the TodoNess dashboard."""
+"""E2E tests for the Coworker dashboard."""
 
 import os
 import re
@@ -24,10 +24,17 @@ class TestDashboardLoads:
     """Test that the dashboard loads and shows the basic structure."""
 
     def test_homepage_renders(self, page: Page, base_url):
-        _step('Navigate to TodoNess dashboard')
+        _step('Navigate to Coworker dashboard')
         page.goto(base_url + '/')
-        _step('Verify page title contains TodoNess')
-        expect(page).to_have_title(re.compile('TodoNess'))
+        _step('Verify page title and app brand are Coworker')
+        expect(page).to_have_title(re.compile('Coworker'))
+        expect(page.locator('.app-title')).to_have_text('Coworker')
+        logo = page.locator('.riveter-logo')
+        expect(logo).to_be_visible()
+        expect(logo).to_have_attribute('src', '/static/img/riveter.png')
+        assert page.evaluate(
+            "() => document.querySelector('.riveter-logo').naturalWidth"
+        ) > 0
         _screenshot(page, '01-dashboard-empty')
 
     def test_input_bar_visible(self, page: Page, base_url):
@@ -36,6 +43,11 @@ class TestDashboardLoads:
         _step('Verify task input bar is visible')
         input_bar = page.locator('#task-input, input[placeholder*="Add a task"]')
         expect(input_bar).to_be_visible()
+        input_box = page.locator('.input-bar').bounding_box()
+        panel_box = page.locator('.left-panel').bounding_box()
+        assert input_box and panel_box
+        assert abs((input_box['x'] + input_box['width'])
+                   - (panel_box['x'] + panel_box['width'])) <= 2
         _screenshot(page, '02-input-bar')
 
     def test_empty_state(self, page: Page, base_url):

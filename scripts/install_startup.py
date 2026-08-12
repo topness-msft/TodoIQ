@@ -3,11 +3,16 @@
 import subprocess
 import sys
 import os
+import time
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRAY_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "todoness_tray.pyw")
 TASK_NAME = "TodoNess"
+
+# Run from anywhere; the stale-PID guard lives under src/.
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 def ensure_dependencies():
@@ -74,17 +79,52 @@ Register-ScheduledTask -TaskName "{TASK_NAME}" -Action $action -Trigger $trigger
 
 
 def start_tray_now(pythonw):
-    """Start the tray application immediately."""
+    """Start the tray application immediately, and verify it actually came up.
+
+    Two things used to go wrong together. A deploy stops the old tray with a
+    forced kill, so it never clears ``data/todoness.pid``; the new tray then
+    sees that file, assumes another instance owns the port, and exits silently.
+    This function meanwhile printed success unconditionally.
+
+    The result was three consecutive deploys that reported "Done." while nothing
+    was listening. Clear a stale lock first, then confirm the child survived
+    rather than assuming it.
+    """
+    pidfile = os.path.join(PROJECT_ROOT, "data", "todoness.pid")
+    try:
+        from src.services.instance_guard import clear_stale_pidfile
+
+        if clear_stale_pidfile(pidfile):
+            print("  Cleared a stale PID file (the recorded process is gone).")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Note: could not check the PID file ({exc}).")
+
     print("Starting TodoNess tray app...")
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [pythonw, TRAY_SCRIPT],
             cwd=PROJECT_ROOT,
             creationflags=subprocess.DETACHED_PROCESS,
         )
-        print("TodoNess tray app started.")
     except Exception as e:
         print(f"ERROR: Failed to start tray app: {e}")
+        return False
+
+    # A silent exit on the single-instance guard is fast, so a short wait is
+    # enough to tell "running" from "gave up immediately".
+    for _ in range(20):
+        time.sleep(0.25)
+        if proc.poll() is not None:
+            print(
+                f"ERROR: The tray exited immediately (code {proc.returncode}).\n"
+                f"       Another instance may hold port 8766, or "
+                f"{pidfile} may name a live process.\n"
+                f"       Check data/todoness.log for details."
+            )
+            return False
+
+    print("TodoNess tray app started.")
+    return True
 
 
 def main():

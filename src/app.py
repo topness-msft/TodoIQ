@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 import tornado.ioloop
 import tornado.web
@@ -18,8 +19,18 @@ from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
-from .models import get_expired_snoozed, unsnooze_task, get_task
+from .handlers.cowork import (
+    CoworkDestinationHandler,
+    CoworkAnswerHandler,
+    CoworkHandler,
+    CoworkRefineHandler,
+)
+from .models import (
+    get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
+)
 from .services.claude_runner import run_copilot
+from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
+from .services.workspace_settings import get_workspace_settings
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +161,10 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/action", TaskActionHandler),
             (r"/api/tasks/(\d+)/refresh", TaskRefreshHandler),
             (r"/api/tasks/(\d+)/skill", TaskSkillHandler),
+            (r"/api/tasks/(\d+)/cowork", CoworkHandler),
+            (r"/api/tasks/(\d+)/cowork/refine", CoworkRefineHandler),
+            (r"/api/tasks/(\d+)/cowork/answer", CoworkAnswerHandler),
+            (r"/api/tasks/(\d+)/cowork/destination", CoworkDestinationHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
             (r"/api/runner-status", RunnerStatusHandler),
@@ -214,9 +229,40 @@ def start_server(port=8766):
 
     _recover_stuck_parses()
 
+    # A preview left mid-flight by a restart would otherwise sit in 'previewing'
+    # forever, and that task could never be previewed again.
+    stranded = recover_stuck_previews()
+    if stranded:
+        logger.info(f"Startup recovery: failed {stranded} interrupted Cowork preview(s)")
+
     app = make_app()
     app.listen(port)
     logger.info(f"TodoNess running at http://localhost:{port}")
+
+    workspace = get_workspace_settings()
+    if workspace.get("root"):
+        logger.info(
+            "Task workspace configured%s: %s",
+            "" if workspace.get("enabled") else " (disabled)",
+            workspace["root"],
+        )
+
+    # CMP resolution may make a network call. Warm it away from Tornado's
+    # IOLoop; request handlers only read the eventually-consistent cache.
+    threading.Thread(
+        target=resolve_cowork_island,
+        daemon=True,
+        name="cowork-island-warmup",
+    ).start()
+
+    # The write-barrier precheck costs ~5.5s cold (CLI import plus an MSAL
+    # silent refresh) and ~7ms warm. Warm it here so the first preview does not
+    # pay that on the request path.
+    threading.Thread(
+        target=warm_barrier_precheck,
+        daemon=True,
+        name="cowork-barrier-precheck-warmup",
+    ).start()
 
     # Auto-sync every 30 minutes
     sync_callback = tornado.ioloop.PeriodicCallback(_periodic_sync, SYNC_INTERVAL_MS)

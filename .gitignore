@@ -15,6 +15,12 @@ test-runs/
 # Runtime data — DB, logs, PID, test artifacts
 data/
 
+# Visual-test evidence (screenshots)
+temp/
+
+# Design hook cache
+.impeccable/
+
 # User-specific files (contain local paths / permission grants)
 *.lnk
 .claude/settings.local.json

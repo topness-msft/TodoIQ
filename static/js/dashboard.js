@@ -566,7 +566,14 @@ function renderSection(sectionId, sectionTasks) {
             }
         }
         var parseHtml = parseStatusIcon(task.parse_status);
-        var enrichedHtml = task.skill_output ? '<span class="enriched-icon" title="Skill enriched">\u26A1</span>' : '';
+        var enrichedHtml = '';
+        if (task.cw_state === 'previewing') {
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working">\u2726</span>';
+        } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
+            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update">\u2726</span>';
+        } else if (task.skill_output) {
+            enrichedHtml = '<span class="enriched-icon" title="Skill enriched">\u26A1</span>';
+        }
         var waitingIconHtml = waitingActivityIcon(task);
         var suggestionBadgeHtml = suggestionCheckBadge(task);
 
@@ -612,7 +619,13 @@ function renderSection(sectionId, sectionTasks) {
             + '<div class="task-row-content">'
             + '<div class="task-row-top">'
             + (task.is_quick_hit ? '<span class="quick-hit-icon" title="Quick hit">&#9201;</span>' : '')
-            + '<span class="task-source-icon">' + sourceTypeIcon(task.source_type) + '</span>'
+            // Carries the task id. It used to live on the priority glyph, and
+            // went away with it; the id is how Phil refers to tasks when
+            // debugging, so it needs a home. Paired with the source type,
+            // which is what this icon already means.
+            + '<span class="task-source-icon" title="Task #' + task.id + ' \u00b7 '
+            + escapeHtml(task.source_type || 'manual') + '">'
+            + sourceTypeIcon(task.source_type) + '</span>'
             + '<span class="task-title">' + escapeHtml(task.title) + '</span>'
             + waitingIconHtml
             + suggestionBadgeHtml
@@ -632,6 +645,7 @@ function renderSection(sectionId, sectionTasks) {
 // ── Select Task ────────────────────────────────────────────────────────
 function selectTask(taskId) {
     selectedTaskId = taskId;
+    cwLoad(taskId, true);
 
     var rows = document.querySelectorAll('.task-row');
     rows.forEach(function(row) {
@@ -647,20 +661,61 @@ function selectTask(taskId) {
         .then(function(data) {
             if (data.task) {
                 data.task._contexts = data.contexts || [];
+                // Reconcile the list with what the server actually has. Parsing
+                // happens in an external process writing straight to SQLite, so
+                // no task_updated broadcast fires and pollParseStatus only runs
+                // while the LOCAL array still thinks something is pending. Once
+                // it drifts it never self-corrects, and this fetch used to feed
+                // the detail pane alone -- so a parsed task showed its new title
+                // in the pane beside its pre-parse title in the list.
+                var existing = tasks.find(function(t) { return t.id === taskId; });
+                if (existing && _listFieldsDiffer(existing, data.task)) {
+                    Object.assign(existing, data.task);
+                    renderTaskList();   // re-applies .selected from selectedTaskId
+                }
                 renderDetailPane(data.task);
             }
         })
         .catch(function(err) { console.error('Failed to fetch task detail:', err); });
 }
 
+// Only the fields a row actually shows. Re-rendering the whole list on every
+// click would churn the DOM and lose scroll position for no visible gain.
+var _LIST_FIELDS = ['title', 'description', 'status', 'priority', 'due_date',
+                    'parse_status', 'action_type', 'skill_output', 'snooze_until',
+                    'error_message'];
+
+function _listFieldsDiffer(a, b) {
+    for (var i = 0; i < _LIST_FIELDS.length; i++) {
+        var k = _LIST_FIELDS[i];
+        if ((a[k] || '') !== (b[k] || '')) return true;
+    }
+    return false;
+}
+
+// Any field the user could be mid-edit in. Deliberately behavioural rather than
+// a list of ids and classes: the previous version checked for a `coaching-edit`
+// class that no markup actually carried, so the guard silently stopped covering
+// the intent textarea and background polling threw the user out of edit mode
+// every few seconds. A shape test cannot rot the same way.
+function _isTextEntry(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    var type = (el.getAttribute('type') || 'text').toLowerCase();
+    return ['text', 'search', 'url', 'email', 'tel', 'number', 'password',
+            'date', 'datetime-local', 'time'].indexOf(type) !== -1;
+}
+
 // ── Render Detail Pane ─────────────────────────────────────────────────
 function renderDetailPane(task) {
     var pane = document.getElementById('detail-pane');
 
-    // Skip re-render if user is typing in notes or editing title — avoids focus loss
+    // Skip re-render while the user is typing in this pane, then catch up on
+    // blur so the deferral never silently drops an update.
     var activeEl = document.activeElement;
-    if (activeEl && pane && pane.contains(activeEl) &&
-        (activeEl.id === 'notes-textarea' || activeEl.id === 'notes-add-input' || activeEl.classList.contains('title-edit-input') || activeEl.classList.contains('coaching-edit'))) {
+    if (activeEl && pane && pane.contains(activeEl) && _isTextEntry(activeEl)) {
         // Stash the task for a deferred re-render after blur
         pane._pendingTask = task;
         if (!pane._deferredRender) {
@@ -760,11 +815,13 @@ function renderDetailPane(task) {
         html += renderSuggestionCheckCard(task);
     }
 
+    html += renderCoworkCard(task);
+
     // User Notes
     html += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
         + '<div class="notes-add-row">'
-        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note... (use @WorkIQ to ask a question)" '
+        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Coworker)" '
         + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTimestampedNote(' + task.id + ')}">'
         + '<button class="btn btn-sm notes-add-btn" onclick="addTimestampedNote(' + task.id + ')">+</button>'
         + '</div>'
@@ -773,8 +830,6 @@ function renderDetailPane(task) {
         + escapeHtml(task.user_notes || '')
         + '</textarea>'
         + '</div>';
-
-    html += renderSkillButtons(task);
 
     // Error message box
     if (task.error_message && task.parse_status === 'error') {
@@ -788,64 +843,6 @@ function renderDetailPane(task) {
             + '</div>';
     }
 
-    // Skill Output — prefer context entries over the summary field
-    var skillContexts = task._contexts || [];
-    if (skillContexts.length > 0 || task.skill_output) {
-        html += '<div class="skill-output-card">'
-            + '<div class="skill-output-header">'
-            + '<div class="skill-output-title">\u26A1 Skill Output</div>'
-            + '</div>';
-        if (skillContexts.length > 0) {
-            skillContexts.forEach(function(ctx) {
-                html += '<div class="skill-output-text">' + renderRichText(ctx.content, task.key_people) + '</div>';
-            });
-        } else {
-            html += '<div class="skill-output-text">' + renderRichText(task.skill_output, task.key_people) + '</div>';
-        }
-        if (task.suggestion_refreshed_at) {
-            html += '<div class="skill-output-updated">Updated ' + timeAgo(task.suggestion_refreshed_at) + '</div>';
-        }
-        html += '</div>';
-    }
-
-    // Cowork Prompt — separate card from skill output
-    if (task.cowork_prompt) {
-        html += '<div class="skill-output-card">'
-            + '<div class="skill-output-header">'
-            + '<div class="skill-output-title">\uD83E\uDD16 Cowork Prompt</div>'
-            + '</div>'
-            + '<div class="skill-output-text">' + renderRichText(task.cowork_prompt, task.key_people) + '</div>'
-            + '</div>';
-    }
-
-    // AI Coaching
-    if (task.coaching_text) {
-        var isStale = isCoachingStale(task);
-        html += '<div class="coaching-card' + (isStale ? ' coaching-stale' : '') + '">'
-            + '<div class="coaching-header">'
-            + '<div class="coaching-title">AI Coaching'
-            + '<button class="btn-edit-inline" onclick="toggleCoachingEdit(' + task.id + ')" title="Edit coaching">&#9998;</button>'
-            + '</div>';
-        if (isStale) {
-            html += '<span class="coaching-stale-badge" title="Task has changed since last AI refresh">'
-                + '&#9888; May be outdated'
-                + '</span>';
-        }
-        html += '</div>'
-            + '<div id="coaching-display-' + task.id + '" class="coaching-text">' + renderRichText(task.coaching_text, task.key_people) + '</div>'
-            + '<textarea id="coaching-edit-' + task.id + '" class="notes-textarea" style="display:none" '
-            + 'onblur="saveCoaching(' + task.id + ')">' + escapeHtml(task.coaching_text) + '</textarea>';
-        if (task.suggestion_refreshed_at) {
-            html += '<div class="coaching-updated">Updated ' + timeAgo(task.suggestion_refreshed_at) + '</div>';
-        }
-        html += '</div>';
-    } else if (task.parse_status === 'parsed') {
-        // No coaching yet — suggest refreshing
-        html += '<div class="coaching-card coaching-empty">'
-            + '<div class="coaching-title">AI Coaching</div>'
-            + '<div class="coaching-text" style="color:#9e9e9e">No coaching yet. Click Refresh to get AI suggestions.</div>'
-            + '</div>';
-    }
 
     // Source snippet
     if (task.source_snippet) {
@@ -866,6 +863,7 @@ function renderDetailPane(task) {
         + '</div>';
 
     pane.innerHTML = html;
+    cwInitFindingToggle(task.id);
 }
 
 function clearDetailPane() {
@@ -1512,7 +1510,9 @@ function doAction(taskId, action, status) {
     var body = { action: action };
     if (status) body.status = status;
 
-    fetch('/api/tasks/' + taskId + '/action', {
+    // Returned so callers can sequence follow-up work, such as advancing the
+    // keyboard selection once the list has re-rendered.
+    return fetch('/api/tasks/' + taskId + '/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1808,8 +1808,8 @@ function renderSnoozeButton(task) {
         + '<div class="snooze-custom-row">'
         + '<input type="date" class="snooze-date-input" id="snooze-date-' + taskId + '"'
         + (defaultDate ? ' value="' + defaultDate + '"' : '')
-        + ' onclick="event.stopPropagation()">'
-        + '<input type="time" class="snooze-time-input" id="snooze-time-' + taskId + '" value="09:00" onclick="event.stopPropagation()">'
+        + ' onclick="event.stopPropagation(); openNativePicker(this)">'
+        + '<input type="time" class="snooze-time-input" id="snooze-time-' + taskId + '" value="09:00" onclick="event.stopPropagation(); openNativePicker(this)">'
         + '<button class="snooze-go-btn" onclick="event.stopPropagation(); doSnoozeCustom(' + taskId + ')">Go</button>'
         + '</div>'
         + '</div>'
@@ -1869,31 +1869,66 @@ function doSnoozeCustom(taskId) {
     doSnooze(taskId, { snoozed_until: d.toISOString() });
 }
 
-function renderWeekdaySnoozeRow(taskId) {
-    var now = new Date();
-    var day = now.getDay(); // 0=Sun..6=Sat
-    var buttons = '';
-    var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+/**
+ * The next `count` weekdays after `now`, as calendar-day offsets.
+ *
+ * Weekends are skipped: the row is labelled "9 AM:" and a Saturday morning
+ * reminder is not what it is for. Offsets are calendar days so that
+ * `snoozeToDay`'s `setDate()` arithmetic stays DST-safe.
+ */
+function nextWeekdaySnoozeDays(now, count) {
+    var days = [];
+    var cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var offset = 0;
+    while (days.length < count && offset < 14) {
+        offset++;
+        cursor.setDate(cursor.getDate() + 1);
+        var dow = cursor.getDay();
+        if (dow === 0 || dow === 6) continue;
+        days.push({ offset: offset, date: new Date(cursor.getTime()) });
+    }
+    return days;
+}
 
-    if (day >= 1 && day <= 4) {
-        // Mon-Thu: show buttons for tomorrow through Friday
-        for (var offset = 1; offset <= (5 - day); offset++) {
-            var target = new Date(now);
-            target.setDate(target.getDate() + offset);
-            var label = dayNames[target.getDay()];
-            var tomorrowClass = offset === 1 ? ' snooze-weekday-tomorrow' : '';
-            buttons += '<button class="snooze-weekday-btn' + tomorrowClass + '" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + offset + ')">' + label + '</button>';
-        }
-    } else {
-        // Fri/Sat/Sun: show Mon button
-        var daysToMon = day === 0 ? 1 : (8 - day);
-        buttons += '<button class="snooze-weekday-btn snooze-weekday-tomorrow" onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + daysToMon + ')">Mon</button>';
+function renderWeekdaySnoozeRow(taskId, now) {
+    now = now || new Date();
+    var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var days = nextWeekdaySnoozeDays(now, 4);
+    var buttons = '';
+
+    for (var i = 0; i < days.length; i++) {
+        var day = days[i];
+        // The soonest option stays emphasised, whichever weekday it lands on.
+        var leadClass = i === 0 ? ' snooze-weekday-tomorrow' : '';
+        var title = day.date.toLocaleDateString('en-US', {
+            weekday: 'long', month: 'short', day: 'numeric'
+        });
+        buttons += '<button class="snooze-weekday-btn' + leadClass + '"'
+            + ' title="' + escapeHtml(title) + '"'
+            + ' onclick="event.stopPropagation(); snoozeToDay(' + taskId + ',' + day.offset + ')">'
+            + dayNames[day.date.getDay()] + '</button>';
     }
 
     return '<div class="snooze-weekday-row">'
         + '<span class="snooze-weekday-label">9 AM:</span>'
         + buttons
         + '</div>';
+}
+
+/**
+ * Open a native date/time picker from a click anywhere on the field.
+ *
+ * Without this, `<input type="date">` only drops its calendar when the small
+ * icon is hit; clicking the text puts a caret in `mm/dd/yyyy` and the date has
+ * to be typed. `showPicker` needs user activation and is absent on older
+ * browsers, so both failure modes fall back to plain typing.
+ */
+function openNativePicker(el) {
+    try {
+        if (el && typeof el.showPicker === 'function') el.showPicker();
+    } catch (err) {
+        /* no user activation, or unsupported - typing still works */
+    }
 }
 
 function snoozeToDay(taskId, daysOffset) {
@@ -2338,14 +2373,19 @@ function formatDate(dateStr) {
 }
 
 function priorityDot(priority, taskId) {
-    var p = priority || 3;
-    var balls = { 1: '\u25CF', 2: '\u25D5', 3: '\u25D1', 4: '\u25D4', 5: '\u25CB' };
-    var titleAttr = taskId ? ' title="Task #' + taskId + '"' : '';
-    return '<span class="priority-dot p' + p + '"' + titleAttr + '>' + balls[p] + '</span>';
+    // Harvey balls removed at Phil's request. Priority is still carried by the
+    // P1-P5 pill in the detail pane, so nothing is lost; the list just stops
+    // encoding it in a glyph most people have to decode.
+    return '';
 }
 
 function parseStatusIcon(parseStatus) {
     var status = parseStatus || 'parsed';
+    // Only states that mean "something is still owed" are worth a row-level
+    // indicator. A green tick on every parsed task is the majority case, so it
+    // carries no information and just adds noise to scan past. An error still
+    // shows, because that one IS actionable.
+    if (status === 'parsed') return '';
     return '<span class="parse-icon"><span class="parse-indicator ' + status + '"><span class="parse-ring"></span></span></span>';
 }
 
@@ -2531,6 +2571,12 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+function escapeAttr(str) {
+    return escapeHtml(String(str || ''))
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function truncate(str, maxLen) {
     if (!str) return '';
     return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
@@ -2643,12 +2689,6 @@ function fetchSyncStatus() {
 function updateSyncUI(data) {
     var btn = document.getElementById('sync-btn');
     var statusText = document.getElementById('sync-status-text');
-    var autoSyncCheckbox = document.getElementById('auto-sync-checkbox');
-
-    // Update auto-sync toggle state
-    if (autoSyncCheckbox && data.auto_sync_enabled !== undefined) {
-        autoSyncCheckbox.checked = data.auto_sync_enabled;
-    }
 
     if (data.sync_running) {
         btn.classList.add('syncing');
@@ -2733,22 +2773,6 @@ function startSyncWatcher() {
     }, 30000);
 }
 
-function toggleAutoSync(enabled) {
-    fetch('/api/sync-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ auto_sync: enabled })
-    })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-        var checkbox = document.getElementById('auto-sync-checkbox');
-        if (checkbox && data.auto_sync_enabled !== undefined) {
-            checkbox.checked = data.auto_sync_enabled;
-        }
-    })
-    .catch(function(err) { console.error('Failed to toggle auto-sync:', err); });
-}
-
 function requestSync() {
     var btn = document.getElementById('sync-btn');
     if (btn.classList.contains('syncing')) return;
@@ -2776,80 +2800,1015 @@ function requestSync() {
     });
 }
 
-// ── Skill Buttons ──────────────────────────────────────────────────────
-function renderSkillButtons(task) {
-    var actionType = task.action_type || 'general';
-    if (actionType === 'general') return '';
+// ── Cowork action card ─────────────────────────────────────────────────
+//
+// PHASE 1 IS PREVIEW ONLY. There is no execute route on the server, so this
+// card must never render a control that implies something was or will be sent.
+// The user copies the draft and sends it themselves.
 
-    var skillMap = {
-        'respond-email': { label: 'Draft Reply', skill: 'respond-email', icon: '\u2709' },
-        'schedule-meeting': { label: 'Cowork Prompt', skill: 'cowork-prompt', icon: '\uD83E\uDD16' },
-        'follow-up': { label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' },
-        'awaiting-response': { label: 'Draft Follow-up', skill: 'follow-up', icon: '\u231B' },
-        'prepare': { label: 'Prep Notes', skill: 'prepare', icon: '\uD83D\uDCCB' },
-        'teams-message': { label: 'Draft Message', skill: 'teams-message', icon: '\uD83D\uDCAC' }
-    };
+var CW_LABELS = {
+    'respond-email':     'Reply',
+    'schedule-meeting':  'Scheduling',
+    'follow-up':         'Follow-up',
+    'awaiting-response': 'Follow-up',
+    'teams-message':     'Message',
+    'prepare':           'Prep',
+    'review-document':   'Review',
+    'general':           'Action'
+};
 
-    var buttons = [];
-    var primary = skillMap[actionType];
+var CW_DEST = {
+    'one_to_one': { risky: false, label: '1:1 Teams chat',
+                    note: 'Linear conversation, so a reply lands in the same thread.' },
+    'group':      { risky: true,  label: 'Group Teams chat',
+                    note: 'Everyone in the chat would see this.' },
+    'meeting':    { risky: true,  label: 'Meeting chat',
+                    note: 'Everyone invited to the meeting would see this.' },
+    'channel':    { risky: true,  label: 'Team channel',
+                    note: 'This would be a public post to the whole team.' },
+    'none':       { risky: false, label: 'No delivery destination selected',
+                    note: 'Choose Teams or email before any future send action.' },
+    'unknown':    { risky: true,  label: 'Unrecognised source',
+                    note: 'The audience could not be determined from the source link.' }
+};
 
-    // Add primary button if mapped (teams-message only for chat source)
-    if (primary) {
-        if (actionType === 'teams-message' && task.source_type !== 'chat') {
-            // Skip teams-message if not from chat source
-        } else {
-            buttons.push(primary);
-        }
-    }
+// Transport, not audience shape. Kept deliberately orthogonal to CW_DEST.
+var CW_CHANNEL = {
+    'teams': { label: 'Teams', note: 'Direct Teams message to this recipient.' },
+    'email': { label: 'Email', note: 'Email to this recipient.' }
+};
 
-    // Add "Find Times" as secondary for schedule-meeting tasks
-    if (actionType === 'schedule-meeting') {
-        buttons.push({ label: 'Find Times', skill: 'schedule-meeting', icon: '\uD83D\uDCC5' });
-    }
+// Kinds derived from a Teams source already imply the Teams transport, so their
+// own note stays accurate. Anything else needs the transport spelled out.
+var CW_KIND_CHANNEL = {
+    'one_to_one': 'teams', 'group': 'teams', 'meeting': 'teams', 'channel': 'teams'
+};
 
-    // Add "Draft Follow-up" as secondary if not already primary
-    // (awaiting-response already uses follow-up as primary, so skip secondary)
-    if (actionType !== 'follow-up' && actionType !== 'awaiting-response') {
-        buttons.push({ label: 'Draft Follow-up', skill: 'follow-up', icon: '\uD83D\uDD04' });
-    }
+// A scheduling task ends in a calendar invite, so the reply-mechanics note
+// ("a reply lands in the same thread") reads wrong beside it. The AUDIENCE
+// binding still stands — it is the safety guarantee, and the invite goes to the
+// same people the message would. Only the mechanics sentence changes, and only
+// where there is no broadcast warning to state instead.
+var CW_ACTION_NOTE = {
+    'schedule-meeting': 'Times are proposed here; the invite would go to the '
+        + 'same person.'
+};
 
-    if (!buttons.length) return '';
+// taskId -> action row, or null once we know there is no preview yet.
+var _cwActions = {};
+var _cwLoading = {};
+var _cwEditing = {};
+var _cwRedo = {};
+// Refine = one more turn on the SAME Cowork conversation, keeping the research
+// it already did. Distinct from Redo, which starts a fresh conversation.
+var _cwRefine = {};
+// Live, unsaved textarea contents, keyed by task id.
+//
+// A WebSocket `task_updated` calls renderDetailPane, which rebuilds the card
+// from scratch — silently discarding whatever the user had typed into the draft
+// or instruction box. That really happened: an in-place draft edit vanished and
+// only the instruction reached Cowork. Buffering on every keystroke means a
+// re-render restores the edit instead of destroying it.
+var _cwDraftBuf = {};
+var _cwInstrBuf = {};
+var _cwAnswerBuf = {};
+var _cwAnswerSending = {};
 
-    var html = '<div class="skill-buttons-card"><div class="detail-label">Actions</div><div class="skill-buttons-row">';
-    buttons.forEach(function(btn) {
-        var skillKey = task.id + ':' + btn.skill;
-        var isRunning = _runningSkills[skillKey];
-        var runningClass = isRunning ? ' running' : '';
-        var iconHtml = isRunning
-            ? '<span class="skill-spinner"></span>'
-            : '<span class="skill-btn-icon">' + btn.icon + '</span>';
-        html += '<button class="btn-skill' + runningClass + '" data-skill="' + btn.skill + '" data-task-id="' + task.id + '" onclick="runSkill(' + task.id + ', \'' + btn.skill + '\')">'
-            + iconHtml + ' ' + escapeHtml(btn.label)
-            + '</button>';
-    });
-    html += '</div></div>';
-    return html;
+function cwBufferDraft(taskId, value) { _cwDraftBuf[taskId] = value; }
+function cwBufferInstr(taskId, value) { _cwInstrBuf[taskId] = value; }
+function cwBufferAnswer(taskId, questionId, value) {
+    if (!_cwAnswerBuf[taskId]) _cwAnswerBuf[taskId] = {};
+    _cwAnswerBuf[taskId][questionId] = value;
 }
 
-function runSkill(taskId, skillName) {
-    var skillKey = taskId + ':' + skillName;
-    if (_runningSkills[skillKey]) return;
+function cwClearBuffers(taskId) {
+    delete _cwDraftBuf[taskId];
+    delete _cwInstrBuf[taskId];
+    delete _cwAnswerBuf[taskId];
+}
+var _cwPollers = {};
+var _cwStartedAt = {};
 
-    fetch('/api/tasks/' + taskId + '/skill', {
+var CW_POLL_MS = 3000;
+var CW_POLL_MAX = 235;   // ~700s, just past the runner's 660s timeout
+
+function cwCurrentDraft(a) {
+    if (!a) return '';
+    return (a.draft_edited != null && a.draft_edited !== '') ? a.draft_edited : (a.draft || '');
+}
+
+function cwElapsed(taskId, action) {
+    var started = _cwStartedAt[taskId];
+    if (!started && action && action.created_at) {
+        var t = Date.parse(action.created_at);
+        if (!isNaN(t)) started = t;
+    }
+    if (!started) return '';
+    var secs = Math.max(0, Math.round((Date.now() - started) / 1000));
+    return Math.floor(secs / 60) + ':' + ('0' + (secs % 60)).slice(-2) + ' elapsed';
+}
+
+function cwShell(cls, badge, task, body, foot) {
+    var label = CW_LABELS[task.action_type] || 'Action';
+    return '<div class="cw-card ' + cls + '">'
+        + '<div class="cw-head">'
+        // Referenced rather than inlined: the asset is gradient-based, and its
+        // <defs> ids would collide with every other copy on the page.
+        + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
+        + '<span class="cw-type">' + label + ' &middot; Coworker</span>'
+        + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
+        + '</div>'
+        + '<div class="cw-body">' + body + '</div>'
+        + (foot ? '<div class="cw-foot">' + foot + '</div>' : '')
+        + '</div>';
+}
+
+// The intent line is WorkIQ's suggested next action. It remains editable here
+// because retiring the AI Coaching card would otherwise remove the only way to
+// correct generic boilerplate BEFORE Cowork runs. It writes coaching_text
+// through the existing PUT /api/tasks/<id>, reusing saveCoaching().
+function cwIntentBlock(task, editable) {
+    var intent = task.coaching_text || '';
+    if (!intent) return '';
+    return '<div class="cw-intent">'
+        + '<span class="i-label">Asking Coworker to:</span> '
+        + '<span id="coaching-display-' + task.id + '">' + escapeHtml(intent) + '</span>'
+        + (editable
+            ? '<span class="i-edit" onclick="toggleCoachingEdit(' + task.id + ')">Change</span>'
+            : '')
+        + '<textarea id="coaching-edit-' + task.id + '" class="cw-intent-box" rows="3" '
+        + 'style="display:none" onblur="saveCoaching(' + task.id + ')">'
+        + escapeHtml(intent) + '</textarea>'
+        + '</div>';
+}
+
+// The audience a draft is written for. This is deliberately separate from the
+// Cowork conversation id: one is who would receive the message, the other is
+// which research session produced it.
+function cwOpenLink(a, label) {
+    // One place that knows the deep-link shape, so the running card and the
+    // finished card cannot drift apart.
+    if (!a || !a.conversation_id) return '';
+    return '<a class="cw-btn cw-btn-sec cw-btn-link" href="'
+        + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
+          + encodeURIComponent(a.conversation_id))
+        + '" target="_blank" rel="noopener noreferrer" '
+        + 'data-testid="cw-open-cowork" '
+        // The read-only instruction is scoped to the drafting turn, and the
+        // barrier travels in OUR request rather than with the conversation.
+        // Verified: a follow-up "send that now" made Cowork call PostMessage,
+        // blocked only by our own config. So the handoff really is live, and
+        // the button should say so.
+        + 'title="Continue this conversation in Cowork. The draft '
+        + 'is already there, and asking it to send will send for '
+        + 'real.">' + escapeHtml(label) + '</a>';
+}
+
+function cwDestBlock(action, task) {
+    var d = CW_DEST[action.destination_kind] || CW_DEST['unknown'];
+    var conv = action.conversation_id || '';
+    var risky = d.risky || !!action.is_broadcast;
+    var confirmed = !!action.destination_confirmed_at;
+    var display = action.destination_display || action.destination_ref || d.label;
+    var chan = CW_CHANNEL[action.delivery_channel] || null;
+    // A channel with no recipient is a voice preference, not a destination. Its
+    // note says "...to this recipient", so applying it where none is bound both
+    // contradicts the line above it and displaces the standing instruction to
+    // pick one. The instruction is a safety surface; it outranks the preference.
+    var hasRecipient = !!(action.destination_ref || action.destination_display);
+    // A broadcast warning outranks any transport note — never trade it away.
+    var note = (!risky && chan && hasRecipient
+        && action.delivery_channel !== CW_KIND_CHANNEL[action.destination_kind])
+        ? chan.note : d.note;
+    // ...and it outranks the action-specific note too. Only a non-broadcast
+    // destination swaps in the scheduling wording; a group chat still has to
+    // say everyone would see it.
+    var actionNote = task && CW_ACTION_NOTE[task.action_type];
+    if (!risky && actionNote) note = actionNote;
+    // Link straight to the conversation this is drafted for, so checking who
+    // is actually in it is one click rather than a hunt through Teams.
+    var srcUrl = (task && task.source_url) || '';
+    var openLink = srcUrl
+        ? '<a class="cw-dest-open" href="' + cwEscapeAttr(srcUrl) + '" '
+          + 'target="_blank" rel="noopener noreferrer" '
+          + 'data-testid="dest-open">Open chat</a>'
+        : '';
+    return '<div class="cw-dest' + (risky ? ' is-risky' : '') + '">'
+        + '<span class="d-icon">' + (risky ? '&#9888;' : '&#8627;') + '</span>'
+        + '<span><b>Drafted for:</b> '
+        + '<span data-testid="' + (risky ? 'dest-risky' : 'dest-safe') + '">'
+        + '<span data-testid="dest-status">' + escapeHtml(display) + '</span></span>'
+        + (chan ? '<span class="cw-dest-chan" data-testid="dest-channel-chip">'
+            + escapeHtml(chan.label) + '</span>' : '')
+        + openLink
+        + '<span class="d-note" data-testid="dest-note">' + escapeHtml(note) + '</span>'
+        + '<span class="cw-dest-actions">'
+        + (confirmed
+            ? '<span class="cw-dest-badge" data-testid="dest-confirmed">&#10003; audience confirmed</span>'
+            : '')
+        + '<button class="cw-dest-btn" type="button" data-testid="dest-change-btn" '
+        + 'onclick="cwOpenDestPicker(' + action.task_id + ')">'
+        + (confirmed ? 'Change' : 'Set destination') + '</button>'
+        + '</span>'
+        + (conv ? '<button class="cw-debug-id" type="button" title="'
+          + cwEscapeAttr(conv) + '" aria-label="Cowork troubleshooting ID">&#9432;</button>' : '')
+        + '</span></div>';
+}
+
+function cwOpenDestPicker(taskId) {
+    var a = _cwActions[taskId];
+    if (!a) return;
+    cwCloseDestPicker();
+
+    var channel = a.delivery_channel || 'teams';
+    var ref = a.destination_ref || '';
+    var overlay = document.createElement('div');
+    overlay.id = 'dest-modal';
+    overlay.className = 'source-modal-overlay';
+    overlay.innerHTML = '<div class="source-modal" data-testid="dest-picker">'
+        + '<div class="source-modal-header">Confirm destination</div>'
+        + '<label class="source-modal-label">Channel</label>'
+        + '<select id="dest-modal-channel" class="source-modal-input" data-testid="dest-channel">'
+        + '<option value="teams"' + (channel === 'teams' ? ' selected' : '') + '>Teams</option>'
+        + '<option value="email"' + (channel === 'email' ? ' selected' : '') + '>Email</option>'
+        + '</select>'
+        + '<label class="source-modal-label">Recipient or conversation</label>'
+        + '<input type="text" id="dest-modal-ref" class="source-modal-input" '
+        + 'data-testid="dest-ref" value="' + cwEscapeAttr(ref) + '">'
+        + (ref.indexOf('19:') === 0
+            ? '<div class="cw-dest-hint">Linked Teams conversation \u2014 leave as-is to reply in the original thread.</div>'
+            : '')
+        + '<label class="source-modal-label">Shown as</label>'
+        + '<input type="text" id="dest-modal-display" class="source-modal-input" '
+        + 'data-testid="dest-display" value="' + cwEscapeAttr(a.destination_display || '') + '">'
+        + '<div class="source-modal-buttons">'
+        + '<button class="btn-source-modal btn-source-cancel" onclick="cwCloseDestPicker()">Cancel</button>'
+        + '<button class="btn-source-modal btn-source-save" data-testid="dest-confirm-btn" '
+        + 'onclick="cwConfirmDest(' + taskId + ')">Confirm</button>'
+        + '</div></div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(event) {
+        if (event.target === overlay) cwCloseDestPicker();
+    });
+}
+
+function cwCloseDestPicker() {
+    var existing = document.getElementById('dest-modal');
+    if (existing) existing.remove();
+}
+
+function cwConfirmDest(taskId) {
+    var channel = document.getElementById('dest-modal-channel');
+    var ref = document.getElementById('dest-modal-ref');
+    var display = document.getElementById('dest-modal-display');
+    if (!channel || !ref || !display) return;
+
+    var body = {
+        delivery_channel: channel.value,
+        destination_ref: ref.value.trim(),
+        destination_display: display.value.trim()
+    };
+    if (!body.destination_ref || !body.destination_display) return;
+
+    fetch('/api/tasks/' + taskId + '/cowork/destination', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skill: skillName })
+        body: JSON.stringify(body)
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
-        _runningSkills[skillKey] = true;
-        startSkillPoller();
-        if (selectedTaskId === taskId) {
-            var task = tasks.find(function(t) { return t.id === taskId; });
-            if (task) renderDetailPane(task);
+        if (data.action) {
+            _cwActions[taskId] = data.action;
+            cwSyncTaskState(taskId, data.action);
         }
+        cwCloseDestPicker();
+        cwRerender(taskId);
     })
-    .catch(function(err) { console.error('Failed to run skill:', err); });
+    .catch(function(err) { console.error('Failed to confirm destination:', err); });
+}
+
+var _cwFindingExpanded = {};
+
+function cwEscapeAttr(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function cwCostBadge(a) {
+    // Mirrors format_cost() in cowork_runner.py. Nothing to show is the common
+    // case: the endpoint has a kill switch, and overlapping previews are not
+    // attributable because the credit counter is per user rather than per run.
+    var c = a && a.cost_credits;
+    if (c === null || c === undefined || c === '') return '';
+    var n = Number(c);
+    if (!isFinite(n) || n < 0) return '';
+    var text = n === 0 ? 'no credits'
+        : n >= 1000 ? Math.round(n).toLocaleString() + ' credits'
+        : n.toFixed(1) + ' credits';
+    return '<span class="cw-foot-note" title="Credits consumed by this preview,'
+        + ' measured from your month-to-date usage">' + escapeHtml(text) + '</span>';
+}
+
+function cwHandoffBadge(a) {
+    // What happened AFTER "Open in Cowork". Absent for a preview that was never
+    // handed over, and absent whenever the lookup failed - this is additive, so
+    // no badge is the normal, correct resting state.
+    var h = a && a.handoff;
+    if (!h || !h.state) return '';
+
+    var label, cls, title;
+    if (h.waiting_on_user) {
+        // The one worth interrupting for: Cowork is blocked on Phil, which is
+        // how an approval prompt surfaces from the outside.
+        label = 'Cowork needs you';
+        cls = 'cw-handoff cw-handoff-waiting';
+        title = 'Cowork is waiting for your input in the web app';
+    } else if (h.state === 'running') {
+        label = 'Cowork working';
+        cls = 'cw-handoff cw-handoff-running';
+        title = 'Cowork is still working on this conversation';
+    } else if (h.state === 'completed') {
+        label = 'Cowork finished' + cwHandoffAgo(h.last_activity);
+        cls = 'cw-handoff cw-handoff-done';
+        title = 'Cowork finished this conversation';
+    } else {
+        return '';
+    }
+    return '<span class="' + cls + '" title="' + cwEscapeAttr(title) + '">'
+        + escapeHtml(label) + '</span>';
+}
+
+function cwHandoffAgo(ms) {
+    // lastActivity is epoch milliseconds. Only ever a rough hint, so anything
+    // implausible renders as nothing rather than as a wrong number.
+    var n = Number(ms);
+    if (!isFinite(n) || n <= 0) return '';
+    var mins = Math.floor((Date.now() - n) / 60000);
+    if (mins < 0 || mins > 60 * 24 * 30) return '';
+    if (mins < 1) return ' just now';
+    if (mins < 60) return ' ' + mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return ' ' + hours + 'h ago';
+    return ' ' + Math.floor(hours / 24) + 'd ago';
+}
+
+function cwFindingBlock(finding, taskId) {
+    if (!finding) return '';
+    var expanded = Boolean(_cwFindingExpanded[taskId]);
+    return '<div class="cw-finding"><div class="cw-finding-label">What Coworker found</div>'
+        + '<div class="cw-finding-body' + (expanded ? '' : ' cw-finding-clamped')
+        + '" id="cw-finding-' + taskId + '">'
+        + renderCoworkMarkdown(_stripContextRefs(finding)) + '</div>'
+        + '<button class="cw-finding-toggle" id="cw-finding-toggle-' + taskId
+        + '" onclick="cwToggleFinding(' + taskId + ')" style="display:none">'
+        + (expanded ? 'Show less' : 'Show more') + '</button></div>';
+}
+
+function cwToggleFinding(taskId) {
+    var body = document.getElementById('cw-finding-' + taskId);
+    var button = document.getElementById('cw-finding-toggle-' + taskId);
+    if (!body || !button) return;
+    _cwFindingExpanded[taskId] = !_cwFindingExpanded[taskId];
+    body.classList.toggle('cw-finding-clamped', !_cwFindingExpanded[taskId]);
+    button.textContent = _cwFindingExpanded[taskId] ? 'Show less' : 'Show more';
+}
+
+function cwInitFindingToggle(taskId) {
+    var body = document.getElementById('cw-finding-' + taskId);
+    var button = document.getElementById('cw-finding-toggle-' + taskId);
+    if (!body || !button) return;
+    if (_cwFindingExpanded[taskId]) {
+        button.style.display = '';
+        button.textContent = 'Show less';
+        return;
+    }
+    button.style.display = body.scrollHeight > body.clientHeight + 1 ? '' : 'none';
+}
+
+function cwRedoBlock(taskId) {
+    // Only for the FAILED card. On a ready card Refine does the same job in
+    // ~30s while keeping the research, so offering both there was three
+    // overlapping controls (Refine / Start fresh / Start over). A failed run
+    // has no conversation worth continuing, so re-running with a correction is
+    // still the right move.
+    if (!_cwRedo[taskId]) {
+        return '<button class="cw-btn cw-btn-sec" '
+            + 'title="Run again, telling Cowork what to change." '
+            + 'onclick="cwToggleRedo(' + taskId + ',true)">'
+            + '&#8635; Redo</button>';
+    }
+    return '';
+}
+
+function cwRedoRow(taskId) {
+    if (!_cwRedo[taskId]) return '';
+    return '<div class="cw-intent">'
+        + '<input type="text" class="cw-intent-box" id="cw-redo-' + taskId + '" '
+        + 'placeholder="Tell Cowork what to change\u2026 (e.g. look for times next week)" '
+        + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();cwStart(' + taskId + ',true)}">'
+        + '<div class="cw-intent-actions">'
+        + '<span class="i-edit" onclick="cwStart(' + taskId + ',true)">Run again</span>'
+        + '<span class="i-edit i-muted" onclick="cwToggleRedo(' + taskId + ',false)">Cancel</span>'
+        + '</div></div>';
+}
+
+// Every preview run spawns a brand-new Cowork conversation (nothing passes
+// --resume), so "start over" needs no new machinery - only a control that says
+// so. Redo is framed as "tell Cowork what to change", which reads as steering
+// the existing conversation; a user asking for a clean slate had no way to
+// express it except by typing the request into the correction box.
+function cwStartOver(taskId) {
+    var ok = window.confirm(
+        'Start a new Cowork conversation for this task?\n\n'
+        + 'The current draft is abandoned and research begins again from '
+        + 'scratch, with no correction carried over. The previous run stays in '
+        + 'history, and the audience you confirmed is kept.');
+    if (!ok) return;
+    delete _cwRedo[taskId];
+    delete _cwEditing[taskId];
+    cwStart(taskId);
+}
+
+function cwStopPreview(taskId) {
+    // Stops work in flight. proc.kill() only killed OUR process while the
+    // server-side run carried on spending credits; this actually halts it.
+    if (!window.confirm('Stop this Cowork run?\n\nWhatever it has produced so '
+        + 'far is kept. Nothing was sent.')) return;
+    var el = document.getElementById('cw-live-' + taskId);
+    if (el) el.textContent = 'Stopping…';
+    fetch('/api/tasks/' + taskId + '/cowork', { method: 'DELETE' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            stopCoworkPoller(taskId);
+            if (data && data.action) _cwActions[taskId] = data.action;
+            cwRerender(taskId);
+        })
+        .catch(function () {
+            stopCoworkPoller(taskId);
+            cwRerender(taskId);
+        });
+}
+
+function cwRefineBlock(a, taskId) {
+    // Only possible on the API transport: a subprocess-produced row carries no
+    // conversation id, so there is nothing to continue. That absence is the
+    // honest gate — no flag lookup needed in the UI.
+    if (!a || !a.conversation_id) return '';
+    if (!_cwRefine[taskId]) {
+        return '<button class="cw-btn cw-btn-sec" data-testid="cw-refine-btn" '
+            + 'title="Ask Cowork to revise this, keeping everything it already '
+            + 'researched. Much faster than starting over." '
+            + 'onclick="cwToggleRefine(' + taskId + ',true)">Refine</button>';
+    }
+    return '';
+}
+
+function cwRefineRow(a, taskId) {
+    if (!_cwRefine[taskId]) return '';
+    // Instruction only. The DRAFT is edited in place, in the card's own draft
+    // area, rather than duplicated into a second box below it — showing the
+    // same text twice made it ambiguous which copy was the real one.
+    var instr = _cwInstrBuf[taskId] || '';
+    return '<div class="cw-refine" data-testid="cw-refine-row">'
+        + '<div class="cw-refine-label">Change the draft above, or say what to '
+        + 'change here. Either is enough.</div>'
+        + '<textarea class="cw-refine-box" id="cw-refine-' + taskId + '" rows="2" '
+        + 'oninput="cwBufferInstr(' + taskId + ',this.value)" '
+        + 'placeholder="e.g. make it shorter and aim it just at Greg">'
+        + escapeHtml(instr) + '</textarea>'
+        + '<div class="cw-refine-actions">'
+        + '<button class="cw-btn cw-btn-go" data-testid="cw-refine-send" '
+        + 'onclick="cwSendRefine(' + taskId + ')">Send to Cowork</button>'
+        + '<button class="cw-btn cw-btn-ghost" '
+        + 'onclick="cwToggleRefine(' + taskId + ',false)">Cancel</button>'
+        + '</div></div>';
+}
+
+function cwToggleRefine(taskId, on) {
+    if (on) {
+        _cwRefine[taskId] = true;
+        // Refine edits the draft in place, so leave any separate Edit mode.
+        delete _cwEditing[taskId];
+    } else {
+        delete _cwRefine[taskId];
+        cwClearBuffers(taskId);
+    }
+    cwRerender(taskId);
+    if (on) {
+        var box = document.getElementById('cw-refine-' + taskId);
+        if (box) box.focus();
+    }
+}
+
+function cwSendRefine(taskId) {
+    var box = document.getElementById('cw-refine-' + taskId);
+    var draftBox = document.getElementById('cw-draft-' + taskId);
+    // Read the live DOM first, but fall back to the buffer: a re-render between
+    // typing and clicking would otherwise lose the edit silently.
+    var instruction = ((box ? box.value : _cwInstrBuf[taskId]) || '').trim();
+    var a = _cwActions[taskId] || {};
+    var edited = ((draftBox ? draftBox.value : _cwDraftBuf[taskId]) || '').trim();
+    var original = ((a.draft_edited || a.draft) || '').trim();
+
+    // Either an instruction or an in-place edit is enough to act on. Sending
+    // the edited draft verbatim is what makes "I rewrote it, now match this"
+    // work without the user having to describe the change in prose.
+    var changed = edited && edited !== original;
+    if (!instruction && !changed) return;
+
+    var payload = instruction;
+    if (changed) {
+        payload = (instruction ? instruction + "\n\n" : "")
+            + "Here is my edited version. Use it as the basis for the revised "
+            + "draft:\n\n" + edited;
+    }
+
+    delete _cwRefine[taskId];
+    delete _cwEditing[taskId];
+    cwClearBuffers(taskId);
+    fetch('/api/tasks/' + taskId + '/cowork/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: payload })
+    })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+        if (!res.ok) {
+            var a = _cwActions[taskId];
+            if (a) a.error = (res.d && res.d.error) || 'Could not continue.';
+            return cwRerender(taskId);
+        }
+        _cwActions[taskId] = res.d.action;
+        cwRerender(taskId);
+        startCoworkPoller(taskId);
+    })
+    .catch(function () { cwRerender(taskId); });
+}
+
+function renderCoworkCard(task) {
+    var a = _cwActions[task.id];
+
+    if (a === undefined) {
+        cwLoad(task.id);
+        return cwShell('', '', task,
+            '<div class="cw-idle">Checking for a previous Coworker preview\u2026</div>', '');
+    }
+
+    if (a && a.state === 'previewing') {
+        if (!_cwPollers[task.id]) startCoworkPoller(task.id);
+        var prog = (a.progress && a.progress.length)
+            ? a.progress[a.progress.length - 1]
+            : 'Cowork is reading M365';
+        // Cowork can stop mid-run to ask a question in the web app, and until
+        // it is answered nothing else happens. A spinner here reads as "still
+        // working", which told Phil to keep waiting through 13 minutes of a run
+        // that was blocked on him the whole time.
+        if (a.waiting_on_user) {
+            var interaction = a.interaction_request;
+            var question = interaction
+                ? cwInteractionFields(task.id, interaction)
+                : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>';
+            var answerButton = interaction
+                ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
+                    + 'onclick="cwSendAnswer(' + task.id + ')">Answer Cowork</button>'
+                : '';
+            return cwShell('is-running', 'needs you', task,
+                cwIntentBlock(task, false)
+                + '<div class="cw-blocked" data-testid="cw-blocked" '
+                + 'data-cw-invocation="'
+                + escapeAttr(interaction ? interaction.invocation_id : '') + '">'
+                + '<b>Cowork is waiting for your answer.</b>'
+                + (a.error ? '<div class="cw-error">' + escapeHtml(a.error) + '</div>' : '')
+                + question
+                + '</div>',
+                answerButton
+                + cwOpenLink(a, 'Open in Cowork')
+                + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+                + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+                + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>');
+        }
+        return cwShell('is-running', 'read-only', task,
+            cwIntentBlock(task, false)
+            + '<div class="cw-progress"><span class="cw-spinner"></span>'
+            + '<span class="cw-progress-text">'
+            + '<span id="cw-live-' + task.id + '">' + escapeHtml(prog) + '</span>'
+            + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
+            + escapeHtml(cwElapsed(task.id, a)) + '</span>'
+            + '</span></div>',
+            // The link belongs here too. A run in flight is exactly when the
+            // user may need to look at it, and it was previously only offered
+            // once the run had finished.
+            cwOpenLink(a, 'Open in Cowork')
+            + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+            + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+            + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>');
+    }
+
+    if (a && a.state === 'failed') {
+        return cwShell('is-failed', 'failed', task,
+            '<div class="cw-fail"><b>Cowork could not complete this.</b>'
+            + '<div class="cw-fail-sub">' + escapeHtml(a.error || a.terminal_status || 'Unknown error')
+            + '<br>Nothing was sent.</div></div>'
+            + cwRedoRow(task.id),
+            '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Retry</button>'
+            + cwRedoBlock(task.id)
+            + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Dismiss</button>');
+    }
+
+    if (a && a.state === 'ready') {
+        var refining = !!_cwRefine[task.id];
+        // Refine edits the draft IN PLACE: the same textarea, so there is only
+        // ever one copy of the text on screen and no ambiguity about which one
+        // gets sent.
+        var editing = !!_cwEditing[task.id] || refining;
+        var draft = cwCurrentDraft(a);
+        // A pending edit outranks the stored draft: a re-render must not throw
+        // away what the user is in the middle of typing.
+        if (editing && _cwDraftBuf[task.id] !== undefined) {
+            draft = _cwDraftBuf[task.id];
+        }
+        var findingHtml = cwFindingBlock(a.finding, task.id);
+        var draftHtml = editing
+            ? '<textarea class="cw-draft is-editing" id="cw-draft-' + task.id + '" rows="8" '
+              + 'oninput="cwBufferDraft(' + task.id + ',this.value)">'
+              + escapeHtml(draft) + '</textarea>'
+            : '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(draft) + '</div>';
+        var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
+            ? '<span class="cw-foot-note">edited by you</span>' : '';
+        // What this preview actually cost, measured as the change in the user's
+        // month-to-date credit counter across the run. Absent when it could not
+        // be attributed (two previews overlapping) or the endpoint was off.
+        var costBadge = cwCostBadge(a);
+        var correction = a.redirect_text
+            ? '<div class="cw-intent"><span class="i-label">Correction:</span> '
+              + escapeHtml(a.redirect_text) + '</div>'
+            : '';
+
+        var foot = refining
+            // In refine mode the actions live in the refine row, so the footer
+            // only offers the way out.
+            ? '<button class="cw-btn cw-btn-ghost" onclick="cwToggleRefine(' + task.id + ',false)">Cancel</button>'
+            : editing
+            ? '<button class="cw-btn cw-btn-go" onclick="cwSaveDraft(' + task.id + ')">Save edit</button>'
+              + '<button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(' + task.id + ',false)">Cancel</button>'
+            : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
+              + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
+              + cwRefineBlock(a, task.id)
+              + (a.conversation_id ? '' : cwRedoBlock(task.id))
+              + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
+              + 'title="Abandon this conversation and research again from scratch" '
+              + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
+              + (a.conversation_id
+              ? cwOpenLink(a, 'Finish in Cowork') : '')
+              + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
+              + editedBadge + costBadge + cwHandoffBadge(a);
+
+        return cwShell('', 'preview', task,
+            cwIntentBlock(task, !editing) + correction + findingHtml + draftHtml
+            + cwDestBlock(a, task) + cwRefineRow(a, task.id) + cwRedoRow(task.id),
+            foot);
+    }
+
+    // No preview yet.
+    return cwShell('', 'not run', task,
+        cwIntentBlock(task, true)
+        + '<div class="cw-idle">Cowork can check the latest state of this in M365, then draft the action.'
+        + '<span class="cw-idle-sub">Nothing is sent from here. Open the draft in '
+        + 'Cowork if you want to act on it.</span></div>',
+        '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with Cowork</button>'
+        + '<span class="cw-foot-note">~45s &middot; read-only</span>');
+}
+
+// ── Cowork state transitions ───────────────────────────────────────────
+
+function cwRerender(taskId) {
+    var task = tasks.find(function(t) { return t.id === taskId; });
+    if (task && selectedTaskId === taskId) renderDetailPane(task);
+}
+
+function cwSyncTaskState(taskId, action) {
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    if (!task) return;
+    task.cw_state = action ? action.state : null;
+    task.cw_seen_at = action ? action.seen_at : null;
+}
+
+function cwLoad(taskId, markSeen) {
+    if (_cwLoading[taskId]) return;
+    _cwLoading[taskId] = true;
+    fetch('/api/tasks/' + taskId + '/cowork' + (markSeen ? '?mark_seen=1' : ''))
+        .then(function(res) {
+            if (res.status === 404) return { action: null };
+            return res.json();
+        })
+        .then(function(data) {
+            delete _cwLoading[taskId];
+            _cwActions[taskId] = data.action || null;
+            cwSyncTaskState(taskId, data.action || null);
+            if (data.action && data.action.state === 'previewing') startCoworkPoller(taskId);
+            renderTaskList();
+            cwRerender(taskId);
+        })
+        .catch(function() {
+            delete _cwLoading[taskId];
+            _cwActions[taskId] = null;
+            cwRerender(taskId);
+        });
+}
+
+function cwStart(taskId, isRedo) {
+    var body = {};
+    if (isRedo) {
+        var input = document.getElementById('cw-redo-' + taskId);
+        var text = input ? input.value.trim() : '';
+        if (text) body.redirect_text = text;
+    }
+    delete _cwRedo[taskId];
+    delete _cwEditing[taskId];
+    _cwStartedAt[taskId] = Date.now();
+
+    fetch('/api/tasks/' + taskId + '/cowork', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.action) {
+            _cwActions[taskId] = data.action;
+            cwSyncTaskState(taskId, data.action);
+            renderTaskList();
+            startCoworkPoller(taskId);
+        }
+        cwRerender(taskId);
+    })
+    .catch(function(err) { console.error('Failed to start Cowork preview:', err); });
+}
+
+function cwToggleRedo(taskId, on) {
+    if (on) { _cwRedo[taskId] = true; } else { delete _cwRedo[taskId]; }
+    cwRerender(taskId);
+}
+
+function cwToggleEdit(taskId, on) {
+    if (on) {
+        _cwEditing[taskId] = true;
+    } else {
+        delete _cwEditing[taskId];
+        cwClearBuffers(taskId);  // Cancel really discards.
+    }
+    cwRerender(taskId);
+}
+
+function cwSaveDraft(taskId) {
+    var box = document.getElementById('cw-draft-' + taskId);
+    // Fall back to the buffer, so a re-render between typing and clicking Save
+    // does not silently discard the edit.
+    var text = box ? box.value : _cwDraftBuf[taskId];
+    if (text === undefined || text === null) return;
+    delete _cwEditing[taskId];
+    cwClearBuffers(taskId);
+
+    fetch('/api/tasks/' + taskId + '/cowork', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft_edited: text })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.action) _cwActions[taskId] = data.action;
+        cwRerender(taskId);
+    })
+    .catch(function(err) { console.error('Failed to save draft:', err); });
+}
+
+function cwInteractionFields(taskId, interaction) {
+    var buffered = _cwAnswerBuf[taskId] || {};
+    return (interaction.questions || []).map(function(question) {
+        var id = String(question.id || '');
+        var heading = question.header || question.question || 'Cowork question';
+        var prompt = question.header && question.question
+            ? '<div class="cw-blocked-sub">' + escapeHtml(question.question) + '</div>'
+            : '';
+        var value = buffered[id] || '';
+        var input;
+        if (question.options && question.options.length) {
+            input = '<div class="cw-choice-grid" data-testid="cw-answer" '
+                + 'data-cw-answer="' + escapeAttr(id) + '" '
+                + 'data-cw-multi="' + (question.multi_select ? '1' : '0') + '">'
+                + question.options.map(function(option) {
+                    var selected = value.split('\n').indexOf(option.value) !== -1
+                        ? 'true' : 'false';
+                    return '<button type="button" class="cw-choice" '
+                        + 'data-testid="cw-choice" data-cw-option="'
+                        + escapeAttr(option.value) + '" aria-pressed="' + selected + '" '
+                        + 'onclick="cwChooseOption(' + taskId + ', this)">'
+                        + cwChoiceVisual(option) + '<span class="cw-choice-copy"><b>'
+                        + escapeHtml(option.label) + '</b>'
+                        + (option.description
+                            ? '<small>' + escapeHtml(option.description) + '</small>'
+                            : '')
+                        + '</span></button>';
+                }).join('') + '</div>';
+        } else {
+            input = '<textarea class="cw-refine-box cw-answer-box" '
+                + 'data-testid="cw-answer" data-cw-answer="' + escapeAttr(id) + '" '
+                + 'placeholder="Type your answer..." '
+                + 'oninput="cwBufferAnswer(' + taskId
+                + ', this.getAttribute(\'data-cw-answer\'), this.value)">'
+                + escapeHtml(value) + '</textarea>';
+        }
+        var questionImage = cwSafeImageUrl(question.image_url);
+        var questionVisual = questionImage
+            ? '<img class="cw-question-image" src="' + escapeAttr(questionImage)
+                + '" alt="">'
+            : '';
+        return '<div class="cw-blocked-question">' + questionVisual
+            + '<b>' + escapeHtml(heading)
+            + '</b>' + prompt + input + '</div>';
+    }).join('');
+}
+
+function cwChoiceEmoji(option) {
+    var text = ((option.label || '') + ' ' + (option.description || '')).toLowerCase();
+    if (/account|tenant|company|work/.test(text)) return '\u{1F3E2}';
+    if (/scope|access|permission|secure/.test(text)) return '\u{1F510}';
+    if (/calendar|meeting|time|schedule/.test(text)) return '\u{1F4C5}';
+    if (/email|message|reply/.test(text)) return '\u2709\uFE0F';
+    if (/file|document|report/.test(text)) return '\u{1F4C4}';
+    return '\u2728';
+}
+
+function cwChoiceVisual(option) {
+    var emoji = '<span class="cw-choice-emoji">' + cwChoiceEmoji(option) + '</span>';
+    var imageUrl = cwSafeImageUrl(option.image_url);
+    if (!imageUrl) return emoji;
+    return '<img class="cw-choice-image" src="' + escapeAttr(imageUrl)
+        + '" alt="" onerror="this.hidden=true;this.nextElementSibling.hidden=false">'
+        + '<span class="cw-choice-emoji" hidden>' + cwChoiceEmoji(option) + '</span>';
+}
+
+function cwSafeImageUrl(value) {
+    if (!value) return '';
+    try {
+        var url = new URL(value);
+        return url.protocol === 'https:' ? url.href : '';
+    } catch (_err) {
+        return '';
+    }
+}
+
+function cwChooseOption(taskId, button) {
+    var field = button.closest('[data-cw-answer]');
+    if (!field) return;
+    var multi = field.getAttribute('data-cw-multi') === '1';
+    if (!multi) {
+        field.querySelectorAll('[data-cw-option]').forEach(function(choice) {
+            choice.setAttribute('aria-pressed', 'false');
+        });
+    }
+    var wasSelected = button.getAttribute('aria-pressed') === 'true';
+    button.setAttribute('aria-pressed', String(multi ? !wasSelected : true));
+    cwBufferAnswer(
+        taskId,
+        field.getAttribute('data-cw-answer'),
+        cwAnswerValue(field)
+    );
+}
+
+function cwAnswerValue(field) {
+    if (field.matches('.cw-choice-grid')) {
+        return Array.from(field.querySelectorAll('[aria-pressed="true"]')).map(
+            function(option) { return option.getAttribute('data-cw-option'); }
+        ).join('\n');
+    }
+    return field.value || '';
+}
+
+function cwSendAnswer(taskId) {
+    if (_cwAnswerSending[taskId]) return;
+    var answers = {};
+    var fields = document.querySelectorAll('[data-cw-answer]');
+    var blocked = document.querySelector('[data-testid="cw-blocked"]');
+    fields.forEach(function(field) {
+        var value = cwAnswerValue(field).trim();
+        if (value) answers[field.getAttribute('data-cw-answer')] = value;
+    });
+    if (!fields.length || Object.keys(answers).length !== fields.length) return;
+    _cwAnswerSending[taskId] = true;
+    var button = document.querySelector('[data-testid="cw-answer-submit"]');
+    if (button) button.disabled = true;
+    fetch('/api/tasks/' + taskId + '/cowork/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            invocation_id: blocked ? blocked.getAttribute('data-cw-invocation') : '',
+            answers: answers
+        })
+    })
+    .then(function(r) {
+        return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+    })
+    .then(function(res) {
+        if (!res.ok) {
+            delete _cwAnswerSending[taskId];
+            var a = _cwActions[taskId];
+            if (a) a.error = (res.d && res.d.error) || 'Could not answer Cowork.';
+            return cwRerender(taskId);
+        }
+        delete _cwAnswerBuf[taskId];
+        delete _cwAnswerSending[taskId];
+        _cwActions[taskId] = res.d.action;
+        cwRerender(taskId);
+    })
+    .catch(function(err) {
+        delete _cwAnswerSending[taskId];
+        console.error('Failed to answer Cowork:', err);
+        var a = _cwActions[taskId];
+        if (a) a.error = 'Could not answer Cowork. Check your connection and try again.';
+        cwRerender(taskId);
+    });
+}
+
+function cwCopyDraft(taskId) {
+    var text = cwCurrentDraft(_cwActions[taskId]);
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function() {});
+    }
+}
+
+// There is no delete route — hiding is deliberately client side only, so the
+// audit chain in task_actions stays intact.
+function cwDiscard(taskId) {
+    _cwActions[taskId] = null;
+    delete _cwEditing[taskId];
+    delete _cwRedo[taskId];
+    cwRerender(taskId);
+}
+
+// ── Cowork preview poller ──────────────────────────────────────────────
+//
+// Written fresh rather than adapted from pollSkillStatus, which polls
+// /api/runner-status and terminates on skill_output — neither applies here.
+
+function startCoworkPoller(taskId) {
+    stopCoworkPoller(taskId);
+    _cwPollers[taskId] = {
+        count: 0,
+        timer: setInterval(function() { pollCoworkStatus(taskId); }, CW_POLL_MS)
+    };
+}
+
+function stopCoworkPoller(taskId) {
+    var poller = _cwPollers[taskId];
+    if (!poller) return;
+    clearInterval(poller.timer);
+    delete _cwPollers[taskId];
+}
+
+function pollCoworkStatus(taskId) {
+    var poller = _cwPollers[taskId];
+    if (!poller) return;
+    if (++poller.count > CW_POLL_MAX) {
+        stopCoworkPoller(taskId);
+        return;
+    }
+
+    // Cheap liveness feedback without a full re-render on every tick.
+    var hb = document.getElementById('cw-hb-' + taskId);
+    if (hb) hb.textContent = cwElapsed(taskId, _cwActions[taskId]);
+
+    fetch('/api/tasks/' + taskId + '/cowork')
+        .then(function(res) {
+            if (res.status === 404) return { action: null };
+            return res.json();
+        })
+        .then(function(data) {
+            var action = data.action || null;
+            if (!action) return;
+            var wasWaiting = !!(_cwActions[taskId] && _cwActions[taskId].waiting_on_user);
+            var previousQuestion = _cwActions[taskId]
+                ? _cwActions[taskId].blocked_question : null;
+            _cwActions[taskId] = action;
+            cwSyncTaskState(taskId, action);
+            renderTaskList();
+            // Update the live line in place. A full re-render would fight the
+            // intent editor, which is the bug fixed in 68e4119.
+            if (action.progress && action.progress.length) {
+                var el = document.getElementById('cw-live-' + taskId);
+                if (el) el.textContent = action.progress[action.progress.length - 1];
+            }
+            if (wasWaiting !== !!action.waiting_on_user
+                    || previousQuestion !== action.blocked_question) {
+                cwRerender(taskId);
+            }
+            if (action.state !== 'previewing') {
+                stopCoworkPoller(taskId);
+                cwRerender(taskId);
+            }
+        })
+        .catch(function() {}); // Silent fail on poll
 }
 
 // ── Skill Runner Status Poller ─────────────────────────────────────────
@@ -2940,6 +3899,10 @@ function handleKeyboardShortcut(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
     var key = e.key;
+    // Shift+D arrives as 'D'. Action shortcuts are matched case-insensitively so
+    // a held Shift does not silently swallow them. Named keys (Escape, Tab,
+    // ArrowUp) are longer than one character and pass through untouched.
+    var actionKey = key.length === 1 ? key.toLowerCase() : key;
 
     // Shortcuts overlay
     if (key === '?') {
@@ -2965,7 +3928,7 @@ function handleKeyboardShortcut(e) {
     }
 
     // Focus quick-add
-    if (key === '/' || key === 'n') {
+    if (actionKey === '/' || actionKey === 'n') {
         e.preventDefault();
         var input = document.getElementById('task-input');
         if (input) input.focus();
@@ -2973,12 +3936,12 @@ function handleKeyboardShortcut(e) {
     }
 
     // Navigation: j/k or arrows
-    if (key === 'j' || key === 'ArrowDown') {
+    if (actionKey === 'j' || key === 'ArrowDown') {
         e.preventDefault();
         _kbNavigate(1);
         return;
     }
-    if (key === 'k' || key === 'ArrowUp') {
+    if (actionKey === 'k' || key === 'ArrowUp') {
         e.preventDefault();
         _kbNavigate(-1);
         return;
@@ -3007,17 +3970,17 @@ function handleKeyboardShortcut(e) {
     var task = tasks.find(function(t) { return t.id === selectedTaskId; });
     if (!task) return;
 
-    if (key === 'c') {
+    if (actionKey === 'c') {
         var allowedC = VALID_TRANSITIONS[task.status];
         if (allowedC && allowedC.indexOf('completed') !== -1) {
-            doAction(task.id, 'complete');
+            _kbActThenAdvance(task.id, 'complete');
         }
-    } else if (key === 'd') {
+    } else if (actionKey === 'd') {
         var allowedD = VALID_TRANSITIONS[task.status];
         if (allowedD && allowedD.indexOf('dismissed') !== -1) {
-            doAction(task.id, 'dismiss');
+            _kbActThenAdvance(task.id, 'dismiss');
         }
-    } else if (key === 's') {
+    } else if (actionKey === 's') {
         if (task.status === 'suggested') {
             doAction(task.id, 'promote');
         } else {
@@ -3026,17 +3989,64 @@ function handleKeyboardShortcut(e) {
                 doAction(task.id, 'start');
             }
         }
-    } else if (key === 'p') {
+    } else if (actionKey === 'p') {
         if (task.status === 'suggested') {
             doAction(task.id, 'promote');
         }
-    } else if (key === 'r') {
+    } else if (actionKey === 'r') {
         refreshTask(task.id);
     }
 }
 
 function _getVisibleRows() {
     return Array.prototype.slice.call(document.querySelectorAll('.task-row'));
+}
+
+function _rowTaskId(row) {
+    return parseInt(row.getAttribute('data-id'));
+}
+
+function _kbActThenAdvance(taskId, action) {
+    // Complete and dismiss move the task out of the section being triaged. The
+    // selection used to stay on it, and since neither is a legal transition out
+    // of the new status, every following keypress became a silent no-op -- the
+    // shortcut looked broken. Work out the successor BEFORE acting, because the
+    // list re-renders and the row moves to another section.
+    var rows = _getVisibleRows();
+    var successorId = null;
+    for (var i = 0; i < rows.length; i++) {
+        if (_rowTaskId(rows[i]) !== taskId) continue;
+        for (var j = i + 1; j < rows.length; j++) {
+            var candidate = _rowTaskId(rows[j]);
+            if (candidate && candidate !== taskId) {
+                successorId = candidate;
+                break;
+            }
+        }
+        break;
+    }
+
+    var pending = doAction(taskId, action);
+    if (!pending || typeof pending.then !== 'function') return;
+    pending.then(function() {
+        _kbSelectAfterRemoval(successorId);
+    });
+}
+
+function _kbSelectAfterRemoval(successorId) {
+    var rows = _getVisibleRows();
+    var idx = -1;
+    for (var i = 0; i < rows.length; i++) {
+        if (_rowTaskId(rows[i]) === successorId) { idx = i; break; }
+    }
+    if (idx === -1) {
+        clearDetailPane();
+        _clearKeyboardSelection();
+        return;
+    }
+    _kbSelectedIdx = idx;
+    _applyKeyboardSelection(rows);
+    selectTask(successorId);
 }
 
 function _kbNavigate(direction) {

@@ -452,6 +452,263 @@ if (typeof doSnooze === 'function') {
   };
 }
 
+// ── Cowork preview: real API wiring ───────────────────────
+//
+// Overrides the in-memory state machine in mock-todo.html with the preview
+// API. The render functions are shared; only the transitions change. The
+// server owns destination_kind (parse_source_url), so the local fallback in
+// cwLocalKind is never used on this page.
+//
+// PHASE 1 IS PREVIEW ONLY — there is no execute route to call.
+
+const CW_POLL_MS = 3000;
+const CW_POLL_MAX = 235;   // ~700s, just past the runner's 660s timeout
+const _cwPollers = {};
+let _cwStartedAt = {};
+
+function cwApply(t, action) {
+  t.cw_loaded = true;
+  if (!action) {
+    t.cw_state = 'idle';
+    return t;
+  }
+  t.cw_action_id = action.id;
+  t.cw_state = action.state;
+  t.cw_progress = action.progress || [];
+  t.cw_cost_credits = action.cost_credits;
+  // What happened after "Open in Cowork". Absent unless the preview finished
+  // and the lookup succeeded; the card renders normally without it.
+  t.cw_handoff = action.handoff || null;
+  t.cw_finding = action.finding || '';
+  t.cw_draft = action.draft || '';
+  t.cw_draft_edited = action.draft_edited || '';
+  t.cw_redirect_text = action.redirect_text || '';
+  t.cw_dest_kind = action.destination_kind || '';
+  t.cw_dest_ref = action.destination_ref || '';
+  t.cw_dest_display = action.destination_display || '';
+  t.cw_dest_confirmed_at = action.destination_confirmed_at || null;
+  t.cw_delivery_channel = action.delivery_channel || '';
+  t.cw_is_broadcast = Boolean(action.is_broadcast);
+  t.cw_conversation_id = action.conversation_id || '';
+  t.cw_seen_at = action.seen_at || null;
+  t.cw_error = action.error || '';
+  t.cw_terminal_status = action.terminal_status || '';
+  if (action.created_at && !_cwStartedAt[t.id]) {
+    const ms = Date.parse(action.created_at);
+    if (!isNaN(ms)) _cwStartedAt[t.id] = ms;
+  }
+  return t;
+}
+
+function cwFormatElapsed(id) {
+  const started = _cwStartedAt[id];
+  if (!started) return '';
+  const secs = Math.max(0, Math.round((Date.now() - started) / 1000));
+  return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') + ' elapsed';
+}
+
+async function cwLoad(id, markSeen) {
+  const t = cwTask(id);
+  if (!t || (t.cw_loaded && !markSeen)) return;
+  const firstLoad = !t.cw_loaded;
+  t.cw_loaded = true;          // guard before the await, so the re-render
+  if (firstLoad) t.cw_state = 'loading';
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork${markSeen ? '?mark_seen=1' : ''}`);
+    const data = res.status === 404 ? { action: null } : await res.json();
+    cwApply(t, data.action);
+    if (t.cw_state === 'previewing') cwStartPoller(id);
+  } catch (e) {
+    t.cw_state = 'idle';
+  }
+  cwRerender(id);
+}
+
+async function cwStart(id, isRedo) {
+  const t = cwTask(id);
+  if (!t) return;
+  const body = {};
+  if (isRedo) {
+    const box = document.getElementById(`cw-redo-${id}`);
+    const text = box ? box.value.trim() : '';
+    if (text) body.redirect_text = text;
+  }
+  t.cw_redo_open = false;
+  t.cw_editing = false;
+  t.cw_state = 'previewing';
+  _cwStartedAt[id] = Date.now();
+  cwRerender(id);
+
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (res.status === 409) {
+      toast('A preview is already running');
+    } else if (data.action) {
+      cwApply(t, data.action);
+    } else {
+      t.cw_state = 'failed';
+      t.cw_error = data.error || 'Could not start Cowork';
+    }
+  } catch (e) {
+    t.cw_state = 'failed';
+    t.cw_error = 'Could not reach the server';
+  }
+  cwRerender(id);
+  if (t.cw_state === 'previewing') cwStartPoller(id);
+}
+
+async function cwSaveDraft(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  const box = document.getElementById(`cw-edit-${id}`);
+  if (!box) return;
+  const text = box.value;
+  t.cw_editing = false;
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_edited: text })
+    });
+    const data = await res.json();
+    if (data.action) cwApply(t, data.action);
+  } catch (e) { toast('Failed to save draft'); }
+  cwRerender(id);
+}
+
+// The intent is coaching_text on the task, not a field on the action row.
+async function cwSaveIntent(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  const box = document.getElementById(`cw-intent-${id}`);
+  const text = box ? box.value : null;
+  t.cw_intent_editing = false;
+  if (text === null || text === t.coaching_text) return cwRerender(id);
+  t.coaching_text = text;
+  cwRerender(id);
+  try {
+    await apiUpdate(id, { coaching_text: text });
+  } catch (e) { toast('Failed to save'); }
+}
+
+// Client side only — hiding a card must not delete the task_actions row, so
+// the audit chain stays intact. Reloads on the next visit. (DELETE on the
+// cowork route STOPS A RUN; it does not delete an action.)
+function cwDiscard(id) {
+  const t = cwTask(id);
+  if (!t) return;
+  t.cw_state = 'idle';
+  t.cw_editing = false;
+  t.cw_redo_open = false;
+  t.cw_loaded = false;
+  cwRerender(id);
+}
+
+async function cwStopPreview(id) {
+  // Stops work in flight. proc.kill() only killed OUR process while the
+  // server-side run carried on spending credits; this actually halts it.
+  if (!confirm('Stop this Cowork run?\n\nWhatever it has produced so far is '
+      + 'kept. Nothing was sent.')) return;
+  const t = cwTask(id);
+  const live = document.getElementById(`cw-live-${id}`);
+  if (live) live.textContent = 'Stopping…';
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`, { method: 'DELETE' });
+    const data = await res.json();
+    cwStopPoller(id);
+    if (t && data && data.action) cwApply(t, data.action);
+  } catch (err) {
+    cwStopPoller(id);
+    if (t) t.cw_error = 'Could not stop the run.';
+  }
+  cwRerender(id);
+}
+
+function cwStartPoller(id) {
+  cwStopPoller(id);
+  _cwPollers[id] = {
+    count: 0,
+    timer: setInterval(() => cwPoll(id), CW_POLL_MS)
+  };
+}
+
+function cwStopPoller(id) {
+  const poller = _cwPollers[id];
+  if (!poller) return;
+  clearInterval(poller.timer);
+  delete _cwPollers[id];
+}
+
+async function cwPoll(id) {
+  const poller = _cwPollers[id];
+  if (!poller) return;
+  if (++poller.count > CW_POLL_MAX) return cwStopPoller(id);
+
+  const hb = document.getElementById(`cw-hb-${id}`);
+  if (hb) hb.textContent = cwFormatElapsed(id);
+
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork`);
+    if (res.status === 404) return;
+    const data = await res.json();
+    if (!data.action) return;
+    const t = cwTask(id);
+    if (!t) return cwStopPoller(id);
+    cwApply(t, data.action);
+    // Update the live line in place; a full re-render would fight the intent
+    // editor while it is open.
+    if (t.cw_progress && t.cw_progress.length) {
+      const el = document.getElementById(`cw-live-${id}`);
+      if (el) el.textContent = t.cw_progress[t.cw_progress.length - 1];
+    }
+    if (t.cw_state !== 'previewing') {
+      cwStopPoller(id);
+      cwRerender(id);
+    }
+  } catch (e) { /* silent */ }
+}
+
+// Destination confirmation is server owned: the API decides provenance and the
+// timestamp, so the client only submits the reviewed audience.
+cwConfirmDest = async function(id) {
+  const t = cwTask(id);
+  const values = cwDestPickerValues();
+  if (!t || !values) return;
+  try {
+    const res = await fetch(`/api/tasks/${id}/cowork/destination`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.action) cwApply(t, data.action);
+    }
+  } catch (e) {
+    /* leave the previous destination in place */
+  }
+  cwCloseDestPicker();
+  cwRerender(id);
+};
+
+// Load the preview lazily when a task is opened.
+(function wrapSelectTaskForCowork() {
+  const _prev = selectTask;
+  selectTask = function(id) {
+    _prev(id);
+    const t = cwTask(id);
+    if (t && t.action_type && t.status !== 'suggested' &&
+        (!t.cw_loaded || (t.cw_state === 'ready' && !t.cw_seen_at))) cwLoad(id, true);
+    if (t && t.cw_state === 'previewing' && !_cwPollers[id]) cwStartPoller(id);
+  };
+})();
+
+
 // ── Initialize: replace mock data with real API data ──────
 (async function initTodoIQ() {
   // Clear mock data

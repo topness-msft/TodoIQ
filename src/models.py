@@ -217,7 +217,15 @@ def list_tasks(
             params.extend(exclude_statuses)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
-            f"SELECT * FROM tasks {where} ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?",
+            f"""
+            SELECT t.*,
+              (SELECT state FROM task_actions
+               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_state,
+              (SELECT seen_at FROM task_actions
+               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_seen_at
+            FROM tasks t {where}
+            ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?
+            """,
             (*params, limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -404,12 +412,13 @@ def get_last_sync(sync_type: str | None = None) -> dict | None:
     try:
         if sync_type:
             row = conn.execute(
-                "SELECT * FROM sync_log WHERE sync_type = ? ORDER BY synced_at DESC LIMIT 1",
+                "SELECT * FROM sync_log WHERE sync_type = ? "
+                "ORDER BY synced_at DESC, id DESC LIMIT 1",
                 (sync_type,),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT * FROM sync_log ORDER BY synced_at DESC LIMIT 1"
+                "SELECT * FROM sync_log ORDER BY synced_at DESC, id DESC LIMIT 1"
             ).fetchone()
         return _row_to_dict(row)
     finally:
@@ -428,5 +437,273 @@ def get_stats() -> dict:
         stats = {r["status"]: r["count"] for r in rows}
         stats["total"] = sum(stats.values())
         return stats
+    finally:
+        conn.close()
+
+
+# -- Cowork task actions -----------------------------------------------------
+#
+# Phase 1 is PREVIEW ONLY: state is constrained by the schema to
+# previewing/ready/failed, so no row here can claim an M365 write.
+
+_ACTION_INSERT_FIELDS = (
+    "action_type", "intent", "notes_snapshot", "redirect_text",
+    "composed_prompt", "destination_kind", "destination_ref", "conversation_id",
+    "island_url", "delivery_channel", "destination_display", "destination_source",
+    "destination_confirmed_at", "parent_action_id",
+    "blocked_question", "answered_interaction",
+)
+
+# Teams and email are the only transports TodoIQ can describe today. The value
+# is orthogonal to destination_kind, which describes audience size, not channel.
+DELIVERY_CHANNELS = frozenset({"teams", "email"})
+
+# Only the draft the user typed is editable. Everything Cowork produced, and
+# the state machine itself, is off limits from the API.
+ACTION_EDITABLE_FIELDS = frozenset({"draft_edited"})
+
+_ACTION_RESULT_FIELDS = frozenset({
+    "state", "finding", "draft", "terminal_status", "tool_trace", "error",
+    "conversation_id", "destination_kind", "destination_ref",
+})
+
+
+def create_task_action(task_id: int, **fields) -> dict:
+    """Insert a new task_actions row in state 'previewing'."""
+    cols = ["task_id"]
+    vals = [task_id]
+    for name in _ACTION_INSERT_FIELDS:
+        if fields.get(name) is not None:
+            cols.append(name)
+            vals.append(fields[name])
+
+    placeholders = ",".join("?" * len(cols))
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            f"INSERT INTO task_actions ({','.join(cols)}) VALUES ({placeholders})",
+            vals,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def get_latest_task_action(task_id: int) -> dict | None:
+    """Most recent attempt, ordered by id.
+
+    NOT created_at: those are second-precision TEXT and tie, which is exactly
+    the defect found live in get_last_sync. Two Redos inside one second would
+    otherwise return an arbitrary row.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def mark_task_action_seen(action_id: int) -> dict | None:
+    """Mark a ready Cowork action as seen using a server-generated timestamp."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE task_actions SET seen_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'ready' AND seen_at IS NULL",
+            (_now(), _now(), action_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def confirm_destination(
+    action_id: int,
+    delivery_channel: str,
+    destination_ref: str,
+    destination_display: str,
+    destination_source: str,
+) -> dict | None:
+    """Bind a reviewed audience to a ready action, timestamped by the server.
+
+    The state guard lives in SQL, mirroring mark_task_action_seen, so a caller
+    can never confirm a preview that is still running or has already failed.
+    Confirming records who an action is for; it does not deliver anything.
+    """
+    if delivery_channel not in DELIVERY_CHANNELS:
+        return None
+    ref = (destination_ref or "").strip()
+    display = (destination_display or "").strip()
+    if not ref or not display:
+        return None
+
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET delivery_channel = ?, destination_ref = ?, "
+            "destination_display = ?, destination_source = ?, "
+            "destination_confirmed_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'ready'",
+            (
+                delivery_channel, ref, display, destination_source,
+                _now(), _now(), action_id,
+            ),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def list_task_actions(task_id: int) -> list[dict]:
+    """Full attempt chain, oldest first. The Redo chain is the audit trail."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_actions WHERE task_id = ? ORDER BY id ASC",
+            (task_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_task_action(action_id: int, allowed: frozenset, **fields) -> dict | None:
+    """Update an action row, restricted to `allowed` field names."""
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return None
+
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"UPDATE task_actions SET {sets}, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+            list(updates.values()) + [action_id],
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def set_blocked_question_if_missing(action_id: int, question: str) -> dict | None:
+    """Persist a new interaction unless it is the one just answered."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = ?, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND (blocked_question IS NULL OR "
+            "(blocked_question = '' AND COALESCE(answered_interaction, '') <> ?))",
+            (question, action_id, question),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def claim_blocked_question_answer(action_id: int, expected_question: str) -> bool:
+    """Atomically claim the pending interaction so only one answer is sent."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET answered_interaction = blocked_question, "
+            "blocked_question = '', "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND state = 'previewing' "
+            "AND blocked_question = ?",
+            (action_id, expected_question),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def restore_claimed_blocked_question(action_id: int, question: str) -> bool:
+    """Restore a definitively rejected answer if its claim is still current."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = ?, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND blocked_question = '' "
+            "AND answered_interaction = ?",
+            (question, action_id, question),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def clear_blocked_question_if_unchanged(
+    action_id: int,
+    blocked_question: str | None,
+    answered_interaction: str | None,
+) -> bool:
+    """Clear a resumed interaction without erasing a concurrent state change."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET blocked_question = NULL, "
+            "answered_interaction = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id = ? AND blocked_question IS ? "
+            "AND answered_interaction IS ?",
+            (action_id, blocked_question, answered_interaction),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def recover_stuck_previews() -> int:
+    """Fail any preview left mid-flight by a restart.
+
+    Without this a browser close or server restart strands the row in
+    'previewing' forever and the task can never be previewed again.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE task_actions SET state = 'failed', "
+            "error = 'Interrupted by a server restart.', "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE state = 'previewing'"
+        )
+        conn.commit()
+        return cursor.rowcount
     finally:
         conn.close()
