@@ -15,6 +15,12 @@ var lastSyncTime = null;
 var _skillPollTimer = null;
 var _runningSkills = {};
 var _loadedSections = {};
+var _detailSplitResizeObserver = null;
+var DETAIL_EVIDENCE_STORAGE_KEY = 'todoness-evidence-width';
+var DETAIL_EVIDENCE_MIN = 25;
+var DETAIL_EVIDENCE_MAX = 65;
+var DETAIL_EVIDENCE_MIN_PX = 260;
+var DETAIL_WORKSPACE_MIN_PX = 320;
 var TERMINAL_SECTIONS = ['completed', 'dismissed', 'deleted'];
 
 // ── Valid Transitions (mirrors src/models.py VALID_TRANSITIONS) ────────
@@ -572,7 +578,7 @@ function renderSection(sectionId, sectionTasks) {
         } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
             enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         } else if (task.skill_output) {
-            enrichedHtml = '<span class="enriched-icon" title="Skill enriched">\u26A1</span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-complete" title="Cowork enhanced"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         }
         var waitingIconHtml = waitingActivityIcon(task);
         var suggestionBadgeHtml = suggestionCheckBadge(task);
@@ -718,6 +724,9 @@ function renderDetailPane(task) {
     // Skip re-render while the user is typing in this pane, then catch up on
     // blur so the deferral never silently drops an update.
     var activeEl = document.activeElement;
+    var restoreSplitFocus = activeEl
+        && activeEl.classList
+        && activeEl.classList.contains('detail-split-handle');
     if (activeEl && pane && pane.contains(activeEl) && _isTextEntry(activeEl)) {
         // Stash the task for a deferred re-render after blur
         pane._pendingTask = task;
@@ -735,11 +744,14 @@ function renderDetailPane(task) {
         return;
     }
 
-    var sourceIcon = sourceTypeIcon(task.source_type);
     var statusClass = (task.status || '').replace(/\s/g, '_');
+    var people = parsePeople(task.key_people);
+    var sourcePerson = people.length ? people[0].name : '';
+    var sourceLabel = sourcePerson || (task.source_type || 'Manual source');
+    var sourceSummary = task.source_snippet || task.description || 'No source evidence captured.';
 
-    // Header card with inline actions
-    var html = '<div class="detail-card">'
+    // Task identity stays full-width above the evidence/action workspace.
+    var headerHtml = '<div class="detail-card detail-task-header">'
         + '<div class="detail-header-row">'
         + '<h2 id="title-display-' + task.id + '">' + escapeHtml(task.title) + '</h2>'
         + '<button class="btn-edit-inline" onclick="toggleTitleEdit(' + task.id + ')" title="Edit title">&#9998;</button>'
@@ -770,11 +782,30 @@ function renderDetailPane(task) {
         + '<span class="meta-item" style="margin-left:auto">' + quickHitToggle(task) + '</span>'
         + '<span id="source-meta-' + task.id + '" class="meta-item source-meta-editable" style="margin-left:auto; cursor:pointer" '
         + 'onclick="openSourceModal(' + task.id + ')" title="Click to edit source">' + sourceMetaLink(task) + '</span>'
+        + '</div>'
+        + '</div>';
+
+    var lifecycleHtml = '<div class="detail-actions-bar detail-lifecycle-strip">'
+        + getActionButtons(task)
+        + '<span class="actions-spacer"></span>'
+        + '<button class="btn btn-refresh" onclick="refreshTask(' + task.id + ')" title="Re-parse with Claude + WorkIQ">&#8635; Refresh</button>'
+        + '</div>';
+
+    var evidenceHtml = '<aside class="detail-evidence" aria-label="Source and evidence">'
+        + '<div class="detail-card detail-source-card">'
+        + '<div class="detail-label">Source and evidence</div>'
+        + '<div class="detail-source-head">'
+        + '<img class="detail-source-avatar" src="/static/img/profile-placeholder.svg" alt="">'
+        + '<div><strong>' + escapeHtml(sourceLabel) + '</strong>'
+        + '<span>' + sourceTypeIcon(task.source_type) + ' ' + escapeHtml(task.source_type || 'manual') + '</span></div>'
+        + '</div>'
+        + '<div class="detail-source-quote">' + escapeHtml(sourceSummary) + '</div>'
+        + '<div class="detail-source-link">' + sourceMetaLink(task) + '</div>'
         + '</div>';
 
     // Description (editable)
     if (task.description) {
-        html += '<div style="margin-top:10px"><div class="detail-label">Description'
+        evidenceHtml += '<div class="detail-card"><div class="detail-label">Description'
             + '<button class="btn-edit-inline" onclick="toggleDescriptionEdit(' + task.id + ')" title="Edit description">&#9998;</button>'
             + '</div>'
             + '<div id="desc-display-' + task.id + '" class="detail-description">' + renderRichText(task.description, task.key_people) + '</div>'
@@ -782,7 +813,7 @@ function renderDetailPane(task) {
             + 'onblur="saveDescription(' + task.id + ')">' + escapeHtml(task.description) + '</textarea>'
             + '</div>';
     } else {
-        html += '<div style="margin-top:10px"><div class="detail-label">Description'
+        evidenceHtml += '<div class="detail-card"><div class="detail-label">Description'
             + '<button class="btn-edit-inline" onclick="toggleDescriptionEdit(' + task.id + ')" title="Add description">&#9998;</button>'
             + '</div>'
             + '<div id="desc-display-' + task.id + '" class="detail-description" style="color:#9e9e9e">No description</div>'
@@ -791,10 +822,8 @@ function renderDetailPane(task) {
             + '</div>';
     }
 
-    html += '</div>';
-
     // Key People (pills + add)
-    html += '<div class="detail-card">'
+    evidenceHtml += '<div class="detail-card">'
         + '<div class="detail-label">Key People</div>'
         + renderPeoplePills(task.key_people, task.id)
         + '<div class="add-person-row" id="add-person-row-' + task.id + '">'
@@ -810,18 +839,16 @@ function renderDetailPane(task) {
 
     // Waiting Activity Check (between Key People and Notes)
     if (task.status === 'waiting' || (task.status === 'snoozed' && parseWaitingActivity(task) && parseWaitingActivity(task).status === 'out_of_office')) {
-        html += renderWaitingActivityCard(task);
+        evidenceHtml += renderWaitingActivityCard(task);
     }
 
     // Suggestion Check (for suggested tasks, between Key People and Notes)
     if (task.status === 'suggested') {
-        html += renderSuggestionCheckCard(task);
+        evidenceHtml += renderSuggestionCheckCard(task);
     }
 
-    html += renderCoworkCard(task);
-
     // User Notes
-    html += '<div class="detail-card">'
+    evidenceHtml += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
         + '<div class="notes-add-row">'
         + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Cowork)" '
@@ -836,7 +863,7 @@ function renderDetailPane(task) {
 
     // Error message box
     if (task.error_message && task.parse_status === 'error') {
-        html += '<div class="parse-error-box">'
+        evidenceHtml += '<div class="parse-error-box">'
             + '<div class="parse-error-header">'
             + '<span class="parse-error-icon">&#9888;</span>'
             + '<span class="parse-error-title">Parse Error</span>'
@@ -846,26 +873,27 @@ function renderDetailPane(task) {
             + '</div>';
     }
 
+    evidenceHtml += '</aside>';
 
-    // Source snippet
-    if (task.source_snippet) {
-        html += '<div class="detail-card">'
-            + '<div class="detail-label">Source</div>'
-            + '<div class="detail-description">' + escapeHtml(task.source_snippet) + '</div>';
-        if (task.source_url) {
-            html += '<div style="margin-top:6px"><a href="' + escapeHtml(task.source_url) + '" target="_blank" style="color:#0f6cbd;font-size:12px">Open source</a></div>';
-        }
-        html += '</div>';
-    }
+    var workspaceHtml = '<section class="detail-workspace" aria-label="Cowork workspace">'
+        + renderCoworkCard(task)
+        + '</section>';
 
-    // Footer actions — contextual, prominent primary action
-    html += '<div class="detail-actions-bar">'
-        + getActionButtons(task)
-        + '<span class="actions-spacer"></span>'
-        + '<button class="btn btn-refresh" onclick="refreshTask(' + task.id + ')" title="Re-parse with Claude + WorkIQ">&#8635; Refresh</button>'
+    var splitHtml = '<div class="detail-split">'
+        + evidenceHtml
+        + '<div class="detail-split-handle" role="separator" tabindex="0" '
+        + 'aria-label="Resize source and evidence pane" aria-orientation="vertical" '
+        + 'aria-valuemin="' + DETAIL_EVIDENCE_MIN + '" '
+        + 'aria-valuemax="' + DETAIL_EVIDENCE_MAX + '"></div>'
+        + workspaceHtml
         + '</div>';
 
-    pane.innerHTML = html;
+    pane.innerHTML = headerHtml + lifecycleHtml + splitHtml;
+    initDetailSplit();
+    if (restoreSplitFocus) {
+        var replacementHandle = pane.querySelector('.detail-split-handle');
+        if (replacementHandle) replacementHandle.focus();
+    }
     cwInitFindingToggle(task.id);
 }
 
@@ -878,6 +906,107 @@ function clearDetailPane() {
         + '<div class="empty-state-icon">&#128203;</div>'
         + '<div>Select a task to view details</div>'
         + '</div>';
+}
+
+function getDetailEvidenceBounds(split, handle) {
+    var total = split.clientWidth;
+    if (!total || window.matchMedia('(max-width: 1050px)').matches) {
+        return {
+            min: DETAIL_EVIDENCE_MIN,
+            max: DETAIL_EVIDENCE_MAX,
+            stacked: true
+        };
+    }
+    var min = Math.max(
+        DETAIL_EVIDENCE_MIN,
+        Math.ceil((DETAIL_EVIDENCE_MIN_PX / total) * 100)
+    );
+    var max = Math.min(
+        DETAIL_EVIDENCE_MAX,
+        Math.floor(
+            ((total - handle.offsetWidth - DETAIL_WORKSPACE_MIN_PX) / total) * 100
+        )
+    );
+    return max > min
+        ? { min: min, max: max, stacked: false }
+        : {
+            min: DETAIL_EVIDENCE_MIN,
+            max: DETAIL_EVIDENCE_MAX,
+            stacked: true
+        };
+}
+
+function setDetailEvidenceWidth(split, handle, value, persist) {
+    var bounds = getDetailEvidenceBounds(split, handle);
+    split.classList.toggle('is-stacked', bounds.stacked);
+    var width = Math.min(bounds.max, Math.max(bounds.min, value));
+    split.style.setProperty('--detail-evidence-width', width + '%');
+    handle.setAttribute('aria-valuemin', String(bounds.min));
+    handle.setAttribute('aria-valuemax', String(bounds.max));
+    handle.setAttribute('aria-valuenow', String(Math.round(width)));
+    if (persist) localStorage.setItem(DETAIL_EVIDENCE_STORAGE_KEY, String(width));
+}
+
+function initDetailSplit() {
+    var split = document.querySelector('.detail-split');
+    var handle = split && split.querySelector('.detail-split-handle');
+    if (!split || !handle) return;
+
+    var saved = Number(localStorage.getItem(DETAIL_EVIDENCE_STORAGE_KEY));
+    setDetailEvidenceWidth(
+        split,
+        handle,
+        Number.isFinite(saved) && saved ? saved : 40,
+        Number.isFinite(saved) && Boolean(saved)
+    );
+
+    if (_detailSplitResizeObserver) _detailSplitResizeObserver.disconnect();
+    if (window.ResizeObserver) {
+        _detailSplitResizeObserver = new ResizeObserver(function() {
+            setDetailEvidenceWidth(
+                split,
+                handle,
+                Number(handle.getAttribute('aria-valuenow')) || 40,
+                false
+            );
+        });
+        _detailSplitResizeObserver.observe(split);
+    }
+
+    handle.addEventListener('pointerdown', function(e) {
+        if (window.matchMedia('(max-width: 1050px)').matches) return;
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        split.classList.add('is-resizing');
+    });
+    handle.addEventListener('pointermove', function(e) {
+        if (!handle.hasPointerCapture(e.pointerId)) return;
+        var rect = split.getBoundingClientRect();
+        setDetailEvidenceWidth(
+            split,
+            handle,
+            ((e.clientX - rect.left) / rect.width) * 100,
+            true
+        );
+    });
+    handle.addEventListener('pointerup', function(e) {
+        if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+        split.classList.remove('is-resizing');
+    });
+    handle.addEventListener('keydown', function(e) {
+        var current = Number(handle.getAttribute('aria-valuenow')) || 40;
+        var min = Number(handle.getAttribute('aria-valuemin')) || DETAIL_EVIDENCE_MIN;
+        var max = Number(handle.getAttribute('aria-valuemax')) || DETAIL_EVIDENCE_MAX;
+        var next = current;
+        if (e.key === 'ArrowLeft') next = current - 2;
+        else if (e.key === 'ArrowRight') next = current + 2;
+        else if (e.key === 'Home') next = min;
+        else if (e.key === 'End') next = max;
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+        setDetailEvidenceWidth(split, handle, next, true);
+    });
 }
 
 // ── People Pills ───────────────────────────────────────────────────────
@@ -4014,6 +4143,12 @@ function handleKeyboardShortcut(e) {
 
     // Tab to cycle sections
     if (key === 'Tab') {
+        // Once focus is inside a control, preserve native traversal. This keeps
+        // the evidence/workspace separator and the controls after it reachable.
+        var focused = document.activeElement;
+        if (focused && focused !== document.body && focused !== document.documentElement) {
+            return;
+        }
         e.preventDefault();
         _kbCycleSection(e.shiftKey ? -1 : 1);
         return;

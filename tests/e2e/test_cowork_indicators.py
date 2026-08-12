@@ -27,7 +27,7 @@ def _delete_task(page: Page, base_url: str, task_id: int) -> None:
 
 
 class TestCoworkIndicators:
-    def test_dashboard_running_and_unread_precede_skill_icon(
+    def test_dashboard_uses_bare_cowork_icon_for_completed_enrichment(
         self, page: Page, base_url
     ):
         task_id = _seed_task(page, base_url)
@@ -79,6 +79,9 @@ class TestCoworkIndicators:
                 )
             ).to_have_count(1)
             expect(row.locator(".enriched-icon")).to_have_count(0)
+            assert row.locator(".cw-status-unread").evaluate(
+                "node => getComputedStyle(node).boxShadow"
+            ) == "none"
             box = row.locator(".cw-status-unread").bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
             parsed_box = row.locator(".parse-icon").bounding_box()
@@ -107,7 +110,13 @@ class TestCoworkIndicators:
                 """
             )
             expect(row.locator(".cw-status-unread")).to_have_count(0)
-            expect(row.locator(".enriched-icon")).to_be_visible()
+            expect(row.locator(".enriched-icon")).to_have_count(0)
+            expect(row.locator(".cw-status-complete")).to_be_visible()
+            expect(
+                row.locator(
+                    '.cw-status-complete img[src="/static/img/coworker.svg"]'
+                )
+            ).to_have_count(1)
         finally:
             _delete_task(page, base_url, task_id)
 
@@ -210,7 +219,7 @@ class TestCoworkIndicators:
         finally:
             _delete_task(page, base_url, task_id)
 
-    def test_dashboard_cowork_card_is_above_notes(self, page: Page, base_url):
+    def test_dashboard_cowork_card_is_beside_evidence(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         try:
             page.goto(base_url + "/")
@@ -226,8 +235,9 @@ class TestCoworkIndicators:
                 selectTask({task_id});
                 """
             )
-            cowork_y = page.locator(".cw-card").bounding_box()["y"]
-            notes_y = page.get_by_text("Notes", exact=True).bounding_box()["y"]
-            assert cowork_y < notes_y
+            expect(page.locator(".detail-workspace .cw-card")).to_be_visible()
+            cowork_x = page.locator(".cw-card").bounding_box()["x"]
+            notes_x = page.get_by_text("Notes", exact=True).bounding_box()["x"]
+            assert cowork_x > notes_x
         finally:
             _delete_task(page, base_url, task_id)

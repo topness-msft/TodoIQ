@@ -996,6 +996,124 @@ html, body {
     height: 100%;
 }
 
+.detail-task-header,
+.detail-lifecycle-strip {
+    flex: 0 0 auto;
+}
+
+.detail-lifecycle-strip {
+    top: 0;
+    z-index: 5;
+}
+
+.detail-split {
+    --detail-evidence-width: 40%;
+    display: grid;
+    grid-template-columns:
+        minmax(260px, var(--detail-evidence-width))
+        9px
+        minmax(320px, 1fr);
+    align-items: start;
+    min-width: 0;
+    padding-bottom: 20px;
+}
+
+.detail-evidence,
+.detail-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.detail-workspace {
+    padding-left: 16px;
+}
+
+.detail-split.is-stacked {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.detail-split.is-stacked .detail-split-handle {
+    display: none;
+}
+
+.detail-split.is-stacked .detail-workspace {
+    width: 100%;
+    padding-left: 0;
+}
+
+.detail-split-handle {
+    align-self: stretch;
+    position: relative;
+    min-height: 240px;
+    cursor: col-resize;
+    touch-action: none;
+    outline: none;
+}
+
+.detail-split-handle::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 1px;
+    background: var(--border-primary);
+    transition: width 0.15s, left 0.15s, background 0.15s;
+}
+
+.detail-split-handle:hover::before,
+.detail-split-handle:focus-visible::before,
+.detail-split.is-resizing .detail-split-handle::before {
+    left: 3px;
+    width: 3px;
+    background: var(--accent);
+}
+
+.detail-source-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.detail-source-head > div {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.detail-source-head span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.detail-source-avatar {
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    border: 1px solid var(--border-primary);
+    border-radius: 50%;
+}
+
+.detail-source-quote {
+    padding: 12px;
+    border-radius: 6px;
+    background: var(--accent-bg);
+    color: var(--text-detail);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.detail-source-link {
+    margin-top: 10px;
+    font-size: 12px;
+}
+
 .empty-state {
     display: flex;
     flex-direction: column;
@@ -1580,14 +1698,6 @@ html, body {
     font-size: 11px;
     color: var(--text-secondary);
     margin-top: 8px;
-}
-
-/* ── Enriched Icon (task list rows) ────────────────────────────────── */
-.enriched-icon {
-    flex-shrink: 0;
-    font-size: 12px;
-    margin-top: 4px;
-    color: var(--success);
 }
 
 /* ── Description ────────────────────────────────────────────────────── */
@@ -2510,6 +2620,25 @@ html, body {
     margin-left: 8px;
 }
 
+/* Stack the inner evidence/action workspace before its minimum columns
+   would collide with the fixed-width task list. */
+@media (max-width: 1050px) {
+    .detail-split {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .detail-split-handle {
+        display: none;
+    }
+
+    .detail-workspace {
+        width: 100%;
+        padding-left: 0;
+    }
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     .top-bar {
@@ -2558,6 +2687,7 @@ html, body {
         flex: 1;
         min-height: 0;
     }
+
 }
 
 /* === Cowork action card ================================================= */
@@ -2716,10 +2846,8 @@ textarea.cw-draft {
     color: var(--accent); font-size: 14px; margin-top: 4px;
 }
 .cw-status-running { animation: cw-status-pulse 1.2s ease-in-out infinite; }
-.cw-status-unread {
-    border-radius: 50%; background: var(--accent-bg);
-    box-shadow: 0 0 0 1px var(--accent);
-}
+.cw-status-unread,
+.cw-status-complete { background: transparent; box-shadow: none; }
 @keyframes cw-status-pulse {
     0%, 100% { opacity: .35; transform: scale(.8); }
     50% { opacity: 1; transform: scale(1); }
