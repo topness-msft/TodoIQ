@@ -967,6 +967,11 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                 tid,
                 prompt,
                 action["conversation_id"],
+                approval_kind=(
+                    "calendar"
+                    if action.get("action_type") == "schedule-meeting"
+                    else action.get("delivery_channel")
+                ),
                 log_dir=LOG_DIR_OVERRIDE,
             )
         except Exception as exc:  # noqa: BLE001

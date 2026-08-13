@@ -806,7 +806,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = lambda: True
         self.started = []
         cowork_handler.EXECUTE_FN = lambda task_id, prompt, conversation_id, **kw: (
-            self.started.append((task_id, prompt, conversation_id))
+            self.started.append((task_id, prompt, conversation_id, kw))
             or cr.execution_label(task_id)
         )
 
@@ -1066,6 +1066,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self.assertEqual(action["state"], "executing")
         self.assertEqual(action["parent_action_id"], parent_id)
         self.assertEqual(self.started[0][2], "tenant:user:conversation")
+        self.assertEqual(self.started[0][3]["approval_kind"], "teams")
         self.assertIn("Sarah Goodwin", self.started[0][1])
         self.assertIn("deck is attached", self.started[0][1])
 
@@ -1075,6 +1076,20 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             body=json.dumps({"draft_edited": "Changed after execution"}),
         )
         self.assertEqual(edit.code, 409)
+
+    def test_routes_email_and_calendar_approvals_by_action(self):
+        email_tid = self.make_task()
+        self._ready_action(email_tid, delivery_channel="email")
+        self.assertEqual(self._execute(email_tid).code, 202)
+        self.assertEqual(self.started[-1][3]["approval_kind"], "email")
+
+        calendar_tid = self.make_task()
+        self._ready_action(
+            calendar_tid,
+            action_type="schedule-meeting",
+        )
+        self.assertEqual(self._execute(calendar_tid).code, 202)
+        self.assertEqual(self.started[-1][3]["approval_kind"], "calendar")
 
     def test_rejects_unconfirmed_destination(self):
         tid = self.make_task()

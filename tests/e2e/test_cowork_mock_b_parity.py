@@ -147,9 +147,10 @@ def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
     expect(page.get_by_test_id("session-complete")).to_contain_text(
         "Draft completed without interruption"
     )
-    expect(page.get_by_test_id("credit-meter")).to_have_text("30.2 credits")
-    expect(page.get_by_test_id("cowork-finished")).to_contain_text("Cowork finished")
-    expect(page.get_by_test_id("open-in-cowork-link")).to_be_visible()
+    expect(page.get_by_test_id("credit-meter")).to_have_count(0)
+    expect(page.get_by_test_id("cowork-finished")).to_have_count(0)
+    expect(page.get_by_test_id("cw-open-cowork")).to_be_visible()
+    expect(page.get_by_role("link", name="Open in Cowork")).to_have_count(1)
     expect(page.get_by_role("button", name="Open draft in Outlook")).to_have_count(0)
     expect(page.get_by_role("button", name="Edit")).to_have_count(0)
     expect(page.get_by_role("link", name="Finish in Cowork")).to_have_count(0)
@@ -194,8 +195,20 @@ def test_ready_action_opens_exact_confirmation_and_submits_once(
             "delivery_channel": "teams",
             "destination_ref": "mehdi@microsoft.com",
             "destination_display": "Mehdi Slaoui Andaloussi",
+            "destination_source": "auto_source_url",
             "destination_confirmed_at": "2026-08-11T12:00:00Z",
+            "source_url": (
+                "https://teams.microsoft.com/l/message/"
+                "19:meeting_abc@thread.v2/123?context=chat"
+            ),
         },
+    )
+    page.evaluate(
+        """taskId => {
+            tasks.find(t => t.id === taskId).source_url =
+                _cwActions[taskId].source_url;
+        }""",
+        task_id,
     )
     sent = []
     sent_headers = []
@@ -223,6 +236,15 @@ def test_ready_action_opens_exact_confirmation_and_submits_once(
     expect(modal).to_be_visible()
     expect(modal).to_contain_text("Mehdi Slaoui Andaloussi")
     expect(modal).to_contain_text("Hi Mehdi, the review is complete.")
+    conversation = modal.get_by_role(
+        "link", name="Open Mehdi Slaoui Andaloussi conversation"
+    )
+    expect(conversation).to_have_attribute(
+        "href",
+        "https://teams.microsoft.com/l/message/"
+        "19:meeting_abc@thread.v2/123?context=chat",
+    )
+    expect(modal).not_to_contain_text("19:meeting_abc@thread.v2")
     page.screenshot(
         path=os.path.join(TEMP_DIR, "cowork-execute-confirmation-light.png"),
         full_page=True,

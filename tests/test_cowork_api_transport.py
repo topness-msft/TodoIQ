@@ -106,6 +106,167 @@ class TestSseParsing(unittest.TestCase):
         self.assertEqual([k for k, _ in _iter_sse(lines)], ["rl"])
 
 
+class TestExecutionApprovalAnswer(unittest.TestCase):
+    def _aq(self, question, options, *, multi=False):
+        return {
+            "iid": "approval-1",
+            "q": [{
+                "id": "confirm",
+                "question": question,
+                "options": [
+                    {"label": label, "value": value}
+                    for label, value in options
+                ],
+                "multiSelect": multi,
+            }],
+        }
+
+    def test_matches_each_supported_write_channel(self):
+        cases = [
+            ("teams", "Send a chat?", [("Send", "send")], "send"),
+            ("email", "Send this email?", [("Send", "send")], "send"),
+            (
+                "calendar",
+                "Create this calendar event?",
+                [("Create", "create")],
+                "create",
+            ),
+        ]
+        for channel, question, options, expected in cases:
+            with self.subTest(channel=channel):
+                answer = cr._execution_approval_answer(
+                    self._aq(question, options), channel
+                )
+                self.assertEqual(answer, ("approval-1", {"0": expected}))
+
+    def test_rejects_channel_mismatch_and_missing_information(self):
+        self.assertIsNone(
+            cr._execution_approval_answer(
+                self._aq("Send this email?", [("Send", "send")]), "teams"
+            )
+        )
+        self.assertIsNone(
+            cr._execution_approval_answer(
+                self._aq("Which account should I use?", [("Yes", "yes")]),
+                "email",
+            )
+        )
+
+    def test_rejects_approval_that_bundles_another_write(self):
+        cases = [
+            ("teams", "Send this Teams message and delete the original chat?"),
+            ("email", "Send this email and create a calendar event?"),
+            ("calendar", "Create this calendar event and post a Teams message?"),
+        ]
+        for channel, question in cases:
+            with self.subTest(channel=channel):
+                self.assertIsNone(
+                    cr._execution_approval_answer(
+                        self._aq(question, [("Yes", "yes")]), channel
+                    )
+                )
+
+    def test_rejects_multi_question_multi_select_and_ambiguous_answers(self):
+        two_questions = self._aq("Send a chat?", [("Send", "send")])
+        two_questions["q"].append({
+            "id": "other",
+            "question": "Anything else?",
+            "options": [{"label": "No", "value": "no"}],
+        })
+        self.assertIsNone(
+            cr._execution_approval_answer(two_questions, "teams")
+        )
+        self.assertIsNone(
+            cr._execution_approval_answer(
+                self._aq("Send a chat?", [("Send", "send")], multi=True),
+                "teams",
+            )
+        )
+        self.assertIsNone(
+            cr._execution_approval_answer(
+                self._aq(
+                    "Send a chat?",
+                    [("Send", "send"), ("Yes", "yes")],
+                ),
+                "teams",
+            )
+        )
+
+    def test_hanging_stream_resumes_after_exact_approval_answer(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, client):
+                self.client = client
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                yield "event: rl"
+                yield 'data: {"st":"started"}'
+                yield ""
+                yield "event: aq"
+                yield (
+                    'data: {"iid":"approval-1","q":[{"id":"confirm",'
+                    '"question":"Send a chat?","options":'
+                    '[{"label":"Send","value":"send"},'
+                    '{"label":"Cancel","value":"cancel"}]}]}'
+                )
+                yield ""
+                answered = [
+                    body for body in self.client.posts
+                    if body["content"][0]["type"] == "ask_user_answer"
+                ]
+                self.assertTrue(answered)
+                yield "event: rl"
+                yield 'data: {"st":"ok"}'
+
+            def assertTrue(self, value):
+                if not value:
+                    raise AssertionError("approval answer was not posted")
+
+        class Posted:
+            status_code = 202
+
+        class Client:
+            def __init__(self):
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response(self)
+
+            def post(self, _url, **kwargs):
+                self.posts.append(kwargs["json"])
+                return Posted()
+
+        client = Client()
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client):
+            payload = cr._api_run_default(
+                "send it",
+                None,
+                lambda _text: None,
+                conversation_id="t:u:cw-existing",
+                is_follow_up=True,
+                approval_kind="teams",
+            )
+        self.assertEqual(payload["terminal_status"], "ok")
+        answer = client.posts[1]["content"][0]["rawEvent"]
+        self.assertEqual(answer["invocationId"], "approval-1")
+        self.assertEqual(answer["answers"], {"0": "send"})
+
+
 class TestPayloadEquivalence(unittest.TestCase):
     """The API result must be indistinguishable from the CLI's, downstream."""
 

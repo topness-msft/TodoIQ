@@ -3052,6 +3052,11 @@ textarea.cw-draft {
 }
 .cw-execute-destination b { color: var(--text-primary); font-size: 13px; }
 .cw-execute-destination small { color: var(--text-secondary); }
+.cw-execute-destination-link {
+    align-self: center; color: var(--accent); font-size: 13px;
+    font-weight: 600; text-decoration: none;
+}
+.cw-execute-destination-link:hover { text-decoration: underline; }
 .cw-execute-draft {
     max-height: 220px; overflow-y: auto; padding: 12px;
     border: 1px solid var(--border-primary); border-radius: 7px;

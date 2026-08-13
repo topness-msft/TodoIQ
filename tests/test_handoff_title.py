@@ -1,6 +1,6 @@
 """The handed-off task must be identifiable in the Cowork web app.
 
-Every TodoIQ conversation shows up in Phil's Cowork task list titled
+Every Riveter conversation shows up in Phil's Cowork task list titled
 "[ROLE] You are helping the user act". That is literally the first 35
 characters of our prompt: the runtime derives a task title by truncating the
 opening text, and there is no title field on /v1/subscribe to override it.
@@ -41,10 +41,10 @@ class HandoffTitleTest(unittest.TestCase):
         first = compose_prompt(task).splitlines()[0]
         self.assertIn("Send Raj the Kickstarter materials", first)
 
-    def test_the_first_line_names_todoiq_as_the_origin(self):
+    def test_the_first_line_names_riveter_as_the_origin(self):
         """So a handed-off task is distinguishable from one started in Cowork."""
         first = compose_prompt(make_task()).splitlines()[0]
-        self.assertIn("TodoIQ", first)
+        self.assertIn("Riveter", first)
 
     def test_the_first_line_survives_truncation(self):
         """A task list shows a short prefix, so the useful part must be early."""
@@ -59,7 +59,7 @@ class HandoffTitleTest(unittest.TestCase):
 
     def test_a_missing_title_still_produces_a_usable_line(self):
         first = compose_prompt(make_task(title="")).splitlines()[0]
-        self.assertIn("TodoIQ", first)
+        self.assertIn("Riveter", first)
         self.assertTrue(first.strip())
 
     def test_the_title_line_is_stripped_of_newlines(self):

@@ -518,14 +518,14 @@ def _strip_workiq(text: str) -> str:
 
 
 _HANDOFF_TITLE_MAX = 90
-_HANDOFF_TITLE_PREFIX = "TodoIQ: "
+_HANDOFF_TITLE_PREFIX = "Riveter: "
 
 
 def _handoff_title_line(title) -> str:
     """The single line the Cowork task list will show for this conversation.
 
     Kept on one line and short, because a task list renders a truncated prefix.
-    The "TodoIQ:" marker is what tells a handed-off task apart from one the user
+    The "Riveter:" marker is what tells a handed-off task apart from one the user
     started in Cowork themselves.
     """
     text = " ".join((_clean(title) or "").split())
@@ -1879,6 +1879,7 @@ def start_execution(
     prompt,
     conversation_id,
     *,
+    approval_kind=None,
     log_dir=None,
 ) -> str:
     """Run one explicitly approved, unbarriered API follow-up turn."""
@@ -1910,7 +1911,11 @@ def start_execution(
                 None,
                 Path(log_dir) if log_dir else LOG_DIR,
             ),
-            kwargs={"conversation_id": conversation_id, "is_follow_up": True},
+            kwargs={
+                "conversation_id": conversation_id,
+                "is_follow_up": True,
+                "approval_kind": approval_kind,
+            },
             daemon=True,
             name=f"cowork-execute-{task_id}",
         )
@@ -2638,6 +2643,53 @@ def _parse_aq_interaction(data):
     return {"invocation_id": invocation_id, "questions": questions}
 
 
+def _execution_approval_answer(data, approval_kind):
+    """Return the one safe answer for a channel-matched send confirmation."""
+    interaction = _parse_aq_interaction(data)
+    if not interaction or approval_kind not in {"teams", "email", "calendar"}:
+        return None
+    questions = interaction["questions"]
+    if len(questions) != 1 or questions[0]["multi_select"]:
+        return None
+
+    question = questions[0]
+    text = " ".join(
+        part for part in (question["header"], question["question"]) if part
+    ).lower()
+    channel_terms = {
+        "teams": ("teams", "chat", "message"),
+        "email": ("email",),
+        "calendar": ("calendar", "event", "invite", "meeting"),
+    }
+    if not any(term in text for term in channel_terms[approval_kind]):
+        return None
+    action_terms = {
+        "teams": ("send", "post"),
+        "email": ("send",),
+        "calendar": ("create", "schedule", "send"),
+    }
+    if not any(term in text for term in action_terms[approval_kind]):
+        return None
+    forbidden_terms = {
+        "teams": ("archive", "create", "delete", "edit", "forward", "remove", "schedule", "update"),
+        "email": ("archive", "create", "delete", "edit", "forward", "post", "remove", "schedule", "update"),
+        "calendar": ("archive", "delete", "edit", "forward", "post", "remove", "update"),
+    }
+    if any(re.search(rf"\b{term}\b", text) for term in forbidden_terms[approval_kind]):
+        return None
+
+    affirmative = {"approve", "confirm", "create", "schedule", "send", "yes"}
+    matches = []
+    for option in question["options"]:
+        value = option["value"].strip()
+        label = option["label"].strip()
+        if value.lower() in affirmative or label.lower() in affirmative:
+            matches.append(value)
+    if len(matches) != 1:
+        return None
+    return interaction["invocation_id"], {"0": matches[0]}
+
+
 def _safe_interaction_image_url(value):
     """Keep explicit HTTPS images; raw HTML and active URL schemes stay inert."""
     url = str(value or "").strip()
@@ -2760,7 +2812,8 @@ def _is_auth_failure(exc) -> bool:
 
 
 def _collect_api(label, task_id, prompt, config_path, log_dir,
-                 conversation_id=None, is_follow_up=None) -> None:
+                 conversation_id=None, is_follow_up=None,
+                 approval_kind=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -2786,9 +2839,13 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
         )
         runner = _api_run_fn or _api_run_default
         on_progress = lambda text: _append_progress(label, text)  # noqa: E731
-        call = functools.partial(
-            runner, conversation_id=conversation_id, is_follow_up=is_follow_up
-        )
+        run_kwargs = {
+            "conversation_id": conversation_id,
+            "is_follow_up": is_follow_up,
+        }
+        if approval_kind:
+            run_kwargs["approval_kind"] = approval_kind
+        call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
         except Exception as exc:  # noqa: BLE001
@@ -2924,7 +2981,7 @@ def new_conversation_id(_auth=None):
 
 
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
-                     is_follow_up=None):
+                     is_follow_up=None, approval_kind=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -3007,11 +3064,47 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                     raise RuntimeError(
                         f"POST /v1/messages returned HTTP {posted.status_code}"
                     )
+            approval_answered = False
             for kind, data in _iter_sse(response.iter_lines()):
                 events.append((kind, data))
                 text = _api_progress_text(kind, data)
                 if text:
                     on_progress(text)
+                if kind == "aq" and approval_kind and not approval_answered:
+                    approval = _execution_approval_answer(data, approval_kind)
+                    if approval:
+                        invocation_id, answers = approval
+                        answer_body = {
+                            "conversationId": conversation_id,
+                            "role": "user",
+                            "content": [{
+                                "type": "ask_user_answer",
+                                "rawEvent": {
+                                    "invocationId": invocation_id,
+                                    "answers": answers,
+                                },
+                            }],
+                        }
+                        answered = client.post(
+                            f"{base}/v1/messages",
+                            headers={
+                                **post_headers,
+                                "X-Conversation-ID": conversation_id,
+                            },
+                            json=answer_body,
+                            timeout=15,
+                        )
+                        if answered.status_code not in (200, 202):
+                            raise RuntimeError(
+                                "Cowork rejected the approved action "
+                                f"confirmation: HTTP {answered.status_code}"
+                            )
+                        approval_answered = True
+                        logger.info(
+                            "answered %s execution approval for conversation %s",
+                            approval_kind,
+                            conversation_id,
+                        )
                 if kind == "rl" and data.get("st") in _TURN_COMPLETE_RUN_STATES:
                     break
 

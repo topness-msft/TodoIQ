@@ -3086,30 +3086,8 @@ function cwFinishedAgo(value) {
 }
 
 function cwHeadStatus(a) {
-    if (!a || ['ready', 'executed', 'execute_unconfirmed'].indexOf(a.state) < 0) return '';
-    var items = [];
-    var c = Number(a.cost_credits);
-    if (a.cost_credits !== null && a.cost_credits !== undefined
-            && a.cost_credits !== '' && isFinite(c) && c >= 0) {
-        var creditText = c === 0 ? 'no credits'
-            : c >= 1000 ? Math.round(c).toLocaleString() + ' credits'
-            : c.toFixed(1) + ' credits';
-        items.push('<span class="cw-head-note" data-testid="credit-meter">'
-            + escapeHtml(creditText) + '</span>');
-    }
-    var ago = cwFinishedAgo(a.completed_at || a.updated_at);
-    var statusText = a.state === 'executed' ? 'Delivery confirmed'
-        : a.state === 'execute_unconfirmed' ? 'Delivery needs checking'
-        : 'Cowork finished';
-    items.push('<span class="cw-head-note" data-testid="cowork-finished">'
-        + statusText + (ago ? ' ' + escapeHtml(ago) : '') + '</span>');
-    if (a.conversation_id) {
-        items.push('<a class="cw-head-link" data-testid="open-in-cowork-link" href="'
-            + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
-              + encodeURIComponent(a.conversation_id))
-            + '" target="_blank" rel="noopener noreferrer">Open in Cowork &#8599;</a>');
-    }
-    return '<span class="cw-head-status">' + items.join('') + '</span>';
+    if (!a || !a.conversation_id) return '';
+    return '<span class="cw-head-status">' + cwOpenLink(a, 'Open in Cowork') + '</span>';
 }
 
 function cwShell(cls, badge, task, body, foot, action) {
@@ -3255,6 +3233,15 @@ function cwOpenExecuteConfirm(taskId) {
         var old = document.getElementById('execute-modal');
         if (old) old.remove();
         var label = cwExecutionLabel(task, action);
+        var destination = action.destination_display || action.destination_ref || '';
+        var destinationHtml = '<b>' + escapeHtml(destination) + '</b>';
+        if (action.delivery_channel === 'teams' && task.source_url
+                && action.destination_source === 'auto_source_url') {
+            destinationHtml = '<a class="cw-execute-destination-link" href="'
+                + escapeHtml(task.source_url)
+                + '" target="_blank" rel="noopener noreferrer">Open '
+                + escapeHtml(destination) + ' conversation</a>';
+        }
         _cwExecuteApprovals[taskId] = {
             parent_action_id: action.id,
             draft: cwCurrentDraft(action).trim(),
@@ -3272,9 +3259,8 @@ function cwOpenExecuteConfirm(taskId) {
             + '<div class="cw-execute-kicker">Approved action</div>'
             + '<div class="source-modal-header" id="execute-modal-title">'
             + escapeHtml(label) + '?</div>'
-            + '<div class="cw-execute-destination"><span>Destination</span><b>'
-            + escapeHtml(action.destination_display || action.destination_ref || '')
-            + '</b><small>' + escapeHtml(action.destination_ref || '') + '</small></div>'
+            + '<div class="cw-execute-destination"><span>Destination</span>'
+            + destinationHtml + '</div>'
             + '<label class="source-modal-label">Final draft</label>'
             + '<div class="cw-execute-draft">' + renderCoworkMarkdown(cwCurrentDraft(action)) + '</div>'
             + '<div class="cw-execute-warning">This performs the action through Cowork. '
@@ -3883,7 +3869,7 @@ function renderCoworkCard(task) {
                 + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
-                cwOpenLink(a, 'Open in Cowork'),
+                '',
                 a);
         }
 
@@ -3896,8 +3882,7 @@ function renderCoworkCard(task) {
                 + '</div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
-                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
-                + cwOpenLink(a, 'Open in Cowork'),
+                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>',
                 a);
         }
         return cwShell('is-running', 'read-only', task,
