@@ -31,7 +31,9 @@ def _delete_task(page: Page, base_url: str, task_id: int) -> None:
 
 
 def _assert_link(page: Page) -> None:
-    link = page.get_by_test_id("cw-open-cowork")
+    link = page.locator(
+        '[data-testid="open-in-cowork-link"], [data-testid="cw-open-cowork"]'
+    )
     expect(link).to_be_visible()
     expect(link).to_have_attribute("href", EXPECTED_URL)
     expect(link).to_have_attribute("target", "_blank")
@@ -79,7 +81,7 @@ class TestCoworkDeepLink:
                 f"_cwActions[{task_id}].conversation_id=''; "
                 f"renderDetailPane(tasks.find(task => task.id === {task_id}));"
             )
-            expect(page.get_by_test_id("cw-open-cowork")).to_have_count(0)
+            expect(page.get_by_test_id("open-in-cowork-link")).to_have_count(0)
         finally:
             _delete_task(page, base_url, task_id)
 
@@ -119,4 +121,3 @@ class TestCoworkDeepLink:
             expect(page.get_by_test_id("cw-open-cowork")).to_have_count(0)
         finally:
             _delete_task(page, base_url, task_id)
-

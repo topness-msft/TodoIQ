@@ -66,7 +66,7 @@ class TestDraftEditorLayout:
         task_id = _seed(page, base_url)
         try:
             _open_ready(page, base_url, task_id)
-            page.get_by_role("button", name="Edit").click()
+            page.get_by_test_id("cowork-draft-click-edit").click()
             box = page.locator(f"#cw-draft-{task_id}")
             expect(box).to_be_visible()
 
@@ -91,7 +91,7 @@ class TestDraftEditorLayout:
             rendered = page.evaluate(
                 "document.querySelector('.cw-draft').getBoundingClientRect().width"
             )
-            page.get_by_role("button", name="Edit").click()
+            page.get_by_test_id("cowork-draft-click-edit").click()
             edited = page.evaluate(
                 f"document.getElementById('cw-draft-{task_id}')"
                 ".getBoundingClientRect().width"
@@ -105,7 +105,7 @@ class TestDraftEditorLayout:
         task_id = _seed(page, base_url)
         try:
             _open_ready(page, base_url, task_id)
-            page.get_by_role("button", name="Edit").click()
+            page.get_by_test_id("cowork-draft-click-edit").click()
             fits = page.evaluate(
                 f"""() => {{
                     const ta = document.getElementById('cw-draft-{task_id}');
@@ -124,7 +124,7 @@ class TestDraftEditorLayout:
         task_id = _seed(page, base_url)
         try:
             _open_ready(page, base_url, task_id)
-            page.get_by_role("button", name="Edit").click()
+            page.get_by_test_id("cowork-draft-click-edit").click()
             fonts = page.evaluate(
                 f"""() => {{
                     const ta = document.getElementById('cw-draft-{task_id}');

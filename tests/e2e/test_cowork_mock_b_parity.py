@@ -58,6 +58,13 @@ def test_mode_selector_drives_start_request(page: Page, base_url):
     page.route(f"**/api/tasks/{task_id}/cowork", start_route)
     no_interaction = page.get_by_test_id("session-mode-no-interaction")
     expect(no_interaction).to_be_visible()
+    expect(no_interaction).to_have_text("Finish without questions")
+    expect(no_interaction).to_have_attribute(
+        "title", "Cowork makes reasonable decisions and does not pause to ask."
+    )
+    expect(page.get_by_test_id("session-mode-interaction")).to_have_text(
+        "Can ask questions"
+    )
     no_interaction.click()
     expect(no_interaction).to_have_attribute("aria-pressed", "true")
     page.get_by_role("button", name="Preview with Cowork").click()
@@ -108,10 +115,18 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
     )
     expect(page.get_by_test_id("session-timeline")).not_to_contain_text("Bash")
     expect(page.get_by_test_id("tool-icon")).to_have_count(3)
+    expect(page.locator('[data-testid="tool-icon"] svg')).to_have_count(3)
+    expect(page.locator('[data-tool-icon="teams"]')).to_have_count(1)
+    expect(page.locator('[data-tool-icon="calendar"]')).to_have_count(1)
+    live = page.locator(".cw-timeline-event.is-active > div > span")
+    box = live.evaluate(
+        "(el) => ({clientHeight: el.clientHeight, scrollHeight: el.scrollHeight})"
+    )
+    assert box["scrollHeight"] <= box["clientHeight"] + 2
 
 
 def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
-    _render(
+    task_id = _render(
         page,
         base_url,
         {
@@ -136,6 +151,23 @@ def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
     expect(page.get_by_test_id("cowork-finished")).to_contain_text("Cowork finished")
     expect(page.get_by_test_id("open-in-cowork-link")).to_be_visible()
     expect(page.get_by_role("button", name="Open draft in Outlook")).to_have_count(0)
+    expect(page.get_by_role("button", name="Edit")).to_have_count(0)
+    expect(page.get_by_role("link", name="Finish in Cowork")).to_have_count(0)
+    expect(page.get_by_role("button", name="Hide")).to_have_count(0)
+    expect(page.get_by_role("button", name="Refine")).to_be_visible()
+    draft = page.get_by_test_id("cowork-draft-click-edit")
+    expect(draft).to_have_attribute("title", "Click to edit draft")
+    draft.focus()
+    draft.press("Enter")
+    editor = page.locator(f"#cw-draft-{task_id}")
+    expect(editor).to_be_visible()
+    expect(editor).to_be_focused()
+    page.get_by_role("button", name="Cancel").click()
+    draft = page.get_by_test_id("cowork-draft-click-edit")
+    draft.click()
+    expect(page.locator(f"#cw-draft-{task_id}")).to_be_visible()
+    expect(page.locator('link[href*="style.css?v="]')).to_have_count(1)
+    expect(page.locator('script[src*="dashboard.js?v="]')).to_have_count(1)
     page.evaluate("document.documentElement.setAttribute('data-theme', 'light')")
     page.screenshot(
         path=os.path.join(TEMP_DIR, "cowork-mock-b-parity-light.png"),

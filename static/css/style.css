@@ -2904,7 +2904,10 @@ textarea.cw-draft {
 .cw-timeline-event:last-child { border-bottom: 0; }
 .cw-timeline-event > div {
     display: grid; grid-template-columns: 38px 1fr; gap: 7px; align-items: center;
-    color: var(--text-primary); font-size: 12px;
+    min-width: 0; color: var(--text-primary); font-size: 12px;
+}
+.cw-timeline-event > div > span {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .cw-timeline-event small { color: var(--text-secondary); font-size: 10px; }
 .cw-timeline-dot {
@@ -2939,6 +2942,16 @@ textarea.cw-draft {
     font-family: inherit; font-size: 12px;
 }
 .cw-tool-icon.is-search { color: var(--accent); }
+.cw-tool-icon svg { display: block; width: 15px; height: 15px; }
+.cw-draft[data-testid="cowork-draft-click-edit"] {
+    cursor: text; transition: border-color .15s, background .15s;
+}
+.cw-draft[data-testid="cowork-draft-click-edit"]:hover {
+    border-color: var(--accent); background: var(--bg-secondary);
+}
+.cw-draft[data-testid="cowork-draft-click-edit"]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .cw-session-complete {
     display: grid; gap: 4px; margin: 0 0 12px; padding: 10px 12px;
     border: 1px solid var(--success); border-radius: 7px;

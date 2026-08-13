@@ -3142,17 +3142,20 @@ function cwSetMode(taskId, mode) {
 
 function cwModeSwitch(taskId, action, locked) {
     var mode = cwSelectedMode(taskId, action);
-    function button(value, label, testid) {
+    function button(value, label, testid, title) {
         var on = mode === value;
         return '<button type="button" class="cw-mode-btn' + (on ? ' is-on' : '')
             + '" data-testid="' + testid + '" aria-pressed="' + on + '"'
+            + ' title="' + escapeAttr(title) + '"'
             + (locked ? ' disabled' : '')
             + ' onclick="cwSetMode(' + taskId + ',\'' + value + '\')">'
             + label + '</button>';
     }
     return '<div class="cw-mode-switch" role="group" aria-label="Cowork session mode">'
-        + button('interaction', 'Interaction', 'session-mode-interaction')
-        + button('no_interaction', 'No interaction', 'session-mode-no-interaction')
+        + button('interaction', 'Can ask questions', 'session-mode-interaction',
+            'Cowork may pause when it needs a decision from you.')
+        + button('no_interaction', 'Finish without questions', 'session-mode-no-interaction',
+            'Cowork makes reasonable decisions and does not pause to ask.')
         + '</div>';
 }
 
@@ -3187,17 +3190,27 @@ function cwToolLabel(item) {
 function cwToolIcon(item) {
     var raw = String((item && (item.name || item.tool_name || item.tool)) || '').toLowerCase();
     var type = 'generic';
-    var glyph = '\u2726';
-    if (raw === 'bash') { type = 'terminal'; glyph = '>_'; }
-    else if (raw.indexOf('teams') >= 0) { type = 'teams'; glyph = 'T'; }
+    var icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1.5 9.7 6.3l4.8 1.7-4.8 1.7L8 14.5 6.3 9.7 1.5 8l4.8-1.7L8 1.5Z"/></svg>';
+    if (raw === 'bash') {
+        type = 'terminal';
+        icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="m3 4 3 3-3 3m5 1h5"/></svg>';
+    } else if (raw.indexOf('teams') >= 0) {
+        type = 'teams';
+        icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="12.7" cy="3.4" r="1.7" fill="#d8d9ff"/><path fill="#fff" d="M2 3h8v9.5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 2 12.5V3Zm1.5 2v1.4h1.7v5.1h1.6V6.4h1.7V5h-5Z"/><path fill="#d8d9ff" d="M11 6h3v5.2a1.8 1.8 0 0 1-1.8 1.8H11V6Z"/></svg>';
+    }
     else if (raw.indexOf('calendar') >= 0 || raw.indexOf('meeting') >= 0) {
-        type = 'calendar'; glyph = '17';
-    } else if (raw.indexOf('search') >= 0) { type = 'search'; glyph = '\u2315'; }
+        type = 'calendar';
+        icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#fff" d="M2 3.5A1.5 1.5 0 0 1 3.5 2H5v2h1V2h4v2h1V2h1.5A1.5 1.5 0 0 1 14 3.5V6H2V3.5Zm0 3.7h12v5.3a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V7.2Z"/><path fill="#0f6cbd" d="M5 9h2v1.2H6.2V13H5V9Zm3 0h3v1l-1.7 3H7.9l1.7-2.8H8V9Z"/></svg>';
+    } else if (raw.indexOf('search') >= 0) {
+        type = 'search';
+        icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10 10 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    }
     else if (raw.indexOf('outlook') >= 0 || raw.indexOf('email') >= 0) {
-        type = 'mail'; glyph = '@';
+        type = 'mail';
+        icon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#fff" d="M1.5 3.5h13v9h-13v-9Zm1.4 1.2L8 8.4l5.1-3.7H2.9Zm10.2 6.6V6.4L8 10.1 2.9 6.4v4.9h10.2Z"/></svg>';
     }
     return '<span class="cw-tool-icon is-' + type + '" data-testid="tool-icon" '
-        + 'aria-hidden="true">' + glyph + '</span>';
+        + 'data-tool-icon="' + type + '" aria-hidden="true">' + icon + '</span>';
 }
 
 function cwTimeline(action, liveText) {
@@ -3870,8 +3883,7 @@ function renderCoworkCard(task) {
                 + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
-                cwOpenLink(a, 'Open in Cowork')
-                + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>',
+                cwOpenLink(a, 'Open in Cowork'),
                 a);
         }
 
@@ -3885,8 +3897,7 @@ function renderCoworkCard(task) {
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
                 '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
-                + cwOpenLink(a, 'Open in Cowork')
-                + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>',
+                + cwOpenLink(a, 'Open in Cowork'),
                 a);
         }
         return cwShell('is-running', 'read-only', task,
@@ -3917,8 +3928,7 @@ function renderCoworkCard(task) {
             + '<br>Nothing was sent.</div></div>'
             + cwRedoRow(task.id),
             '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Retry</button>'
-            + cwRedoBlock(task.id)
-            + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Dismiss</button>',
+            + cwRedoBlock(task.id),
             a);
     }
 
@@ -3944,7 +3954,11 @@ function renderCoworkCard(task) {
             ? '<textarea class="cw-draft is-editing" id="cw-draft-' + task.id + '" rows="8" '
               + 'oninput="cwBufferDraft(' + task.id + ',this.value)">'
               + escapeHtml(draft) + '</textarea>'
-            : '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(draft) + '</div>';
+            : '<div class="cw-draft cw-markdown" role="button" tabindex="0" '
+              + 'data-testid="cowork-draft-click-edit" title="Click to edit draft" '
+              + 'onclick="cwOpenDraftEdit(event,' + task.id + ')" '
+              + 'onkeydown="cwOpenDraftEdit(event,' + task.id + ')">'
+              + renderCoworkMarkdown(draft) + '</div>';
         var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
             ? '<span class="cw-foot-note">edited by you</span>' : '';
         // What this preview actually cost, measured as the change in the user's
@@ -3967,15 +3981,11 @@ function renderCoworkCard(task) {
               + 'onclick="cwOpenExecuteConfirm(' + task.id + ')">'
               + escapeHtml(cwExecutionLabel(task, a)) + '</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
-              + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
               + cwRefineBlock(a, task.id)
               + (a.conversation_id ? '' : cwRedoBlock(task.id))
               + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
               + 'title="Abandon this conversation and research again from scratch" '
               + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
-              + (a.conversation_id
-              ? cwOpenLink(a, 'Finish in Cowork') : '')
-              + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>'
               + editedBadge + costBadge + cwHandoffBadge(a);
 
         return cwShell('', '', task,
@@ -4082,6 +4092,17 @@ function cwToggleEdit(taskId, on) {
         cwClearBuffers(taskId);  // Cancel really discards.
     }
     cwRerender(taskId);
+    if (on) {
+        var editor = document.getElementById('cw-draft-' + taskId);
+        if (editor) editor.focus();
+    }
+}
+
+function cwOpenDraftEdit(event, taskId) {
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+    if (event.target && event.target.closest && event.target.closest('a')) return;
+    event.preventDefault();
+    cwToggleEdit(taskId, true);
 }
 
 function cwSaveDraft(taskId) {
@@ -4263,19 +4284,6 @@ function cwCopyDraft(taskId) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).catch(function() {});
     }
-}
-
-// There is no delete route — hiding is deliberately client side only, so the
-// audit chain in task_actions stays intact.
-function cwDiscard(taskId) {
-    var action = _cwActions[taskId];
-    if (action && action.interaction_mode) {
-        _cwMode[taskId] = action.interaction_mode;
-    }
-    _cwActions[taskId] = null;
-    delete _cwEditing[taskId];
-    delete _cwRedo[taskId];
-    cwRerender(taskId);
 }
 
 // ── Cowork preview poller ──────────────────────────────────────────────
