@@ -1067,6 +1067,14 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self.assertEqual(action["parent_action_id"], parent_id)
         self.assertEqual(self.started[0][2], "tenant:user:conversation")
         self.assertEqual(self.started[0][3]["approval_kind"], "teams")
+        self.assertEqual(
+            self.started[0][3]["approved_snapshot"]["destination_ref"],
+            "sarah@microsoft.com",
+        )
+        self.assertEqual(
+            self.started[0][3]["approved_snapshot"]["draft"],
+            "Hi Sarah - the deck is attached.",
+        )
         self.assertIn("Sarah Goodwin", self.started[0][1])
         self.assertIn("deck is attached", self.started[0][1])
 

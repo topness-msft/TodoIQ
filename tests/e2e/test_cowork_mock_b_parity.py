@@ -114,8 +114,8 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
         "Checking date and time details"
     )
     expect(page.get_by_test_id("session-timeline")).not_to_contain_text("Bash")
-    expect(page.get_by_test_id("tool-icon")).to_have_count(3)
-    expect(page.locator('[data-testid="tool-icon"] svg')).to_have_count(3)
+    expect(page.get_by_test_id("tool-icon")).to_have_count(4)
+    expect(page.locator('[data-testid="tool-icon"] svg')).to_have_count(4)
     expect(page.locator('[data-tool-icon="teams"]')).to_have_count(1)
     expect(page.locator('[data-tool-icon="calendar"]')).to_have_count(1)
     live = page.locator(".cw-timeline-event.is-active > div > span")
@@ -123,6 +123,47 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
         "(el) => ({clientHeight: el.clientHeight, scrollHeight: el.scrollHeight})"
     )
     assert box["scrollHeight"] <= box["clientHeight"] + 2
+
+
+def test_executing_card_names_action_and_uses_channel_icon(page: Page, base_url):
+    cases = [
+        ("teams", "follow-up", "Rima Reyes", "Sending Teams message to Rima Reyes"),
+        ("email", "respond-email", "Adele Vance", "Sending email to Adele Vance"),
+        (
+            "calendar",
+            "schedule-meeting",
+            "Rima Reyes",
+            "Creating meeting with Rima Reyes",
+        ),
+    ]
+
+    for channel, action_type, destination, expected_text in cases:
+        task_id = _render(
+            page,
+            base_url,
+            {
+                "state": "executing",
+                "action_type": action_type,
+                "delivery_channel": channel,
+                "destination_display": destination,
+                "created_at": "2026-08-13T12:00:00Z",
+                "progress": [],
+            },
+        )
+        timeline = page.get_by_test_id("session-timeline")
+        expect(timeline.locator(".cw-timeline-event.is-active")).to_contain_text(
+            expected_text
+        )
+        expected_icon = "mail" if channel == "email" else channel
+        expect(
+            timeline.locator(f'[data-tool-icon="{expected_icon}"]')
+        ).to_have_count(1)
+        expect(timeline.locator('[data-tool-icon="generic"]')).to_have_count(0)
+        expect(page.locator(f"#cw-live-{task_id}")).to_have_text(expected_text)
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, f"cowork-executing-{channel}.png"),
+            full_page=True,
+        )
 
 
 def test_ready_no_interaction_matches_completion_state(page: Page, base_url):

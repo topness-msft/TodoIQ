@@ -3191,7 +3191,7 @@ function cwToolIcon(item) {
         + 'data-tool-icon="' + type + '" aria-hidden="true">' + icon + '</span>';
 }
 
-function cwTimeline(action, liveText) {
+function cwTimeline(action, liveText, liveIconName) {
     var trace = cwToolTrace(action);
     if (!trace.length && !liveText) return '';
     var events = trace.map(function(item) {
@@ -3207,7 +3207,7 @@ function cwTimeline(action, liveText) {
     if (liveText) {
         events.push('<div class="cw-timeline-event is-active">'
             + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
-            + '<span class="cw-tool-icon is-generic" aria-hidden="true">\u2726</span>'
+            + cwToolIcon({name: liveIconName || ''})
             + '<div><small>now</small><span aria-live="polite">'
             + escapeHtml(liveText) + '</span></div></div>');
     }
@@ -3220,6 +3220,32 @@ function cwExecutionLabel(task, action) {
         if (task.action_type === 'respond-email'
                 || (action && action.delivery_channel === 'email')) return 'Send email';
         return 'Send Teams message';
+}
+
+function cwExecutionProgress(task, action) {
+        var destination = String(
+            (action && (action.destination_display || action.destination_ref)) || ''
+        ).replace(/\s*\(direct message\)\s*$/i, '').trim();
+        var channel = action && action.delivery_channel;
+        var text;
+        if (task.action_type === 'schedule-meeting' || channel === 'calendar') {
+            text = 'Creating meeting';
+            return destination ? text + ' with ' + destination : text;
+        }
+        if (task.action_type === 'respond-email' || channel === 'email') {
+            text = 'Sending email';
+        } else {
+            text = 'Sending Teams message';
+        }
+        return destination ? text + ' to ' + destination : text;
+}
+
+function cwExecutionIconName(task, action) {
+        if (task.action_type === 'schedule-meeting'
+                || (action && action.delivery_channel === 'calendar')) return 'calendar';
+        if (task.action_type === 'respond-email'
+                || (action && action.delivery_channel === 'email')) return 'outlook';
+        return 'teams';
 }
 
 function cwOpenExecuteConfirm(taskId) {
@@ -3814,11 +3840,6 @@ function renderCoworkCard(task) {
                 + question
                 + '</div>',
                 answerButton
-                + cwOpenLink(
-                    a,
-                    'Edit or redirect',
-                    'Open this active conversation in Cowork to change direction.'
-                )
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
                 + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>',
@@ -3827,9 +3848,7 @@ function renderCoworkCard(task) {
 
         if (a && a.state === 'executing') {
             if (!_cwPollers[task.id]) startCoworkPoller(task.id);
-            var sendProgress = (a.progress && a.progress.length)
-                ? a.progress[a.progress.length - 1]
-                : 'Cowork is performing the approved action';
+            var sendProgress = cwExecutionProgress(task, a);
             if (a.waiting_on_user) {
                 var executeInteraction = a.interaction_request;
                 return cwShell('is-running is-executing', 'needs approval', task,
@@ -3852,7 +3871,7 @@ function renderCoworkCard(task) {
             return cwShell('is-running is-executing', 'sending', task,
                 '<div class="cw-delivery-target"><span>Acting in</span><b>'
                 + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'
-                + cwTimeline(a, sendProgress)
+                + cwTimeline(a, sendProgress, cwExecutionIconName(task, a))
                 + '<div class="cw-progress"><span class="cw-spinner"></span>'
                 + '<span class="cw-progress-text"><span id="cw-live-' + task.id + '">'
                 + escapeHtml(sendProgress) + '</span><span class="cw-progress-sub" id="cw-hb-'
@@ -3895,11 +3914,7 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            // The link belongs here too. A run in flight is exactly when the
-            // user may need to look at it, and it was previously only offered
-            // once the run had finished.
-            cwOpenLink(a, 'Open in Cowork')
-            + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+            '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
             + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
             + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>',
             a);

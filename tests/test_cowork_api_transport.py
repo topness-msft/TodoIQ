@@ -267,6 +267,183 @@ class TestExecutionApprovalAnswer(unittest.TestCase):
         self.assertEqual(answer["answers"], {"0": "send"})
 
 
+class TestExecutionToolApproval(unittest.TestCase):
+    def setUp(self):
+        self.conversation_id = "tenant:user:conversation"
+        self.snapshot = {
+            "draft": "Circling back on the squad plan.",
+            "destination_ref": "19:rima@unq.gbl.spaces",
+            "delivery_channel": "teams",
+        }
+        self.ta = {
+            "aid": "mcp-request:jrpc:2",
+            "tn": "PostMessage",
+            "sn": "m365_teams",
+            "params": {
+                "chat_id": "19:rima@unq.gbl.spaces",
+                "body": (
+                    "<p>Circling back on the squad plan.</p><br><br>"
+                    "<!-- aether-footer -->"
+                    "<span style=\"font-size:11px;color:#666;\">Sent by "
+                    "<a href=\"https://aka.ms/cowork?cw_source=teams&amp;"
+                    "cw_tool=PostMessage\">Copilot Cowork</a></span>"
+                ),
+            },
+        }
+
+    def test_live_teams_shape_builds_exact_web_approval(self):
+        self.assertEqual(
+            cr._execution_tool_approval(
+                self.ta, "teams", self.snapshot, self.conversation_id
+            ),
+            {
+                "always_allow": False,
+                "approval_id": "mcp-request:jrpc:2",
+                "approved": True,
+                "conversation_id": self.conversation_id,
+                "edited_input": None,
+                "scope": None,
+                "server_name": "m365_teams",
+                "session_id": self.conversation_id,
+                "tool_name": "PostMessage",
+            },
+        )
+
+    def test_rejects_unapproved_or_changed_tool_calls(self):
+        cases = [
+            ({**self.ta, "aid": ""}, "teams", self.snapshot),
+            ({**self.ta, "tn": "DeleteMessage"}, "teams", self.snapshot),
+            ({**self.ta, "sn": "outlook"}, "teams", self.snapshot),
+            (
+                {
+                    **self.ta,
+                    "params": {
+                        **self.ta["params"],
+                        "chat_id": "19:someone-else@unq.gbl.spaces",
+                    },
+                },
+                "teams",
+                self.snapshot,
+            ),
+            (
+                {
+                    **self.ta,
+                    "params": {
+                        **self.ta["params"],
+                        "body": "<p>Changed message.</p>",
+                    },
+                },
+                "teams",
+                self.snapshot,
+            ),
+            (
+                {
+                    **self.ta,
+                    "params": {
+                        **self.ta["params"],
+                        "body": (
+                            "<p><a href=\"https://evil.example\">Circling back "
+                            "on the squad plan.</a></p><br><br>"
+                            "<!-- aether-footer -->"
+                            "<span style=\"font-size:11px;color:#666;\">Sent by "
+                            "<a href=\"https://aka.ms/cowork?cw_source=teams&amp;"
+                            "cw_tool=PostMessage\">Copilot Cowork</a></span>"
+                        ),
+                    },
+                },
+                "teams",
+                self.snapshot,
+            ),
+            (self.ta, "email", self.snapshot),
+            (self.ta, "calendar", self.snapshot),
+            (self.ta, "teams", None),
+        ]
+        for data, kind, snapshot in cases:
+            with self.subTest(data=data, kind=kind):
+                self.assertIsNone(
+                    cr._execution_tool_approval(
+                        data, kind, snapshot, self.conversation_id
+                    )
+                )
+
+    def test_ta_event_posts_once_to_tool_approval_and_resumes(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, client):
+                self.client = client
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                yield "event: rl"
+                yield 'data: {"st":"started"}'
+                yield ""
+                for _ in range(2):
+                    yield "event: ta"
+                    yield "data: " + json.dumps(self.client.ta)
+                    yield ""
+                approvals = [
+                    call for call in self.client.posts
+                    if call["url"].endswith("/v1/tool-approval")
+                ]
+                if len(approvals) != 1:
+                    raise AssertionError("tool approval was not posted exactly once")
+                yield "event: rl"
+                yield 'data: {"st":"ok"}'
+
+        class Posted:
+            status_code = 200
+            text = '{"success":true}'
+
+        class Client:
+            def __init__(self, ta):
+                self.ta = ta
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response(self)
+
+            def post(self, url, **kwargs):
+                self.posts.append({"url": url, **kwargs})
+                return Posted()
+
+        client = Client(self.ta)
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client):
+            payload = cr._api_run_default(
+                "send it",
+                None,
+                lambda _text: None,
+                conversation_id=self.conversation_id,
+                is_follow_up=True,
+                approval_kind="teams",
+                approved_snapshot=self.snapshot,
+            )
+
+        self.assertEqual(payload["terminal_status"], "ok")
+        approval = [
+            call for call in client.posts
+            if call["url"].endswith("/v1/tool-approval")
+        ][0]
+        self.assertEqual(
+            approval["headers"]["X-Conversation-ID"], self.conversation_id
+        )
+        self.assertEqual(approval["json"]["approval_id"], self.ta["aid"])
+        self.assertIsNone(approval["json"]["edited_input"])
+
+
 class TestPayloadEquivalence(unittest.TestCase):
     """The API result must be indistinguishable from the CLI's, downstream."""
 

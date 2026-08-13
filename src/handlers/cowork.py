@@ -972,6 +972,7 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                     if action.get("action_type") == "schedule-meeting"
                     else action.get("delivery_channel")
                 ),
+                approved_snapshot=approved_snapshot,
                 log_dir=LOG_DIR_OVERRIDE,
             )
         except Exception as exc:  # noqa: BLE001

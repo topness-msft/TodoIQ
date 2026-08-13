@@ -117,8 +117,10 @@ Cowork-powered draft, approval, and direct-action flows.
   resume needs the compatibility shim and persisted full island URL.
 - Cowork auth can expire between successful runs; runner performs one silent
   refresh and one retry only.
-- Teams `PostMessage` does not emit technical approval events. Calendar does,
-  but `CreateEvent` currently fails upstream after approval.
+- Cowork can emit `ta` technical approvals for Teams `PostMessage`; direct
+  execution answers only when the tool, Teams thread and draft exactly match
+  Riveter's immutable approval snapshot. Uncaptured email/calendar shapes fail
+  closed. Calendar `CreateEvent` has also failed upstream after approval.
 - `/todo` is served from `static/mock-todo.html`; edits to only the dashboard do
   not automatically affect it.
 - OneDrive workspace root is a reparse point; allow the configured root but

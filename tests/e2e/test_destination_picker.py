@@ -97,7 +97,7 @@ class TestDestinationBinding:
             expect(status).to_contain_text("Sarah Goodwin")
             expect(page.get_by_test_id("dest-confirmed")).to_be_visible()
             expect(page.get_by_test_id("dest-change-btn")).to_be_visible()
-            expect(page.get_by_test_id("open-in-cowork-link")).to_be_visible()
+            expect(page.get_by_test_id("cw-open-cowork")).to_be_visible()
             page.screenshot(
                 path=os.path.join(SCREENSHOTS_DIR, "dashboard-confirmed-light.png"),
                 full_page=True,
@@ -133,7 +133,7 @@ class TestDestinationBinding:
             )
             expect(page.get_by_test_id("dest-risky")).to_be_visible()
             expect(page.get_by_test_id("dest-confirmed")).to_have_count(0)
-            expect(page.get_by_test_id("open-in-cowork-link")).to_be_visible()
+            expect(page.get_by_test_id("cw-open-cowork")).to_be_visible()
             page.screenshot(
                 path=os.path.join(SCREENSHOTS_DIR, "dashboard-broadcast-light.png"),
                 full_page=True,

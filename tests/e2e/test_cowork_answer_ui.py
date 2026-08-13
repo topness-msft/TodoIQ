@@ -1,6 +1,5 @@
 import json
 import os
-import re
 
 from playwright.sync_api import Page, expect
 
@@ -104,9 +103,9 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     expect(page.locator('[data-testid="cw-answer"]')).to_have_count(2)
     submit = page.locator('[data-testid="cw-answer-submit"]')
     expect(submit).to_have_text("Answer and continue")
-    redirect = page.locator('[data-testid="cw-open-cowork"]')
-    expect(redirect).to_have_text("Edit or redirect")
-    expect(redirect).not_to_have_attribute("title", re.compile("draft", re.IGNORECASE))
+    cowork_link = page.locator('[data-testid="cw-open-cowork"]')
+    expect(cowork_link).to_have_count(1)
+    expect(cowork_link).to_have_text("Open in Cowork")
     choices = page.locator('[data-testid="cw-choice"]')
     expect(choices).to_have_count(4)
     expect(choices.nth(0)).to_have_accessible_name("Account A Primary tenant")

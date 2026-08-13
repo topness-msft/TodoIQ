@@ -24,6 +24,7 @@ cannot positively prove is a 1:1 is reported as a broadcast.
 
 from __future__ import annotations
 
+import html
 import re
 import uuid
 from urllib.parse import unquote, quote, urlparse
@@ -1880,6 +1881,7 @@ def start_execution(
     conversation_id,
     *,
     approval_kind=None,
+    approved_snapshot=None,
     log_dir=None,
 ) -> str:
     """Run one explicitly approved, unbarriered API follow-up turn."""
@@ -1915,6 +1917,7 @@ def start_execution(
                 "conversation_id": conversation_id,
                 "is_follow_up": True,
                 "approval_kind": approval_kind,
+                "approved_snapshot": dict(approved_snapshot or {}),
             },
             daemon=True,
             name=f"cowork-execute-{task_id}",
@@ -2690,6 +2693,72 @@ def _execution_approval_answer(data, approval_kind):
     return interaction["invocation_id"], {"0": matches[0]}
 
 
+def _execution_tool_approval(
+    data, approval_kind, approved_snapshot, conversation_id
+):
+    """Build one approval for the exact Teams action reviewed in Riveter."""
+    if (
+        not isinstance(data, dict)
+        or approval_kind != "teams"
+        or not isinstance(approved_snapshot, dict)
+        or not conversation_id
+    ):
+        return None
+    approval_id = str(data.get("aid") or "").strip()
+    server_name = str(data.get("sn") or "").strip()
+    tool_name = str(data.get("tn") or "").strip()
+    params = data.get("params")
+    if (
+        not approval_id
+        or server_name.lower() != "m365_teams"
+        or re.sub(r"[^a-z0-9]", "", tool_name.lower()) != "postmessage"
+        or not isinstance(params, dict)
+    ):
+        return None
+
+    destination = str(approved_snapshot.get("destination_ref") or "").strip()
+    if not destination or str(params.get("chat_id") or "").strip() != destination:
+        return None
+
+    raw_body = str(params.get("body") or "")
+    proposed, footer_marker, footer = raw_body.partition("<!-- aether-footer -->")
+    expected_footer = (
+        '<span style="font-size:11px;color:#666;">Sent by '
+        '<a href="https://aka.ms/cowork?cw_source=teams&amp;'
+        'cw_tool=PostMessage">Copilot Cowork</a></span>'
+    )
+    if not footer_marker or footer != expected_footer:
+        return None
+    allowed_tags = {"<p>", "</p>", "<br>", "<br/>", "<br />"}
+    if any(tag.lower() not in allowed_tags for tag in re.findall(r"<[^>]+>", proposed)):
+        return None
+    proposed = re.sub(r"<br\s*/?>", " ", proposed, flags=re.I)
+    proposed = re.sub(r"</?p>", " ", proposed, flags=re.I)
+    proposed = html.unescape(proposed)
+    proposed = " ".join(proposed.replace("\xa0", " ").split())
+    approved = " ".join(
+        str(approved_snapshot.get("draft") or "").replace("\xa0", " ").split()
+    )
+    if not approved or proposed != approved:
+        return None
+
+    payload = {
+        "always_allow": False,
+        "approval_id": approval_id,
+        "approved": True,
+        "conversation_id": conversation_id,
+        "edited_input": None,
+        "scope": None,
+        "server_name": server_name,
+        "session_id": conversation_id,
+        "tool_name": tool_name,
+    }
+    approval_context = data.get("ac")
+    if approval_context:
+        payload["approval_context"] = approval_context
+    return payload
+
+
 def _safe_interaction_image_url(value):
     """Keep explicit HTTPS images; raw HTML and active URL schemes stay inert."""
     url = str(value or "").strip()
@@ -2813,7 +2882,7 @@ def _is_auth_failure(exc) -> bool:
 
 def _collect_api(label, task_id, prompt, config_path, log_dir,
                  conversation_id=None, is_follow_up=None,
-                 approval_kind=None) -> None:
+                 approval_kind=None, approved_snapshot=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -2845,6 +2914,8 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
         }
         if approval_kind:
             run_kwargs["approval_kind"] = approval_kind
+        if approved_snapshot:
+            run_kwargs["approved_snapshot"] = approved_snapshot
         call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
@@ -2981,7 +3052,8 @@ def new_conversation_id(_auth=None):
 
 
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
-                     is_follow_up=None, approval_kind=None):
+                     is_follow_up=None, approval_kind=None,
+                     approved_snapshot=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -3064,13 +3136,14 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                     raise RuntimeError(
                         f"POST /v1/messages returned HTTP {posted.status_code}"
                     )
-            approval_answered = False
+            ask_user_answered = False
+            tool_approval_answered = False
             for kind, data in _iter_sse(response.iter_lines()):
                 events.append((kind, data))
                 text = _api_progress_text(kind, data)
                 if text:
                     on_progress(text)
-                if kind == "aq" and approval_kind and not approval_answered:
+                if kind == "aq" and approval_kind and not ask_user_answered:
                     approval = _execution_approval_answer(data, approval_kind)
                     if approval:
                         invocation_id, answers = approval
@@ -3099,12 +3172,45 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                                 "Cowork rejected the approved action "
                                 f"confirmation: HTTP {answered.status_code}"
                             )
-                        approval_answered = True
+                        ask_user_answered = True
                         logger.info(
                             "answered %s execution approval for conversation %s",
                             approval_kind,
                             conversation_id,
                         )
+                if kind == "ta" and approval_kind and not tool_approval_answered:
+                    approval = _execution_tool_approval(
+                        data,
+                        approval_kind,
+                        approved_snapshot,
+                        conversation_id,
+                    )
+                    if not approval:
+                        raise RuntimeError(
+                            "Cowork requested a tool action that did not exactly "
+                            "match the action approved in Riveter. Nothing was "
+                            "approved."
+                        )
+                    answered = client.post(
+                        f"{base}/v1/tool-approval",
+                        headers={
+                            **post_headers,
+                            "X-Conversation-ID": conversation_id,
+                        },
+                        json=approval,
+                        timeout=15,
+                    )
+                    if answered.status_code not in (200, 202):
+                        raise RuntimeError(
+                            "Cowork rejected the approved tool action: "
+                            f"HTTP {answered.status_code}"
+                        )
+                    tool_approval_answered = True
+                    logger.info(
+                        "answered %s tool approval for conversation %s",
+                        approval_kind,
+                        conversation_id,
+                    )
                 if kind == "rl" and data.get("st") in _TURN_COMPLETE_RUN_STATES:
                     break
 
