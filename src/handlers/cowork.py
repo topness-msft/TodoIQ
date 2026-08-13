@@ -716,6 +716,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             or interaction_mode not in {"interaction", "no_interaction"}
         ):
             return self._fail(400, "Invalid interaction mode")
+        interaction_mode = "interaction"
         destination = parse_source_url(task.get("source_url"))
         resolved = _carry_forward_destination(
             tid, _resolve_destination(task, destination)
@@ -1058,7 +1059,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             redirect_text=instruction,
             composed_prompt=compose_refine_prompt(
                 instruction,
-                interaction_mode=action.get("interaction_mode") or "interaction",
+                interaction_mode="interaction",
             ),
             conversation_id=conversation_id,
             island_url=action.get("island_url"),
@@ -1069,7 +1070,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             destination_source=action.get("destination_source"),
             destination_confirmed_at=action.get("destination_confirmed_at"),
             delivery_channel=action.get("delivery_channel"),
-            interaction_mode=action.get("interaction_mode") or "interaction",
+            interaction_mode="interaction",
         )
 
         try:
@@ -1077,7 +1078,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
                 tid,
                 conversation_id,
                 instruction,
-                interaction_mode=action.get("interaction_mode") or "interaction",
+                interaction_mode="interaction",
                 log_dir=LOG_DIR_OVERRIDE,
             )
         except AlreadyRunning:

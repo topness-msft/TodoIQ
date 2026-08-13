@@ -631,6 +631,17 @@ def compose_prompt(task, destination: dict | None = None,
     if guidance:
         parts.append("[ACTION]\n" + guidance)
 
+    if _clean(_get(task, "action_type")).strip().lower() == "schedule-meeting":
+        available_times = _clean(_get(task, "skill_output"))
+        if available_times:
+            parts.append(
+                "[AVAILABLE TIMES]\n"
+                + available_times
+                + "\nPresent these identified options to the user and ask them to "
+                "choose one. Do not create or send a meeting invitation until the "
+                "user has selected a time."
+            )
+
     # Standing meeting defaults. Not keyed to action_type on purpose: the
     # [ACTION] block above is, and only 6 of 17 open tasks that read as
     # scheduling are classified that way, which is why the preference was

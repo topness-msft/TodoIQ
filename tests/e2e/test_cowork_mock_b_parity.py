@@ -26,6 +26,7 @@ def _render(page: Page, base_url, action):
             const task = tasks.find(t => t.id === taskId);
             task.action_type = (action && action.action_type) || 'follow-up';
             task.coaching_text = 'Check the current position and draft the follow-up.';
+            task.parse_status = 'parsed';
             selectedTaskId = taskId;
             _cwActions[taskId] = action;
             renderDetailPane(task);
@@ -35,7 +36,7 @@ def _render(page: Page, base_url, action):
     return task_id
 
 
-def test_mode_selector_drives_start_request(page: Page, base_url):
+def test_start_always_uses_interaction_mode_without_selector(page: Page, base_url):
     task_id = _render(page, base_url, None)
     posted = {}
 
@@ -56,23 +57,14 @@ def test_mode_selector_drives_start_request(page: Page, base_url):
         )
 
     page.route(f"**/api/tasks/{task_id}/cowork", start_route)
-    no_interaction = page.get_by_test_id("session-mode-no-interaction")
-    expect(no_interaction).to_be_visible()
-    expect(no_interaction).to_have_text("Finish without questions")
-    expect(no_interaction).to_have_attribute(
-        "title", "Cowork makes reasonable decisions and does not pause to ask."
-    )
-    expect(page.get_by_test_id("session-mode-interaction")).to_have_text(
-        "Can ask questions"
-    )
-    no_interaction.click()
-    expect(no_interaction).to_have_attribute("aria-pressed", "true")
+    expect(page.get_by_test_id("session-mode-no-interaction")).to_have_count(0)
+    expect(page.get_by_test_id("session-mode-interaction")).to_have_count(0)
     page.get_by_role("button", name="Preview with Cowork").click()
     page.wait_for_function("() => window.__unused !== true")
-    assert posted["interaction_mode"] == "no_interaction"
+    assert posted["interaction_mode"] == "interaction"
 
 
-def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
+def test_running_card_uses_real_trace_without_mode_selector(page: Page, base_url):
     _render(
         page,
         base_url,
@@ -104,7 +96,8 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
         },
     )
 
-    expect(page.get_by_test_id("session-mode-no-interaction")).to_be_disabled()
+    expect(page.get_by_test_id("session-mode-no-interaction")).to_have_count(0)
+    expect(page.get_by_test_id("session-mode-interaction")).to_have_count(0)
     expect(page.get_by_test_id("session-timeline")).to_be_visible()
     expect(page.get_by_test_id("session-timeline")).to_contain_text("Get Messages")
     expect(page.get_by_test_id("session-timeline")).to_contain_text(
@@ -166,7 +159,9 @@ def test_executing_card_names_action_and_uses_channel_icon(page: Page, base_url)
         )
 
 
-def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
+def test_ready_legacy_no_interaction_hides_autonomous_completion_claim(
+    page: Page, base_url
+):
     task_id = _render(
         page,
         base_url,
@@ -185,9 +180,7 @@ def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
         },
     )
 
-    expect(page.get_by_test_id("session-complete")).to_contain_text(
-        "Draft completed without interruption"
-    )
+    expect(page.get_by_test_id("session-complete")).to_have_count(0)
     expect(page.get_by_test_id("credit-meter")).to_have_count(0)
     expect(page.get_by_test_id("cowork-finished")).to_have_count(0)
     expect(page.get_by_test_id("cw-open-cowork")).to_be_visible()

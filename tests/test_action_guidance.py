@@ -68,6 +68,29 @@ class TestSchedulingChecksBothCalendars(unittest.TestCase):
         )
 
 
+class TestSchedulingOffersKnownTimes(unittest.TestCase):
+    def setUp(self):
+        self.prompt = compose_prompt(_task(
+            skill_output=(
+                "Suggested meeting slots:\n"
+                "1. Monday, August 17, 10:00-10:30 AM ET\n"
+                "2. Monday, August 17, 3:00-3:30 PM ET"
+            )
+        ))
+
+    def test_it_includes_the_identified_times(self):
+        self.assertIn("Monday, August 17, 10:00-10:30 AM ET", self.prompt)
+
+    def test_it_asks_the_user_to_choose(self):
+        self.assertIn("ask them to choose one", self.prompt.lower())
+
+    def test_it_does_not_create_an_invite_before_the_choice(self):
+        self.assertIn(
+            "do not create or send a meeting invitation until",
+            self.prompt.lower(),
+        )
+
+
 class TestGuidanceIsScopedToTheActionType(unittest.TestCase):
     def test_a_general_task_gets_no_scheduling_guidance(self):
         prompt = compose_prompt(_task(action_type="general"))

@@ -67,6 +67,7 @@ class TestCoworkIndicators:
             page.evaluate(
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
                 task.cw_state = 'ready';
                 task.cw_seen_at = null;
                 renderTaskList();
@@ -105,7 +106,9 @@ class TestCoworkIndicators:
             page.evaluate(
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
+                task.cw_state = 'ready';
                 task.cw_seen_at = '2026-07-31T19:00:00Z';
+                task.skill_output = 'Existing enrichment';
                 renderTaskList();
                 """
             )
@@ -204,10 +207,14 @@ class TestCoworkIndicators:
             page.evaluate(
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
                 task.cw_state = 'ready';
                 task.cw_seen_at = null;
+                delete _cwActions[{task_id}];
+                delete _cwLoading[{task_id}];
                 renderTaskList();
-                selectTask({task_id});
+                selectedTaskId = {task_id};
+                cwLoad({task_id}, true);
                 """
             )
             page.wait_for_function(
@@ -228,16 +235,48 @@ class TestCoworkIndicators:
             )
             page.evaluate(
                 f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
                 _cwActions[{task_id}] = {{
                     id: {task_id}, task_id: {task_id}, state: 'ready',
                     finding: 'Current state', draft: 'Draft', destination_kind: 'none'
                 }};
-                selectTask({task_id});
+                selectedTaskId = {task_id};
+                renderDetailPane(task);
                 """
             )
             expect(page.locator(".detail-workspace .cw-card")).to_be_visible()
             cowork_x = page.locator(".cw-card").bounding_box()["x"]
             notes_x = page.get_by_text("Notes", exact=True).bounding_box()["x"]
             assert cowork_x > notes_x
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_dashboard_hides_cowork_workspace_until_parse_finishes(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsing';
+                selectedTaskId = {task_id};
+                renderDetailPane(task);
+                """
+            )
+            expect(page.locator(".detail-workspace")).to_have_count(0)
+            expect(page.locator(".cw-card")).to_have_count(0)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "cowork-hidden-while-parsing.png"
+                ),
+                full_page=True,
+            )
         finally:
             _delete_task(page, base_url, task_id)

@@ -266,12 +266,12 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["interaction_mode"], "interaction")
         self.assertNotIn("[INTERACTION]", action["composed_prompt"])
 
-    def test_no_interaction_mode_is_persisted_and_composed(self):
+    def test_no_interaction_mode_is_clamped_to_interaction(self):
         tid = self.make_task()
         response = self.start(tid, body={"interaction_mode": "no_interaction"})
         action = json.loads(response.body)["action"]
-        self.assertEqual(action["interaction_mode"], "no_interaction")
-        self.assertIn("[INTERACTION]", action["composed_prompt"])
+        self.assertEqual(action["interaction_mode"], "interaction")
+        self.assertNotIn("[INTERACTION]", action["composed_prompt"])
 
     def test_unknown_interaction_mode_is_rejected(self):
         tid = self.make_task()
@@ -293,12 +293,12 @@ class TestStartPreview(CoworkAPITestBase):
         )
         self.assertEqual(response.code, 400)
 
-    def test_new_run_inherits_previous_mode_when_body_omits_it(self):
+    def test_new_run_does_not_inherit_previous_no_interaction_mode(self):
         tid = self.make_task()
         self.start(tid, body={"interaction_mode": "no_interaction"})
         response = self.start(tid, body={"redirect_text": "make it shorter"})
         action = json.loads(response.body)["action"]
-        self.assertEqual(action["interaction_mode"], "no_interaction")
+        self.assertEqual(action["interaction_mode"], "interaction")
 
     def test_destination_parsed_from_source_url(self):
         tid = self.make_task(
@@ -1605,7 +1605,7 @@ class TestRefineTurn(CoworkAPITestBase):
         self._refine(tid, "aim it just at Greg")
         self.assertEqual(self.continued[0]["text"], "aim it just at Greg")
 
-    def test_no_interaction_mode_is_inherited(self):
+    def test_no_interaction_mode_is_not_inherited(self):
         tid = self.make_task()
         self.start(
             tid,
@@ -1615,9 +1615,9 @@ class TestRefineTurn(CoworkAPITestBase):
         self.get_preview(tid)
         response = self._refine(tid)
         self.assertEqual(response.code, 202)
-        self.assertEqual(self.continued[0]["interaction_mode"], "no_interaction")
+        self.assertEqual(self.continued[0]["interaction_mode"], "interaction")
         newest = json.loads(response.body)["action"]
-        self.assertEqual(newest["interaction_mode"], "no_interaction")
+        self.assertEqual(newest["interaction_mode"], "interaction")
 
     def test_an_empty_instruction_is_rejected(self):
         tid = self._ready()

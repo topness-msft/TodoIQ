@@ -897,9 +897,11 @@ function renderDetailPane(task) {
 
     evidenceHtml += '</aside>';
 
-    var workspaceHtml = '<section class="detail-workspace" aria-label="Cowork workspace">'
-        + renderCoworkCard(task)
-        + '</section>';
+    var workspaceHtml = task.parse_status === 'parsed'
+        ? '<section class="detail-workspace" aria-label="Cowork workspace">'
+            + renderCoworkCard(task)
+            + '</section>'
+        : '';
 
     var splitHtml = '<div class="detail-split">'
         + evidenceHtml
@@ -3107,9 +3109,7 @@ function cwShell(cls, badge, task, body, foot, action) {
 }
 
 function cwSelectedMode(taskId, action) {
-    return _cwMode[taskId]
-        || (action && action.interaction_mode)
-        || 'interaction';
+    return 'interaction';
 }
 
 function cwSetMode(taskId, mode) {
@@ -3119,22 +3119,7 @@ function cwSetMode(taskId, mode) {
 }
 
 function cwModeSwitch(taskId, action, locked) {
-    var mode = cwSelectedMode(taskId, action);
-    function button(value, label, testid, title) {
-        var on = mode === value;
-        return '<button type="button" class="cw-mode-btn' + (on ? ' is-on' : '')
-            + '" data-testid="' + testid + '" aria-pressed="' + on + '"'
-            + ' title="' + escapeAttr(title) + '"'
-            + (locked ? ' disabled' : '')
-            + ' onclick="cwSetMode(' + taskId + ',\'' + value + '\')">'
-            + label + '</button>';
-    }
-    return '<div class="cw-mode-switch" role="group" aria-label="Cowork session mode">'
-        + button('interaction', 'Can ask questions', 'session-mode-interaction',
-            'Cowork may pause when it needs a decision from you.')
-        + button('no_interaction', 'Finish without questions', 'session-mode-no-interaction',
-            'Cowork makes reasonable decisions and does not pause to ask.')
-        + '</div>';
+    return '';
 }
 
 function cwToolTrace(action) {
@@ -3367,13 +3352,7 @@ function cwConfirmExecute(taskId) {
 }
 
 function cwNoInteractionComplete(action) {
-    if (!action || action.state !== 'ready'
-            || action.interaction_mode !== 'no_interaction'
-            || action.had_interaction) return '';
-    return '<section class="cw-session-complete" data-testid="session-complete">'
-        + '<b>Draft completed without interruption</b>'
-        + '<span>Cowork made reasonable decisions from the available context. '
-        + 'Review the findings and draft below; nothing was sent.</span></section>';
+    return '';
 }
 
 // The intent line is WorkIQ's suggested next action. It remains editable here
@@ -3800,6 +3779,7 @@ function cwSendRefine(taskId) {
 }
 
 function renderCoworkCard(task) {
+    if (task.parse_status !== 'parsed') return '';
     var a = _cwActions[task.id];
 
     if (a === undefined) {
