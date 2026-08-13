@@ -54,6 +54,7 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     page.evaluate(
         """taskId => {
             const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
             selectedTaskId = taskId;
             _cwActions[taskId] = {
                 task_id: taskId,

@@ -92,12 +92,15 @@ class MeetingPreferenceTest(unittest.TestCase):
         self.assertIn(":05 to :30", layer)
         self.assertIn(":05 to :00", layer)
 
-    def test_it_fires_regardless_of_action_type(self):
+    def test_preferences_fire_regardless_of_action_type(self):
         """The whole point: 11 of 17 scheduling tasks are not classified."""
         with _with(PREFS):
             for at in ("schedule-meeting", "prepare", "awaiting-response", "", None):
                 p = cr.compose_prompt(make_task(action_type=at))
-                self.assertIn("[MEETINGS]", p, f"missing for action_type={at!r}")
+                self.assertIn("25", p, f"missing duration for action_type={at!r}")
+                self.assertIn(
+                    "5 minutes past", p, f"missing offset for action_type={at!r}"
+                )
 
     def test_it_is_phrased_conditionally(self):
         """It rides every prompt, so it must not push a meeting on a task
@@ -125,12 +128,15 @@ class MeetingPreferenceTest(unittest.TestCase):
         self.assertIn("free/busy", layer)
         self.assertIn("every invitee", layer)
 
-    def test_the_action_block_still_carries_its_own_guidance(self):
-        """The meeting layer supplements it; it must not have replaced it."""
+    def test_native_schedule_prompt_carries_availability_guidance(self):
+        """The concise native flow replaces tagged layers, not their mechanics."""
         with _with(PREFS):
             p = cr.compose_prompt(make_task(action_type="schedule-meeting"))
-        self.assertIn("[ACTION]", p)
-        self.assertIn("BOTH calendars", p)
+        self.assertNotIn("[ACTION]", p)
+        self.assertNotIn("[MEETINGS]", p)
+        self.assertIn("both calendars", p)
+        self.assertIn("25 minutes", p)
+        self.assertIn("5 minutes past", p)
 
     def test_free_text_notes_are_carried(self):
         with _with({"meeting_preferences": {"notes": "Never book me before 9am."}}):

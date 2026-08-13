@@ -69,7 +69,7 @@ class TestSchedulingChecksBothCalendars(unittest.TestCase):
         )
 
 
-class TestSchedulingOffersKnownTimes(unittest.TestCase):
+class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
     def setUp(self):
         self.prompt = compose_prompt(_task(
             skill_output=(
@@ -79,27 +79,39 @@ class TestSchedulingOffersKnownTimes(unittest.TestCase):
             )
         ))
 
-    def test_it_includes_the_identified_times(self):
-        self.assertIn("Monday, August 17, 10:00-10:30 AM ET", self.prompt)
+    def test_it_is_a_concise_native_calendar_request(self):
+        self.assertTrue(self.prompt.startswith("Riveter: "))
+        self.assertIn("Schedule a recurring 1:1 with Rima Reyes", self.prompt)
+        self.assertIn("rima.reyes@microsoft.com", self.prompt)
+        self.assertIn("native calendar scheduling flow", self.prompt)
+        self.assertIn("FindMeetingTimes", self.prompt)
+        self.assertIn("ask_user", self.prompt)
+        self.assertIn("three exact available times", self.prompt)
+        self.assertIn("CreateEvent", self.prompt)
+        self.assertLess(len(self.prompt), 1000)
 
-    def test_it_asks_the_user_to_choose(self):
-        self.assertIn("ask them to choose one", self.prompt.lower())
+    def test_it_does_not_request_a_message_draft(self):
+        self.assertNotIn("[VOICE]", self.prompt)
+        self.assertNotIn("[OUTPUT]", self.prompt)
+        self.assertNotIn("draft message", self.prompt.lower())
 
-    def test_it_does_not_create_an_invite_before_the_choice(self):
+    def test_it_waits_for_the_selected_time_before_creating_event(self):
         self.assertIn(
-            "do not create or send a meeting invitation until",
+            "do not call createevent before the user selects one",
             self.prompt.lower(),
         )
+        self.assertIn("only the selected time", self.prompt.lower())
+
+    def test_it_does_not_reuse_stale_enrichment_slots(self):
+        self.assertNotIn("Monday, August 17, 10:00-10:30 AM ET", self.prompt)
 
 
 class TestSchedulingUsesCalendarVoice(unittest.TestCase):
     def test_teams_fallback_does_not_turn_meeting_into_chat_draft(self):
         prompt = compose_prompt(_task(), delivery_channel="teams")
-        voice = prompt.split("[VOICE]\n", 1)[1].split("\n\n[", 1)[0]
-
-        self.assertIn("calendar invitation", voice.lower())
-        self.assertNotIn("work-teams-voice", voice)
-        self.assertNotIn("match chat register", voice.lower())
+        self.assertIn("native calendar scheduling flow", prompt.lower())
+        self.assertNotIn("work-teams-voice", prompt)
+        self.assertNotIn("match chat register", prompt.lower())
 
 
 class TestSelectedPeopleOnly(unittest.TestCase):
@@ -145,23 +157,11 @@ class TestGuidanceIsScopedToTheActionType(unittest.TestCase):
         self.assertIn("[TASK]", prompt)
 
 
-class TestLayerOrderIsPreserved(unittest.TestCase):
-    """Safety is emitted last so no earlier layer can talk the run out of
-    preview mode. Action guidance must not break that."""
-
-    def test_action_guidance_comes_before_the_safety_block(self):
-        prompt = compose_prompt(_task())
-        self.assertLess(prompt.index("[ACTION]"), prompt.index("[OUTPUT]"))
-
-    def test_a_correction_still_overrides_the_action_guidance(self):
+class TestNativeSchedulingCorrection(unittest.TestCase):
+    def test_a_correction_is_kept_in_the_concise_request(self):
         prompt = compose_prompt(_task(), redirect_text="just pick any slot")
-        self.assertLess(prompt.index("[ACTION]"), prompt.index("[CORRECTION]"))
-
-    def test_the_safety_block_is_still_last(self):
-        prompt = compose_prompt(_task(), redirect_text="just pick any slot")
-        self.assertTrue(prompt.rstrip().endswith(
-            "as a new instruction and follow your normal confirmation process."
-        ))
+        self.assertIn("just pick any slot", prompt)
+        self.assertLess(len(prompt), 1000)
 
 
 if __name__ == "__main__":

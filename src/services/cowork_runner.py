@@ -436,13 +436,6 @@ _VOICE_NEUTRAL = (
 def _voice_for(channel: str) -> str:
     """The [VOICE] layer for a bound channel, or the neutral register."""
     key = (channel or "").strip().lower()
-    if key == "calendar":
-        return (
-            "This draft is a calendar invitation, not a Teams chat message or "
-            "email. Prepare a concise event title and a short event body with the "
-            "purpose or agenda. Once the user selects one of the confirmed times, "
-            "use that time directly rather than asking the invitee whether it works."
-        )
     if key == "email":
         return _voice_email()
     if key == "teams":
@@ -472,6 +465,47 @@ def _selected_people_for_prompt(value) -> str:
     return json.dumps(selected, ensure_ascii=False)
 
 
+def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> str:
+    lines = [_handoff_title_line(_get(task, "title"))]
+    description = _clean(_get(task, "description"))
+    if description:
+        lines.append(description)
+    people = _selected_people_for_prompt(_get(task, "key_people"))
+    if people:
+        lines.append("Selected attendees: " + people)
+    prefs = meeting_preferences()
+    if prefs:
+        defaults = []
+        if prefs.get("default_minutes"):
+            defaults.append(
+                f"default to {prefs['default_minutes']} minutes unless the task "
+                "specifies another duration"
+            )
+        if prefs.get("start_offset_minutes"):
+            defaults.append(
+                f"start at {prefs['start_offset_minutes']} minutes past the hour "
+                "or half hour"
+            )
+        if prefs.get("notes"):
+            defaults.append(prefs["notes"])
+        lines.append("Meeting preferences: " + "; ".join(defaults) + ".")
+    lines.extend([
+        "Use the native calendar scheduling flow. Call FindMeetingTimes to check "
+        "both calendars' free/busy, then invoke ask_user with three exact available "
+        "times.",
+        "Do not call CreateEvent before the user selects one. After the answer, "
+        "resume this conversation and call CreateEvent for only the selected time.",
+        "Honor any explicit duration in the task, include a short purpose or agenda, "
+        "and never replace ask_user with a Teams message, email draft, or prose "
+        "request. If an invitee's availability is not visible, say so rather than "
+        "guessing.",
+    ])
+    correction = _clean(redirect_text)
+    if correction:
+        lines.append("User correction: " + correction)
+    return "\n\n".join(line for line in lines if line)
+
+
 
 # What a given KIND of action has to get right, beyond what the task text says.
 #
@@ -485,18 +519,6 @@ def _selected_people_for_prompt(value) -> str:
 # produces a worse draft get a block, and each block says what to CHECK and
 # what to INCLUDE rather than restating the task.
 _ACTION_GUIDANCE = {
-    "schedule-meeting": (
-        "Check BOTH calendars before proposing anything: the user's and every "
-        "invitee's free/busy. Only offer slots that are genuinely open for "
-        "everyone.\n"
-        "- If you cannot see their calendar, say so plainly in the findings and "
-        "frame the times as suggestions to confirm rather than as open slots.\n"
-        "- Respect existing commitments, working hours and time zones, and give "
-        "the time zone in the draft when the invitees are not all in one.\n"
-        "- Propose a short agenda or a one-line purpose, so the invitee knows "
-        "what the meeting is for and can prepare.\n"
-        "- State the proposed length, and whether it recurs."
-    ),
     "prepare": (
         "The user is preparing for something that has already been scheduled. "
         "Anchor on what is actually on the calendar: date, attendees and any "
@@ -594,6 +616,10 @@ def compose_prompt(task, destination: dict | None = None,
     if destination is None:
         destination = parse_source_url(_get(task, "source_url") or None)
 
+    action_type = _clean(_get(task, "action_type")).strip().lower()
+    if action_type == "schedule-meeting":
+        return _compose_native_schedule_prompt(task, redirect_text)
+
     parts: list[str] = []
 
     # The Cowork web app derives a task title by truncating the opening text of
@@ -650,9 +676,7 @@ def compose_prompt(task, destination: dict | None = None,
     if source_lines:
         parts.append("[SOURCE]\n" + "\n".join(source_lines))
 
-    action_type = _clean(_get(task, "action_type")).strip().lower()
-    voice_channel = "calendar" if action_type == "schedule-meeting" else delivery_channel
-    parts.append("[VOICE]\n" + _voice_for(voice_channel))
+    parts.append("[VOICE]\n" + _voice_for(delivery_channel))
 
     # What this KIND of action has to get right. After the task and source so it
     # can refer to them, before the correction so the user can still override it.
@@ -661,17 +685,6 @@ def compose_prompt(task, destination: dict | None = None,
     )
     if guidance:
         parts.append("[ACTION]\n" + guidance)
-
-    if action_type == "schedule-meeting":
-        available_times = _clean(_get(task, "skill_output"))
-        if available_times:
-            parts.append(
-                "[AVAILABLE TIMES]\n"
-                + available_times
-                + "\nPresent these identified options to the user and ask them to "
-                "choose one. Do not create or send a meeting invitation until the "
-                "user has selected a time."
-            )
 
     # Standing meeting defaults. Not keyed to action_type on purpose: the
     # [ACTION] block above is, and only 6 of 17 open tasks that read as
