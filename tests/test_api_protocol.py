@@ -188,6 +188,21 @@ class TestFollowUpUsesTheDocumentedShape(ApiProtocolTestBase):
         self.assertEqual(payload["conversation_id"], "t:u:cw-existing")
 
 
+class TestApprovedExecutionOmitsTheBarrier(ApiProtocolTestBase):
+    def test_none_config_omits_tool_callback_config_entirely(self):
+        client = _FakeClient()
+        cr._api_http_client_fn = lambda: client
+        cr._api_run_default(
+            "send the approved message",
+            None,
+            lambda text: None,
+            conversation_id="t:u:cw-existing",
+            is_follow_up=True,
+        )
+        post = [c for c in client.calls if c["verb"] == "POST"][0]
+        self.assertNotIn("toolCallbackConfig", post["json"])
+
+
 class TestAnEmptyStreamIsReportedHonestly(ApiProtocolTestBase):
     """What actually happened on 2268: 200, then silence.
 

@@ -1,14 +1,10 @@
-"""Cowork preview API — PHASE 1 IS PREVIEW ONLY.
-
-There is deliberately **no execute route** in this module. That absence is the
-only hard safety guarantee in Phase 1: the tool denylist passed to the CLI is
-defence in depth over an open set (see cowork_runner), but a route that cannot
-be reached cannot send anything.
+"""Cowork preview and explicitly approved action API.
 
 Routes:
     POST /api/tasks/<id>/cowork    start a preview (202); 409 if already running
     GET  /api/tasks/<id>/cowork    latest attempt; ?history=1 for the full chain
     PUT  /api/tasks/<id>/cowork    save the user's edited draft
+    POST /api/tasks/<id>/cowork/execute  execute one approved draft (202)
 """
 
 import json
@@ -27,6 +23,7 @@ from ..models import (
     clear_blocked_question_if_unchanged,
     claim_blocked_question_answer,
     confirm_destination,
+    create_execution_action,
     create_task_action,
     get_latest_task_action,
     get_task,
@@ -39,12 +36,15 @@ from ..models import (
 from ..services.cowork_runner import (
     AlreadyRunning,
     CoworkAnswerRejected,
+    _looks_like_write,
     answer_interaction,
     cancel_run,
     compose_prompt,
+    compose_execution_prompt,
     compose_refine_prompt,
     continue_preview,
     default_delivery_channel,
+    execution_label,
     get_result,
     get_progress,
     get_cached_cowork_island,
@@ -52,10 +52,12 @@ from ..services.cowork_runner import (
     is_running,
     new_conversation_id,
     parse_cowork_output,
+    parse_execution_output,
     parse_source_url,
     preview_label,
     read_blocked_question,
     start_preview,
+    start_execution,
 )
 from ..services.workspace_settings import api_transport_enabled
 
@@ -76,6 +78,8 @@ _question_recovering_lock = threading.Lock()
 # Cancel seam, same reasoning: the unit suite must never post a real pause.
 CANCEL_FN = None
 ANSWER_FN = None
+EXECUTE_FN = None
+EXECUTE_TRANSPORT_ENABLED_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -311,7 +315,9 @@ def _enrich(action: dict) -> dict:
     )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
 
-    if action.get("state") == "previewing" and action.get("conversation_id"):
+    if action.get("state") in {"previewing", "executing"} and action.get(
+        "conversation_id"
+    ):
         try:
             status = (HANDOFF_FN or handoff_status)(action["conversation_id"])
         except Exception:  # noqa: BLE001
@@ -416,17 +422,51 @@ def _finalise(action: dict) -> dict:
     of database coupling. A row whose poll never arrives is cleaned up at
     startup by models.recover_stuck_previews().
     """
-    label = preview_label(action["task_id"])
+    executing = action.get("state") == "executing"
+    label = (
+        execution_label(action["task_id"])
+        if executing
+        else preview_label(action["task_id"])
+    )
     result = get_result(label)
     if result is None or is_running(label):
         return action
 
-    parsed = parse_cowork_output(result["stdout"], stderr=result["stderr"])
+    parser = parse_execution_output if executing else parse_cowork_output
+    parsed = parser(result["stdout"], stderr=result["stderr"])
 
     error = result.get("error") or parsed.get("error")
     failed = bool(error) or result.get("exit_code") not in (0, None)
 
     trace = parsed.get("tool_trace")
+    if executing:
+        confirmed = (
+            bool(parsed.get("delivery_confirmed"))
+            and _delivery_evidence_matches(action, parsed)
+            and not failed
+        )
+        if not confirmed:
+            detail = error or (
+                "Cowork finished without positive delivery evidence."
+            )
+            error = (
+                f"{detail} Delivery could not be confirmed. Check the "
+                "destination before retrying."
+            )
+        fields = {
+            "state": "executed" if confirmed else "execute_unconfirmed",
+            "cost_credits": result.get("cost_credits"),
+            "finding": parsed.get("finding") or parsed.get("raw_text"),
+            "terminal_status": parsed.get("terminal_status"),
+            "tool_trace": json.dumps(trace) if trace else None,
+            "error": None if confirmed else error,
+        }
+        if parsed.get("conversation_id"):
+            fields["conversation_id"] = parsed["conversation_id"]
+        return update_task_action(
+            action["id"], frozenset(fields), **fields
+        ) or action
+
     fields = {
         "state": "failed" if failed else "ready",
         "cost_credits": result.get("cost_credits"),
@@ -469,8 +509,166 @@ def _clean(action: dict) -> dict:
     return action
 
 
+def _delivery_tool_matches_action(action: dict, name: str) -> bool:
+    name = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    action_type = action.get("action_type")
+    channel = action.get("delivery_channel")
+    if action_type == "schedule-meeting":
+        return "createevent" in name
+    if action_type == "respond-email" or channel == "email":
+        return any(
+            marker in name
+            for marker in ("sendemail", "replytomessage", "replyalltomessage")
+        )
+    return any(marker in name for marker in ("postmessage", "replytochannelmessage"))
+
+
+def _tool_input_strings(value) -> list[str]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return [value]
+        return _tool_input_strings(decoded)
+    if isinstance(value, dict):
+        return [
+            text
+            for child in value.values()
+            for text in _tool_input_strings(child)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [
+            text
+            for child in value
+            for text in _tool_input_strings(child)
+        ]
+    return [] if value is None else [str(value)]
+
+
+def _tool_input_values_for_keys(value, keys: frozenset[str]) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if isinstance(value, dict):
+        matches = []
+        for key, child in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in keys:
+                matches.extend(_tool_input_strings(child))
+            else:
+                matches.extend(_tool_input_values_for_keys(child, keys))
+        return matches
+    if isinstance(value, (list, tuple)):
+        return [
+            text
+            for child in value
+            for text in _tool_input_values_for_keys(child, keys)
+        ]
+    return []
+
+
+def _tool_content_values(value) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if isinstance(value, dict):
+        matches = []
+        for key, child in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in {"message", "body", "content"}:
+                if isinstance(child, str):
+                    matches.append(child)
+                else:
+                    matches.extend(_tool_content_values(child))
+            elif isinstance(child, (dict, list, tuple)):
+                matches.extend(_tool_content_values(child))
+        return matches
+    if isinstance(value, (list, tuple)):
+        return [
+            text
+            for child in value
+            for text in _tool_content_values(child)
+        ]
+    return []
+
+
+def _delivery_evidence_matches(action: dict, parsed: dict) -> bool:
+    successful_writes = [
+        tool
+        for tool in (parsed.get("tools") or [])
+        if tool.get("ok") is True and _looks_like_write(tool.get("name"))
+    ]
+    if len(successful_writes) != 1:
+        return False
+    tool = successful_writes[0]
+    if not _delivery_tool_matches_action(action, tool.get("name")):
+        return False
+    destination_values = _tool_input_values_for_keys(
+        tool.get("input"),
+        frozenset({
+            "to", "cc", "bcc", "recipient", "recipients", "torecipient",
+            "torecipients", "ccrecipient", "ccrecipients", "bccrecipient",
+            "bccrecipients", "attendee", "attendees", "requiredattendee",
+            "requiredattendees", "optionalattendee", "optionalattendees",
+            "chat", "chatid", "channel", "channelid", "conversation",
+            "conversationid",
+        }),
+    )
+    destination = str(action.get("destination_ref") or "").strip().lower()
+    normalized_destinations = [
+        value.strip().lower() for value in destination_values if value.strip()
+    ]
+    if "@" in destination:
+        normalized_destinations = [
+            value for value in normalized_destinations if "@" in value
+        ]
+    if not destination or normalized_destinations != [destination]:
+        return False
+    draft = (action.get("draft_edited") or action.get("draft") or "").strip()
+    if action.get("action_type") == "schedule-meeting":
+        # The card does not yet approve structured subject/time/location fields.
+        # The write may run, but cannot be called confirmed from body evidence.
+        return False
+    content_values = {
+        value.strip() for value in _tool_content_values(tool.get("input"))
+    }
+    if (
+        action.get("action_type") == "respond-email"
+        or action.get("delivery_channel") == "email"
+    ):
+        lines = draft.splitlines()
+        if not lines or not lines[0].lower().startswith("subject:"):
+            return False
+        subject = lines[0].split(":", 1)[1].strip()
+        body = "\n".join(lines[1:]).strip()
+        subjects = {
+            value.strip()
+            for value in _tool_input_values_for_keys(
+                tool.get("input"), frozenset({"subject"})
+            )
+        }
+        attachments = _tool_input_values_for_keys(
+            tool.get("input"),
+            frozenset({"attachment", "attachments", "file", "files"}),
+        )
+        return (
+            bool(subject)
+            and bool(body)
+            and subjects == {subject}
+            and content_values == {body}
+            and not attachments
+        )
+    if not draft or not content_values or content_values != {draft}:
+        return False
+    return True
+
+
 class CoworkHandler(tornado.web.RequestHandler):
-    """Preview lifecycle for one task. No write path exists."""
+    """Write-barriered preview lifecycle for one task."""
 
     def set_default_headers(self):
         self.set_header("Content-Type", "application/json")
@@ -499,15 +697,19 @@ class CoworkHandler(tornado.web.RequestHandler):
 
         # 409 is gated on the in-memory registry, never on task_actions.state:
         # the registry self-heals when a process exits, a database row does not.
-        if is_running(preview_label(tid)):
-            return self._fail(409, "A preview is already running for this task")
+        latest = get_latest_task_action(tid)
+        if (
+            is_running(preview_label(tid))
+            or is_running(execution_label(tid))
+            or (latest and latest.get("state") == "executing")
+        ):
+            return self._fail(409, "A Cowork action is already running for this task")
 
         redirect_text = (body.get("redirect_text") or "").strip() or None
         interaction_mode = body.get("interaction_mode")
         if interaction_mode is None:
-            previous = get_latest_task_action(tid)
             interaction_mode = (
-                previous.get("interaction_mode") if previous else "interaction"
+                latest.get("interaction_mode") if latest else "interaction"
             ) or "interaction"
         if (
             not isinstance(interaction_mode, str)
@@ -591,7 +793,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(404, "No Cowork preview for this task")
 
         pre_state = action["state"]
-        if action["state"] == "previewing":
+        if action["state"] in {"previewing", "executing"}:
             action = _finalise(action)
 
         if self.get_argument("mark_seen", None) and pre_state == "ready":
@@ -600,7 +802,12 @@ class CoworkHandler(tornado.web.RequestHandler):
         payload = _enrich(_clean(action))
         # Live liveness from the CLI's stderr. A preview runs for a median of
         # 119s, so the card needs something to say while it waits.
-        payload["progress"] = get_progress(preview_label(tid))
+        label = (
+            execution_label(tid)
+            if action.get("state") == "executing"
+            else preview_label(tid)
+        )
+        payload["progress"] = get_progress(label)
 
         # What happened after "Open in Cowork". Only meaningful once a preview
         # has finished and been handed over, so a run still in `previewing`
@@ -679,11 +886,105 @@ class CoworkHandler(tornado.web.RequestHandler):
         if body is None:
             return self._fail(400, "Invalid JSON")
 
-        updated = update_task_action(action["id"], ACTION_EDITABLE_FIELDS, **body)
-        if updated is None:
+        if not any(key in ACTION_EDITABLE_FIELDS for key in body):
             return self._fail(400, "No editable fields supplied")
+        if action.get("state") not in {"previewing", "ready"}:
+            return self._fail(409, "A completed action cannot be edited.")
+        updated = update_task_action(
+            action["id"],
+            ACTION_EDITABLE_FIELDS,
+            required_state=action["state"],
+            **body,
+        )
+        if updated is None:
+            return self._fail(409, "The draft changed state before it was saved.")
 
         self.write(json.dumps({"action": _enrich(_clean(updated))}))
+
+
+class CoworkExecuteHandler(tornado.web.RequestHandler):
+    """Execute the exact draft and destination approved in Riveter."""
+
+    def set_default_headers(self):
+        self.set_header("Content-Type", "application/json")
+
+    def _fail(self, code, message):
+        self.set_status(code)
+        self.write(json.dumps({"error": message}))
+
+    def post(self, task_id):
+        tid = int(task_id)
+        if self.request.headers.get("X-Riveter-Action") != "confirm":
+            return self._fail(403, "Direct actions require Riveter confirmation.")
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except (json.JSONDecodeError, TypeError):
+            return self._fail(400, "Invalid JSON")
+        approved_snapshot = body.get("approved_snapshot")
+        if not isinstance(approved_snapshot, dict):
+            return self._fail(400, "The reviewed action snapshot is required.")
+        task = get_task(tid)
+        if not task:
+            return self._fail(404, "Not found")
+
+        transport_enabled = (
+            EXECUTE_TRANSPORT_ENABLED_FN or api_transport_enabled
+        )
+        if not transport_enabled():
+            return self._fail(
+                409, "Direct actions require the Cowork API transport."
+            )
+
+        parent = get_latest_task_action(tid)
+        if not parent or parent.get("state") != "ready":
+            return self._fail(409, "There is no approved draft ready to send.")
+        if not parent.get("conversation_id"):
+            return self._fail(409, "This draft has no Cowork conversation.")
+        if not parent.get("destination_confirmed_at"):
+            return self._fail(409, "Review and confirm the destination first.")
+        if not (
+            (parent.get("draft_edited") or parent.get("draft") or "").strip()
+        ):
+            return self._fail(409, "The final draft is empty.")
+
+        action = create_execution_action(parent["id"], approved_snapshot)
+        if not action:
+            return self._fail(
+                409,
+                "The draft or destination changed after review, or this action "
+                "is already being handled. Review it again before sending.",
+            )
+        prompt = compose_execution_prompt(action)
+        action = update_task_action(
+            action["id"],
+            frozenset({"composed_prompt"}),
+            composed_prompt=prompt,
+        ) or action
+
+        try:
+            execute = EXECUTE_FN or start_execution
+            execute(
+                tid,
+                prompt,
+                action["conversation_id"],
+                log_dir=LOG_DIR_OVERRIDE,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("could not start approved Cowork action")
+            message = (
+                f"Could not start the action: {exc}. Delivery could not be "
+                "confirmed. Check the destination before retrying."
+            )
+            action = update_task_action(
+                action["id"],
+                frozenset({"state", "error"}),
+                state="execute_unconfirmed",
+                error=message,
+            ) or action
+            return self._fail(502, message)
+
+        self.set_status(202)
+        self.write(json.dumps({"action": _enrich(_clean(action))}))
 
 
 class CoworkRefineHandler(tornado.web.RequestHandler):
@@ -695,10 +996,9 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
     existing conversation, which still holds that research, and came back in
     about 30s in a live check.
 
-    Still no execute route. The barrier is rebuilt and re-sent on this turn
-    (it travels per request), so a "send it now" instruction typed here is
-    intercepted — which makes this strictly safer than the same words typed
-    into the Cowork web app, where there is no barrier at all.
+    The barrier is rebuilt and re-sent on this turn (it travels per request),
+    so a "send it now" instruction typed here is intercepted. Only the separate
+    execute route can run an approved write without that barrier.
     """
 
     def _fail(self, code, message):
@@ -714,8 +1014,11 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
         action = get_latest_task_action(tid)
         if not action:
             return self._fail(404, "No Cowork preview for this task")
-        if action["state"] == "previewing":
-            return self._fail(409, "A preview is already running for this task")
+        if (
+            action["state"] in {"previewing", "executing"}
+            or is_running(execution_label(tid))
+        ):
+            return self._fail(409, "A Cowork action is already running for this task")
 
         conversation_id = action.get("conversation_id")
         if not conversation_id:
@@ -800,8 +1103,8 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             return self._fail(404, "No Cowork preview for this task")
 
         action = _enrich(action)
-        if action.get("state") != "previewing":
-            return self._fail(409, "That preview is not running")
+        if action.get("state") not in {"previewing", "executing"}:
+            return self._fail(409, "That Cowork turn is not running")
         if not action.get("conversation_id"):
             return self._fail(409, "That preview has no Cowork conversation")
         if not action.get("waiting_on_user"):
@@ -875,7 +1178,7 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             return self._fail(502, f"Could not send the answer to Cowork: {exc}")
 
         action = get_latest_task_action(tid) or action
-        if action.get("state") == "previewing":
+        if action.get("state") in {"previewing", "executing"}:
             action["blocked_question"] = ""
             action["answered_interaction"] = previous_question
             action["interaction_request"] = None

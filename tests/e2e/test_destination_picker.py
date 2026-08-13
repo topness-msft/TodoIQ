@@ -1,4 +1,4 @@
-"""E2E gates for preview-only destination binding and the picker."""
+"""E2E gates for destination binding, direct actions, and the picker."""
 
 import json
 import os
@@ -426,13 +426,13 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
-    def test_no_send_or_execute_control_exists(self, page: Page, base_url):
+    def test_confirmed_destination_exposes_channel_specific_action(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         try:
             _load_dashboard(page, base_url, task_id, _action(task_id))
-            card = page.locator(".cw-card").first.inner_text()
-            for banned in ("Send", "Execute", "Deliver", "Approve & send"):
-                assert banned not in card
+            expect(page.get_by_role("button", name="Send Teams message")).to_be_visible()
+            expect(page.get_by_role("button", name="Send email")).to_have_count(0)
+            expect(page.get_by_role("button", name="Create meeting")).to_have_count(0)
         finally:
             _delete_task(page, base_url, task_id)
 

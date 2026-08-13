@@ -235,6 +235,16 @@ def _migrate(conn: sqlite3.Connection):
             "OR answered_interaction IS NOT NULL"
         )
         conn.commit()
+    for column in ("execution_requested_at", "delivery_confirmed_at"):
+        if column not in action_cols:
+            conn.execute(f"ALTER TABLE task_actions ADD COLUMN {column} TEXT")
+            conn.commit()
+
+    action_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_actions'"
+    ).fetchone()
+    if action_sql and "execute_unconfirmed" not in (action_sql[0] or ""):
+        _migrate_task_action_execution_states(conn)
 
     # Migrate sync_log to support 'full_scan' sync_type
     sync_types = [
@@ -259,6 +269,84 @@ def _migrate(conn: sqlite3.Connection):
         """)
 
 
+def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
+    """Rebuild task_actions because SQLite cannot widen a CHECK in place."""
+    columns = [
+        row[1] for row in conn.execute("PRAGMA table_info(task_actions)").fetchall()
+    ]
+    copy_columns = ", ".join(columns)
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE task_actions_new (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                action_type      TEXT DEFAULT 'general',
+                state            TEXT NOT NULL DEFAULT 'previewing'
+                                     CHECK (state IN (
+                                         'previewing','ready','failed',
+                                         'executing','executed','execute_unconfirmed'
+                                     )),
+                intent           TEXT,
+                notes_snapshot   TEXT,
+                redirect_text    TEXT,
+                composed_prompt  TEXT,
+                finding          TEXT,
+                draft            TEXT,
+                draft_edited     TEXT,
+                destination_kind TEXT
+                                     CHECK (destination_kind IS NULL OR destination_kind IN (
+                                         'one_to_one','group','meeting','channel','unknown','none'
+                                     )),
+                destination_ref  TEXT,
+                conversation_id  TEXT,
+                terminal_status  TEXT,
+                tool_trace       TEXT,
+                cost_credits     REAL,
+                error            TEXT,
+                seen_at          TEXT,
+                island_url       TEXT,
+                delivery_channel TEXT
+                                     CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email')),
+                destination_display TEXT,
+                destination_confirmed_at TEXT,
+                destination_source TEXT,
+                parent_action_id INTEGER REFERENCES task_actions_new(id),
+                blocked_question TEXT,
+                answered_interaction TEXT,
+                interaction_mode TEXT NOT NULL DEFAULT 'interaction'
+                                      CHECK (interaction_mode IN ('interaction','no_interaction')),
+                completed_at     TEXT,
+                had_interaction  INTEGER NOT NULL DEFAULT 0
+                                      CHECK (had_interaction IN (0,1)),
+                execution_requested_at TEXT,
+                delivery_confirmed_at TEXT,
+                created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            """
+        )
+        conn.execute(
+            f"INSERT INTO task_actions_new ({copy_columns}) "
+            f"SELECT {copy_columns} FROM task_actions"
+        )
+        conn.executescript(
+            """
+            DROP TABLE task_actions;
+            ALTER TABLE task_actions_new RENAME TO task_actions;
+            CREATE INDEX idx_task_actions_task_id ON task_actions(task_id);
+            CREATE UNIQUE INDEX idx_task_actions_execution_parent
+                ON task_actions(parent_action_id)
+                WHERE state IN ('executing','executed','execute_unconfirmed');
+            """
+        )
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+
+
 def init_db(conn: sqlite3.Connection | None = None):
     """Create all tables if they don't exist."""
     close = False
@@ -268,6 +356,14 @@ def init_db(conn: sqlite3.Connection | None = None):
 
     conn.executescript(SCHEMA_SQL)
     _migrate(conn)
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_actions_execution_parent
+            ON task_actions(parent_action_id)
+            WHERE state IN ('executing','executed','execute_unconfirmed')
+        """
+    )
+    conn.commit()
 
     if close:
         conn.close()
@@ -340,11 +436,11 @@ CREATE TABLE IF NOT EXISTS task_actions (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     action_type      TEXT DEFAULT 'general',
-    -- Phase 1 ships PREVIEW ONLY. Execute states ('executing','executed','approved')
-    -- are deliberately absent so no code path can claim an M365 write. Phase 2 adds
-    -- them here, additively, only after the G1c write-tool enumeration passes.
     state            TEXT NOT NULL DEFAULT 'previewing'
-                         CHECK (state IN ('previewing','ready','failed')),
+                         CHECK (state IN (
+                             'previewing','ready','failed',
+                             'executing','executed','execute_unconfirmed'
+                         )),
     intent           TEXT,
     notes_snapshot   TEXT,
     redirect_text    TEXT,
@@ -367,6 +463,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     destination_display TEXT,
     destination_confirmed_at TEXT,
     destination_source TEXT,
+    parent_action_id INTEGER REFERENCES task_actions(id),
     blocked_question TEXT,
     answered_interaction TEXT,
     interaction_mode TEXT NOT NULL DEFAULT 'interaction'
@@ -374,6 +471,8 @@ CREATE TABLE IF NOT EXISTS task_actions (
     completed_at     TEXT,
     had_interaction  INTEGER NOT NULL DEFAULT 0
                           CHECK (had_interaction IN (0,1)),
+    execution_requested_at TEXT,
+    delivery_confirmed_at TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

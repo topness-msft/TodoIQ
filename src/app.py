@@ -22,6 +22,7 @@ from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
 from .handlers.cowork import (
     CoworkDestinationHandler,
     CoworkAnswerHandler,
+    CoworkExecuteHandler,
     CoworkHandler,
     CoworkRefineHandler,
 )
@@ -164,6 +165,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/cowork", CoworkHandler),
             (r"/api/tasks/(\d+)/cowork/refine", CoworkRefineHandler),
             (r"/api/tasks/(\d+)/cowork/answer", CoworkAnswerHandler),
+            (r"/api/tasks/(\d+)/cowork/execute", CoworkExecuteHandler),
             (r"/api/tasks/(\d+)/cowork/destination", CoworkDestinationHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
@@ -236,7 +238,7 @@ def start_server(port=8766):
         logger.info(f"Startup recovery: failed {stranded} interrupted Cowork preview(s)")
 
     app = make_app()
-    app.listen(port)
+    app.listen(port, address="127.0.0.1")
     logger.info(f"TodoNess running at http://localhost:{port}")
 
     workspace = get_workspace_settings()

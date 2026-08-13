@@ -29,6 +29,7 @@ from src.services.cowork_runner import (
     _api_payload_from_events,
     _iter_sse,
     parse_cowork_output,
+    parse_execution_output,
 )
 
 
@@ -139,6 +140,13 @@ class TestPayloadEquivalence(unittest.TestCase):
         self.assertTrue(send)
         self.assertIn("phtopnes@microsoft.com", send[0]["inp"])
 
+    def test_tool_trace_keeps_input_for_safe_contextual_labels(self):
+        send = [
+            item for item in self.payload["tool_trace"]
+            if "SendEmail" in item["tool_name"]
+        ][0]
+        self.assertIn("phtopnes@microsoft.com", send["input"])
+
 
 class TestDownstreamIsUnchanged(unittest.TestCase):
     """The real proof: the existing parser handles it with no special casing."""
@@ -177,6 +185,28 @@ class TestFailureShapes(unittest.TestCase):
         lines = ["event: rl", 'data: {"st":"fail"}']
         payload = _api_payload_from_events(list(_iter_sse(lines)), "t:u:c")
         self.assertEqual(payload["terminal_status"], "fail")
+
+    def test_container_bash_is_not_delivery_evidence(self):
+        payload = {
+            "terminal_status": "ok",
+            "text": "Done.",
+            "sse_events": [
+                {"event": "ts", "tid": "bash-1", "tn": "Bash"},
+                {
+                    "event": "tx",
+                    "tid": "bash-1",
+                    "tn": "Bash",
+                    "ok": True,
+                },
+            ],
+            "tool_trace": [{"tool_name": "Bash", "ok": True}],
+            "callback_exchanges": [],
+        }
+
+        parsed = parse_execution_output(json.dumps(payload))
+
+        self.assertFalse(parsed["delivery_confirmed"])
+        self.assertEqual(parsed["executed_write_tools"], [])
 
 
 if __name__ == "__main__":
@@ -289,3 +319,58 @@ class TestFlagRouting(unittest.TestCase):
             cr.wait_for(label, timeout=10)
         self.assertGreater(len(seen["config"]["tool_names"]), 100)
         self.assertTrue(seen["config"]["static_results"])
+
+    def test_execution_is_api_only_and_never_builds_a_barrier(self):
+        seen = {}
+
+        def fake_run(prompt, config, on_progress, conversation_id=None, is_follow_up=None):
+            seen.update(
+                prompt=prompt,
+                config=config,
+                conversation_id=conversation_id,
+                is_follow_up=is_follow_up,
+            )
+            return {
+                "terminal_status": "ok",
+                "text": "Sent.",
+                "sse_events": [],
+                "tool_trace": [],
+                "conversation_id": conversation_id,
+                "callback_exchanges": [],
+                "duration_seconds": None,
+            }
+
+        with mock.patch.object(cr, "api_transport_enabled", lambda: True), \
+             mock.patch.object(cr, "_api_run_fn", fake_run), \
+             mock.patch.object(
+                 cr, "build_callback_config",
+                 side_effect=AssertionError("execution must not build the barrier"),
+             ):
+            label = cr.start_execution(
+                7,
+                "send the approved message",
+                "t:u:cw-existing",
+                log_dir=self.tmp,
+            )
+            cr.wait_for(label, timeout=10)
+
+        self.assertIsNone(seen["config"])
+        self.assertEqual(seen["conversation_id"], "t:u:cw-existing")
+        self.assertTrue(seen["is_follow_up"])
+
+    def test_execution_rejects_the_subprocess_transport(self):
+        with mock.patch.object(cr, "api_transport_enabled", lambda: False):
+            with self.assertRaises(RuntimeError):
+                cr.start_execution(8, "send", "t:u:cw-existing", log_dir=self.tmp)
+
+    def test_execution_setup_failure_releases_the_registry_slot(self):
+        with mock.patch.object(cr, "api_transport_enabled", lambda: True), \
+             mock.patch.object(
+                 cr, "write_prompt_file", side_effect=OSError("disk unavailable")
+             ):
+            with self.assertRaises(OSError):
+                cr.start_execution(
+                    9, "send", "t:u:cw-existing", log_dir=self.tmp
+                )
+
+        self.assertFalse(cr.is_running(cr.execution_label(9)))

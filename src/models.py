@@ -443,8 +443,9 @@ def get_stats() -> dict:
 
 # -- Cowork task actions -----------------------------------------------------
 #
-# Phase 1 is PREVIEW ONLY: state is constrained by the schema to
-# previewing/ready/failed, so no row here can claim an M365 write.
+# Preview and execution turns share an audit chain. Execution is always a child
+# row so approval, transport progress, and the terminal delivery verdict remain
+# separate from the draft that the user reviewed.
 
 _ACTION_INSERT_FIELDS = (
     "action_type", "intent", "notes_snapshot", "redirect_text",
@@ -490,6 +491,101 @@ def create_task_action(task_id: int, **fields) -> dict:
             "SELECT * FROM task_actions WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
         return dict(row)
+    finally:
+        conn.close()
+
+
+def create_execution_action(
+    parent_action_id: int, approved_snapshot: dict
+) -> dict | None:
+    """Atomically claim one approved preview for execution.
+
+    The partial unique index on parent_action_id is the crash-safe idempotency
+    guard. A browser double-click or a second process can never create a second
+    delivery turn for the same approved draft.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        parent = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (parent_action_id,)
+        ).fetchone()
+        if not parent:
+            conn.rollback()
+            return None
+        parent = dict(parent)
+        final_draft = (
+            (parent.get("draft_edited") or "").strip()
+            or (parent.get("draft") or "").strip()
+        )
+        expected = {
+            "parent_action_id": parent["id"],
+            "draft": final_draft,
+            "destination_ref": parent.get("destination_ref") or "",
+            "destination_display": parent.get("destination_display") or "",
+            "delivery_channel": parent.get("delivery_channel") or "",
+            "destination_confirmed_at": parent.get("destination_confirmed_at") or "",
+        }
+        if approved_snapshot != expected:
+            conn.rollback()
+            return None
+        cursor = conn.execute(
+            """
+            INSERT INTO task_actions (
+                task_id, action_type, state, intent, notes_snapshot,
+                redirect_text, composed_prompt, finding, draft, draft_edited,
+                destination_kind, destination_ref, conversation_id,
+                island_url, delivery_channel, destination_display,
+                destination_confirmed_at, destination_source, parent_action_id,
+                interaction_mode, execution_requested_at
+            )
+            SELECT
+                task_id, action_type, 'executing', intent, notes_snapshot,
+                redirect_text, NULL, finding,
+                COALESCE(NULLIF(TRIM(draft_edited), ''), draft),
+                COALESCE(NULLIF(TRIM(draft_edited), ''), draft),
+                destination_kind, destination_ref, conversation_id,
+                island_url, delivery_channel, destination_display,
+                destination_confirmed_at, destination_source, id,
+                'interaction', strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            FROM task_actions parent
+            WHERE parent.id = ?
+              AND parent.state = 'ready'
+              AND parent.id = (
+                  SELECT MAX(latest.id)
+                  FROM task_actions latest
+                  WHERE latest.task_id = parent.task_id
+              )
+              AND parent.destination_confirmed_at IS NOT NULL
+              AND COALESCE(TRIM(parent.destination_ref), '') <> ''
+              AND COALESCE(TRIM(parent.destination_display), '') <> ''
+              AND COALESCE(TRIM(parent.conversation_id), '') <> ''
+              AND COALESCE(
+                    NULLIF(TRIM(parent.draft_edited), ''),
+                    TRIM(parent.draft), ''
+                  ) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_actions child
+                  WHERE child.parent_action_id = parent.id
+                    AND child.state IN (
+                        'executing','executed','execute_unconfirmed'
+                    )
+              )
+            """,
+            (parent_action_id,),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        action_id = cursor.lastrowid
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
     finally:
         conn.close()
 
@@ -586,26 +682,46 @@ def list_task_actions(task_id: int) -> list[dict]:
         conn.close()
 
 
-def update_task_action(action_id: int, allowed: frozenset, **fields) -> dict | None:
+def update_task_action(
+    action_id: int,
+    allowed: frozenset,
+    *,
+    required_state: str | None = None,
+    **fields,
+) -> dict | None:
     """Update an action row, restricted to `allowed` field names."""
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return None
 
     sets = ", ".join(f"{k} = ?" for k in updates)
-    if updates.get("state") in {"ready", "failed"}:
+    if updates.get("state") in {
+        "ready", "failed", "executed", "execute_unconfirmed"
+    }:
         sets += (
             ", completed_at = COALESCE("
             "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
         )
+    if updates.get("state") == "executed":
+        sets += (
+            ", delivery_confirmed_at = COALESCE("
+            "delivery_confirmed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+        )
     conn = get_connection()
     try:
-        conn.execute(
+        where = "id = ?"
+        params = list(updates.values()) + [action_id]
+        if required_state is not None:
+            where += " AND state = ?"
+            params.append(required_state)
+        cursor = conn.execute(
             f"UPDATE task_actions SET {sets}, "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
-            list(updates.values()) + [action_id],
+            f"updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE {where}",
+            params,
         )
         conn.commit()
+        if cursor.rowcount == 0:
+            return None
         row = conn.execute(
             "SELECT * FROM task_actions WHERE id = ?", (action_id,)
         ).fetchone()
@@ -647,7 +763,7 @@ def claim_blocked_question_answer(action_id: int, expected_question: str) -> boo
             "had_interaction = 1, "
             "blocked_question = '', "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-            "WHERE id = ? AND state = 'previewing' "
+            "WHERE id = ? AND state IN ('previewing','executing') "
             "AND blocked_question = ?",
             (action_id, expected_question),
         )
@@ -698,14 +814,14 @@ def clear_blocked_question_if_unchanged(
 
 
 def recover_stuck_previews() -> int:
-    """Fail any preview left mid-flight by a restart.
+    """Recover any in-flight turn left behind by a restart.
 
     Without this a browser close or server restart strands the row in
     'previewing' forever and the task can never be previewed again.
     """
     conn = get_connection()
     try:
-        cursor = conn.execute(
+        preview_cursor = conn.execute(
             "UPDATE task_actions SET state = 'failed', "
             "error = 'Interrupted by a server restart.', "
             "completed_at = COALESCE("
@@ -713,7 +829,16 @@ def recover_stuck_previews() -> int:
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE state = 'previewing'"
         )
+        execution_cursor = conn.execute(
+            "UPDATE task_actions SET state = 'execute_unconfirmed', "
+            "error = 'Server restarted while sending. Check the destination to "
+            "confirm whether it was delivered before retrying.', "
+            "completed_at = COALESCE("
+            "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')), "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE state = 'executing'"
+        )
         conn.commit()
-        return cursor.rowcount
+        return preview_cursor.rowcount + execution_cursor.rowcount
     finally:
         conn.close()

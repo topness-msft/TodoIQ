@@ -3,27 +3,29 @@
 ## One-liner
 TodoIQ is a local Windows task manager that detects actionable Microsoft 365
 work through WorkIQ, stores it in SQLite, and exposes a Tornado dashboard with
-Cowork-powered preview actions.
+Cowork-powered draft, approval, and direct-action flows.
 
 ## Architecture principles (immutable unless explicitly revised)
 - WorkIQ detects tasks; Cowork researches/drafts actions; TodoIQ owns durable
   task state and human-facing approval boundaries.
-- Phase 1 is preview-only: there is no TodoIQ execute route. Local approved-root
-  document materialization is distinct from external M365 writes.
+- Cowork previews are write-barriered. External M365 writes require a separate
+  TodoIQ execution action, an exact-draft confirmation, and a durable child audit
+  row with duplicate-send protection.
 - SQLite is the source of truth. Schema changes are additive/idempotent and
   migrations run before the server listens.
 - Never infer delivery audience from Cowork `conversation_id`; destination and
   conversation identity are separate data.
 - External tools are defence-in-depth, not a sandbox. `--deny-tools` is not a
-  safety control; the callback config and absence of execute routes are.
+  safety control; preview callback interception and the explicit execution
+  confirmation boundary are.
 
 ## Module map / key files
 - `src/app.py` — Tornado route registration, startup migrations/recovery,
   periodic jobs, port entry point.
 - `src/db.py` — SQLite path, schema, WAL connection setup and migrations.
 - `src/models.py` — task lifecycle, sync data, task-action persistence.
-- `src/handlers/cowork.py` — preview POST/GET/PUT API; deliberately no execute
-  route.
+- `src/handlers/cowork.py` — preview, interaction-answer, and explicit execute
+  routes plus cautious delivery finalization.
 - `src/services/cowork_runner.py` — prompt/output parsing, write-tool callback
   config, subprocess registry, auth recovery and island resolution. Large
   high-blast-radius module; prompt composition starts near the top, parser near
@@ -80,10 +82,10 @@ Cowork-powered preview actions.
   - Never rollback code by restarting the old checkout without first copying
     the authoritative DB into that checkout.
   - Never copy a live SQLite file while a writer is running.
-  - Never deploy while Cowork preview subprocesses are active; restart recovery
-    marks interrupted previews failed.
-- In-flight-work hazard: stopping the server interrupts running Cowork previews;
-  startup recovery changes stranded `previewing` actions to `failed`.
+  - Never deploy while Cowork preview or execution subprocesses are active.
+- In-flight-work hazard: stopping the server interrupts running Cowork actions;
+  startup recovery changes stranded previews to `failed` and executions to
+  `execute_unconfirmed` so Riveter never invents delivery success or failure.
 - Post-deploy verification probes:
 
   | Route | Method | Expected | Why |
@@ -109,6 +111,8 @@ Cowork-powered preview actions.
 - `task_actions` latest row is ordered by integer `id`, not second-precision
   timestamps.
 - Cowork `tool_trace[].ok` means the call returned, not that a write executed.
+- Execution claims delivery only after a recognized write tool succeeds on the
+  unbarriered execution turn; ambiguous outcomes require checking the destination.
 - Cowork CLI 1.21.89 resumed SSE omits required `conversationId`; TodoIQ backend
   resume needs the compatibility shim and persisted full island URL.
 - Cowork auth can expire between successful runs; runner performs one silent

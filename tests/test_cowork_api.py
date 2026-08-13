@@ -794,6 +794,418 @@ class TestConfirmDestination(CoworkAPITestBase):
         self.assertTrue(action["is_broadcast"])
 
 
+class TestExecuteApprovedAction(CoworkAPITestBase):
+    def setUp(self):
+        super().setUp()
+        from src.handlers import cowork as cowork_handler
+
+        self._execute_fn = getattr(cowork_handler, "EXECUTE_FN", None)
+        self._execute_transport_fn = getattr(
+            cowork_handler, "EXECUTE_TRANSPORT_ENABLED_FN", None
+        )
+        cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = lambda: True
+        self.started = []
+        cowork_handler.EXECUTE_FN = lambda task_id, prompt, conversation_id, **kw: (
+            self.started.append((task_id, prompt, conversation_id))
+            or cr.execution_label(task_id)
+        )
+
+    def tearDown(self):
+        from src.handlers import cowork as cowork_handler
+
+        cowork_handler.EXECUTE_FN = self._execute_fn
+        cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = self._execute_transport_fn
+        super().tearDown()
+
+    def _ready_action(self, tid, **overrides):
+        from src.db import get_connection
+
+        action_id = self.make_action(tid, state="ready")
+        values = {
+            "draft": "Hi Sarah - the deck is attached.",
+            "conversation_id": "tenant:user:conversation",
+            "delivery_channel": "teams",
+            "destination_ref": "sarah@microsoft.com",
+            "destination_display": "Sarah Goodwin",
+            "destination_confirmed_at": "2026-08-11T12:00:00Z",
+        }
+        values.update(overrides)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET "
+            + ", ".join(f"{key}=?" for key in values)
+            + " WHERE id=?",
+            (*values.values(), action_id),
+        )
+        conn.commit()
+        conn.close()
+        return action_id
+
+    def _execute(self, tid, snapshot=None, confirmed=True):
+        from src.models import get_latest_task_action
+
+        parent = get_latest_task_action(tid)
+        if snapshot is None:
+            snapshot = {
+                "parent_action_id": parent["id"],
+                "draft": (parent.get("draft_edited") or parent.get("draft") or "").strip(),
+                "destination_ref": parent.get("destination_ref") or "",
+                "destination_display": parent.get("destination_display") or "",
+                "delivery_channel": parent.get("delivery_channel") or "",
+                "destination_confirmed_at": parent.get("destination_confirmed_at") or "",
+            }
+        return self.fetch(
+            f"/api/tasks/{tid}/cowork/execute",
+            method="POST",
+            body=json.dumps({"approved_snapshot": snapshot}),
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Riveter-Action": "confirm"} if confirmed else {}),
+            },
+        )
+
+    def test_delivery_evidence_must_match_the_approved_action(self):
+        from src.handlers.cowork import (
+            _delivery_evidence_matches,
+            _delivery_tool_matches_action,
+        )
+
+        self.assertFalse(
+            _delivery_tool_matches_action(
+                {"action_type": "respond-email", "delivery_channel": "email"},
+                "mcp__m365_teams__PostMessage",
+            )
+        )
+        self.assertTrue(
+            _delivery_tool_matches_action(
+                {"action_type": "respond-email", "delivery_channel": "email"},
+                "mcp__outlook__SendEmailWithAttachments",
+            )
+        )
+        self.assertTrue(
+            _delivery_tool_matches_action(
+                {"action_type": "schedule-meeting", "delivery_channel": "teams"},
+                "mcp__outlook_calendar__CreateEvent",
+            )
+        )
+        action = {
+            "action_type": "follow-up",
+            "delivery_channel": "teams",
+            "destination_ref": "sarah@microsoft.com",
+            "draft": "Approved text",
+        }
+        matching = {
+            "tools": [{
+                "name": "mcp__m365_teams__PostMessage",
+                "ok": True,
+                "input": json.dumps({
+                    "recipient": "sarah@microsoft.com",
+                    "message": "Approved text",
+                }),
+            }]
+        }
+        self.assertTrue(_delivery_evidence_matches(action, matching))
+        wrong_recipient = json.loads(json.dumps(matching))
+        wrong_recipient["tools"][0]["input"] = json.dumps({
+            "recipient": "other@microsoft.com",
+            "message": "Approved text",
+        })
+        self.assertFalse(_delivery_evidence_matches(action, wrong_recipient))
+        changed_content = json.loads(json.dumps(matching))
+        changed_content["tools"][0]["input"] = json.dumps({
+            "recipient": "sarah@microsoft.com",
+            "message": "Different text",
+        })
+        self.assertFalse(_delivery_evidence_matches(action, changed_content))
+        multiline_action = {
+            **action,
+            "draft": "First line\nSecond line",
+        }
+        multiline = {
+            "tools": [{
+                "name": "mcp__m365_teams__PostMessage",
+                "ok": True,
+                "input": json.dumps({
+                    "recipient": "sarah@microsoft.com",
+                    "message": "First line\nSecond line",
+                }),
+            }]
+        }
+        self.assertTrue(_delivery_evidence_matches(multiline_action, multiline))
+        meeting_action = {
+            "action_type": "schedule-meeting",
+            "delivery_channel": "teams",
+            "destination_ref": "sarah@microsoft.com",
+            "draft": "Project review on Friday at 10:00",
+        }
+        changed_meeting = {
+            "tools": [{
+                "name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": {
+                    "attendees": ["sarah@microsoft.com"],
+                    "body": "Different meeting",
+                },
+            }]
+        }
+        self.assertFalse(_delivery_evidence_matches(meeting_action, changed_meeting))
+        matching_meeting = json.loads(json.dumps(changed_meeting))
+        matching_meeting["tools"][0]["input"]["body"] = meeting_action["draft"]
+        self.assertFalse(_delivery_evidence_matches(meeting_action, matching_meeting))
+        extra_recipient = json.loads(json.dumps(matching_meeting))
+        extra_recipient["tools"][0]["input"]["attendees"].append(
+            "attacker@microsoft.com"
+        )
+        self.assertFalse(_delivery_evidence_matches(
+            meeting_action, extra_recipient
+        ))
+        aliased_recipient = json.loads(json.dumps(matching_meeting))
+        aliased_recipient["tools"][0]["input"]["bcc"] = [
+            "attacker@microsoft.com"
+        ]
+        self.assertFalse(_delivery_evidence_matches(
+            meeting_action, aliased_recipient
+        ))
+        altered_content = json.loads(json.dumps(matching_meeting))
+        altered_content["tools"][0]["input"]["content"] = "Different meeting"
+        self.assertFalse(_delivery_evidence_matches(
+            meeting_action, altered_content
+        ))
+        changed_case = json.loads(json.dumps(matching_meeting))
+        changed_case["tools"][0]["input"]["body"] = meeting_action["draft"].upper()
+        self.assertFalse(_delivery_evidence_matches(meeting_action, changed_case))
+        smuggled_meeting = json.loads(json.dumps(changed_meeting))
+        smuggled_meeting["tools"][0]["input"] = {
+            "attendees": ["attacker@microsoft.com"],
+            "body": (
+                "Project review on Friday at 10:00 changed; originally for "
+                "sarah@microsoft.com"
+            ),
+        }
+        self.assertFalse(_delivery_evidence_matches(
+            meeting_action, smuggled_meeting
+        ))
+        email_action = {
+            "action_type": "respond-email",
+            "delivery_channel": "email",
+            "destination_ref": "sarah@microsoft.com",
+            "draft": "Subject: Status update\n\nApproved email body",
+        }
+        matching_email = {
+            "tools": [{
+                "name": "mcp__outlook__SendEmailWithAttachments",
+                "ok": True,
+                "input": {
+                    "to": ["sarah@microsoft.com"],
+                    "subject": "Status update",
+                    "body": "Approved email body",
+                    "content_type": "Text",
+                },
+            }]
+        }
+        self.assertTrue(_delivery_evidence_matches(email_action, matching_email))
+        duplicate_recipient = json.loads(json.dumps(matching_email))
+        duplicate_recipient["tools"][0]["input"]["cc"] = [
+            "sarah@microsoft.com"
+        ]
+        self.assertFalse(_delivery_evidence_matches(
+            email_action, duplicate_recipient
+        ))
+        email_with_attachment = json.loads(json.dumps(matching_email))
+        email_with_attachment["tools"][0]["input"]["attachments"] = [{
+            "path": "C:/sensitive.pdf",
+        }]
+        self.assertFalse(_delivery_evidence_matches(
+            email_action, email_with_attachment
+        ))
+        changed_subject = json.loads(json.dumps(matching_email))
+        changed_subject["tools"][0]["input"]["subject"] = "Different subject"
+        self.assertFalse(_delivery_evidence_matches(email_action, changed_subject))
+        duplicate = {"tools": matching["tools"] * 2}
+        self.assertFalse(_delivery_evidence_matches(action, duplicate))
+
+    def test_requires_riveter_confirmation_header(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid, confirmed=False).code, 403)
+
+    def test_rejects_snapshot_changed_after_modal_opened(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self.make_task()
+        self._ready_action(tid)
+        parent = get_latest_task_action(tid)
+        snapshot = {
+            "parent_action_id": parent["id"],
+            "draft": parent["draft"],
+            "destination_ref": parent["destination_ref"],
+            "destination_display": parent["destination_display"],
+            "delivery_channel": parent["delivery_channel"],
+            "destination_confirmed_at": parent["destination_confirmed_at"],
+        }
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET draft_edited=? WHERE id=?",
+            ("Changed after review", parent["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self._execute(tid, snapshot=snapshot).code, 409)
+        self.assertEqual(self.started, [])
+
+    def test_creates_audited_execution_child_and_starts_follow_up(self):
+        tid = self.make_task()
+        parent_id = self._ready_action(tid)
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 202)
+        action = json.loads(response.body)["action"]
+        self.assertEqual(action["state"], "executing")
+        self.assertEqual(action["parent_action_id"], parent_id)
+        self.assertEqual(self.started[0][2], "tenant:user:conversation")
+        self.assertIn("Sarah Goodwin", self.started[0][1])
+        self.assertIn("deck is attached", self.started[0][1])
+
+        edit = self.fetch(
+            f"/api/tasks/{tid}/cowork",
+            method="PUT",
+            body=json.dumps({"draft_edited": "Changed after execution"}),
+        )
+        self.assertEqual(edit.code, 409)
+
+    def test_rejects_unconfirmed_destination(self):
+        tid = self.make_task()
+        self._ready_action(tid, destination_confirmed_at=None)
+        self.assertEqual(self._execute(tid).code, 409)
+        self.assertEqual(self.started, [])
+
+    def test_rejects_empty_draft_and_missing_conversation(self):
+        tid = self.make_task()
+        self._ready_action(tid, draft="")
+        self.assertEqual(self._execute(tid).code, 409)
+
+        tid2 = self.make_task()
+        self._ready_action(tid2, conversation_id=None)
+        self.assertEqual(self._execute(tid2).code, 409)
+
+    def test_double_submit_creates_only_one_execution(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        self.assertEqual(self._execute(tid).code, 409)
+
+    def test_running_execution_blocks_a_new_preview(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+
+        response = self.fetch(
+            f"/api/tasks/{tid}/cowork",
+            method="POST",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.code, 409)
+
+    def test_requires_api_transport(self):
+        from src.handlers import cowork as cowork_handler
+
+        tid = self.make_task()
+        self._ready_action(tid)
+        cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = lambda: False
+        self.assertEqual(self._execute(tid).code, 409)
+
+    def test_positive_write_evidence_finalises_as_executed(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        payload = {
+            "terminal_status": "ok",
+            "conversation_id": "tenant:user:conversation",
+            "text": "The Teams message was sent.",
+            "tool_trace": [
+                {
+                    "tool_name": "mcp__m365_teams__PostMessage",
+                    "ok": True,
+                    "duration_seconds": 1.2,
+                }
+            ],
+            "sse_events": [
+                {
+                    "event": "ts",
+                    "tid": "send-1",
+                    "tn": "mcp__m365_teams__PostMessage",
+                    "inp": json.dumps({
+                        "recipient": "sarah@microsoft.com",
+                        "message": "Hi Sarah - the deck is attached.",
+                    }),
+                },
+                {
+                    "event": "tx",
+                    "tid": "send-1",
+                    "tn": "mcp__m365_teams__PostMessage",
+                    "ok": True,
+                },
+            ],
+            "callback_exchanges": [],
+        }
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 0,
+                "stdout": json.dumps(payload),
+                "stderr": "",
+                "error": None,
+                "auth_failed": False,
+                "cost_credits": 2.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "executed")
+        self.assertIsNotNone(data["action"]["delivery_confirmed_at"])
+        self.assertIsNone(data["action"]["error"])
+
+    def test_missing_write_evidence_is_delivery_unconfirmed(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "terminal_status": "ok",
+                        "conversation_id": "tenant:user:conversation",
+                        "text": "Done.",
+                        "tool_trace": [],
+                        "sse_events": [],
+                        "callback_exchanges": [],
+                    }
+                ),
+                "stderr": "",
+                "error": None,
+                "auth_failed": False,
+                "cost_credits": 1.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "execute_unconfirmed")
+        self.assertIn("check the destination", data["action"]["error"].lower())
+
+
 # ------------------------------------------------------------------- PUT
 
 
@@ -841,35 +1253,10 @@ class TestEditDraft(CoworkAPITestBase):
         self.assertNotEqual(data["action"]["island_url"], "https://evil.example")
 
 
-# ------------------------------------------------------- Phase 1 safety
+# ------------------------------------------------------- preview safety
 
 
-class TestNoExecutePath(CoworkAPITestBase):
-    def test_no_execute_route(self):
-        tid = self.make_task()
-        resp = self.fetch(
-            f"/api/tasks/{tid}/cowork/execute",
-            method="POST",
-            body="{}",
-            headers={"Content-Type": "application/json"},
-        )
-        self.assertEqual(resp.code, 404)
-
-    def test_execute_states_rejected_by_schema(self):
-        import src.db as db_module
-
-        conn = db_module.get_connection()
-        try:
-            tid = self.make_task()
-            with self.assertRaises(Exception):
-                conn.execute(
-                    "INSERT INTO task_actions (task_id, state) VALUES (?, 'executed')",
-                    (tid,),
-                )
-                conn.commit()
-        finally:
-            conn.close()
-
+class TestPreviewBarrier(CoworkAPITestBase):
     def test_denylist_passed_on_every_run(self):
         tid = self.make_task()
         self.start(tid)
@@ -1224,6 +1611,20 @@ class TestRefineTurn(CoworkAPITestBase):
         self.start(tid, proc)
         self.assertEqual(self._refine(tid).code, 409)
 
+    def test_a_running_execution_is_409(self):
+        from src.db import get_connection
+
+        tid = self._ready()
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='executing' WHERE task_id=?",
+            (tid,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self._refine(tid).code, 409)
+
     def test_no_execute_route_was_introduced(self):
         """`delete` is a Tornado base method, so only our own names are checked."""
         from src.handlers.cowork import CoworkRefineHandler
@@ -1249,7 +1650,7 @@ class TestInteractionAnswer(CoworkAPITestBase):
         )
         self.addCleanup(lambda: setattr(handler_mod, "ANSWER_FN", self._answer))
 
-    def _blocked(self):
+    def _blocked(self, state="previewing"):
         from src.db import get_connection
         from src.models import create_task_action
 
@@ -1261,14 +1662,14 @@ class TestInteractionAnswer(CoworkAPITestBase):
         )
         conn = get_connection()
         conn.execute(
-            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            "UPDATE task_actions SET blocked_question=?, state=? WHERE id=?",
             (json.dumps({
                 "invocation_id": "invoke-1",
                 "questions": [{
                     "id": "0", "producer_id": "account", "header": "",
                     "question": "Use account A or B?", "options": [],
                 }],
-            }), action["id"]),
+            }), state, action["id"]),
         )
         conn.commit()
         conn.close()
@@ -1296,6 +1697,18 @@ class TestInteractionAnswer(CoworkAPITestBase):
         body = json.loads(response.body)
         self.assertFalse(body["action"]["waiting_on_user"])
         self.assertEqual(body["action"]["blocked_question"], "")
+
+    def test_it_answers_an_execution_interaction(self):
+        tid = self._blocked(state="executing")
+
+        response = self._answer_request(tid)
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.answers,
+            [("t:u:blocked", "invoke-1", {"0": "Use A"})],
+        )
+        self.assertEqual(json.loads(response.body)["action"]["state"], "executing")
 
     def test_empty_answer_is_rejected(self):
         tid = self._blocked()

@@ -3034,6 +3034,8 @@ var _cwDraftBuf = {};
 var _cwInstrBuf = {};
 var _cwAnswerBuf = {};
 var _cwAnswerSending = {};
+var _cwExecuteSending = {};
+var _cwExecuteApprovals = {};
 
 function cwBufferDraft(taskId, value) { _cwDraftBuf[taskId] = value; }
 function cwBufferInstr(taskId, value) { _cwInstrBuf[taskId] = value; }
@@ -3084,7 +3086,7 @@ function cwFinishedAgo(value) {
 }
 
 function cwHeadStatus(a) {
-    if (!a || a.state !== 'ready') return '';
+    if (!a || ['ready', 'executed', 'execute_unconfirmed'].indexOf(a.state) < 0) return '';
     var items = [];
     var c = Number(a.cost_credits);
     if (a.cost_credits !== null && a.cost_credits !== undefined
@@ -3096,8 +3098,11 @@ function cwHeadStatus(a) {
             + escapeHtml(creditText) + '</span>');
     }
     var ago = cwFinishedAgo(a.completed_at || a.updated_at);
+    var statusText = a.state === 'executed' ? 'Delivery confirmed'
+        : a.state === 'execute_unconfirmed' ? 'Delivery needs checking'
+        : 'Cowork finished';
     items.push('<span class="cw-head-note" data-testid="cowork-finished">'
-        + 'Cowork finished' + (ago ? ' ' + escapeHtml(ago) : '') + '</span>');
+        + statusText + (ago ? ' ' + escapeHtml(ago) : '') + '</span>');
     if (a.conversation_id) {
         items.push('<a class="cw-head-link" data-testid="open-in-cowork-link" href="'
             + escapeHtml('https://m365.cloud.microsoft/agents/cowork#/task/'
@@ -3162,9 +3167,37 @@ function cwToolTrace(action) {
 
 function cwToolLabel(item) {
     var raw = String((item && (item.name || item.tool_name || item.tool)) || 'Tool call');
+    if (raw.toLowerCase() === 'bash') {
+        var input = String((item && item.input) || '').toLowerCase();
+        if (/calendar|date|time|timezone|meeting/.test(input)) {
+            return 'Checking date and time details';
+        }
+        if (/python|node|jq|powershell|script/.test(input)) {
+            return 'Processing retrieved context';
+        }
+        if (/curl|https?:|request/.test(input)) return 'Checking a connected service';
+        if (/file|dir|ls |find |path/.test(input)) return 'Reviewing local files';
+        return 'Running a local helper';
+    }
     var name = raw.split('-').pop().replace(/([a-z])([A-Z])/g, '$1 $2')
         .replace(/_/g, ' ').trim();
     return name || 'Tool call';
+}
+
+function cwToolIcon(item) {
+    var raw = String((item && (item.name || item.tool_name || item.tool)) || '').toLowerCase();
+    var type = 'generic';
+    var glyph = '\u2726';
+    if (raw === 'bash') { type = 'terminal'; glyph = '>_'; }
+    else if (raw.indexOf('teams') >= 0) { type = 'teams'; glyph = 'T'; }
+    else if (raw.indexOf('calendar') >= 0 || raw.indexOf('meeting') >= 0) {
+        type = 'calendar'; glyph = '17';
+    } else if (raw.indexOf('search') >= 0) { type = 'search'; glyph = '\u2315'; }
+    else if (raw.indexOf('outlook') >= 0 || raw.indexOf('email') >= 0) {
+        type = 'mail'; glyph = '@';
+    }
+    return '<span class="cw-tool-icon is-' + type + '" data-testid="tool-icon" '
+        + 'aria-hidden="true">' + glyph + '</span>';
 }
 
 function cwTimeline(action, liveText) {
@@ -3176,17 +3209,136 @@ function cwTimeline(action, liveText) {
         var state = item.ok === false ? ' failed' : ' completed';
         return '<div class="cw-timeline-event' + state + '">'
             + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
+            + cwToolIcon(item)
             + '<div><small>' + escapeHtml(time) + '</small>'
             + '<span>' + escapeHtml(cwToolLabel(item)) + '</span></div></div>';
     });
     if (liveText) {
         events.push('<div class="cw-timeline-event is-active">'
             + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
+            + '<span class="cw-tool-icon is-generic" aria-hidden="true">\u2726</span>'
             + '<div><small>now</small><span aria-live="polite">'
             + escapeHtml(liveText) + '</span></div></div>');
     }
     return '<div class="cw-timeline" data-testid="session-timeline">'
         + events.join('') + '</div>';
+}
+
+function cwExecutionLabel(task, action) {
+        if (task.action_type === 'schedule-meeting') return 'Create meeting';
+        if (task.action_type === 'respond-email'
+                || (action && action.delivery_channel === 'email')) return 'Send email';
+        return 'Send Teams message';
+}
+
+function cwOpenExecuteConfirm(taskId) {
+        var action = _cwActions[taskId];
+        var task = tasks.find(function(item) { return item.id === taskId; });
+        if (!action || !task || action.state !== 'ready') return;
+        if (!action.destination_confirmed_at) {
+            cwOpenDestPicker(taskId);
+            return;
+        }
+        var old = document.getElementById('execute-modal');
+        if (old) old.remove();
+        var label = cwExecutionLabel(task, action);
+        _cwExecuteApprovals[taskId] = {
+            parent_action_id: action.id,
+            draft: cwCurrentDraft(action).trim(),
+            destination_ref: action.destination_ref || '',
+            destination_display: action.destination_display || '',
+            delivery_channel: action.delivery_channel || '',
+            destination_confirmed_at: action.destination_confirmed_at || ''
+        };
+        var overlay = document.createElement('div');
+        overlay.id = 'execute-modal';
+        overlay.className = 'source-modal-overlay cw-execute-overlay';
+        overlay.innerHTML = '<div class="source-modal cw-execute-modal" role="dialog" '
+            + 'aria-modal="true" aria-labelledby="execute-modal-title" '
+            + 'data-testid="execute-confirmation">'
+            + '<div class="cw-execute-kicker">Approved action</div>'
+            + '<div class="source-modal-header" id="execute-modal-title">'
+            + escapeHtml(label) + '?</div>'
+            + '<div class="cw-execute-destination"><span>Destination</span><b>'
+            + escapeHtml(action.destination_display || action.destination_ref || '')
+            + '</b><small>' + escapeHtml(action.destination_ref || '') + '</small></div>'
+            + '<label class="source-modal-label">Final draft</label>'
+            + '<div class="cw-execute-draft">' + renderCoworkMarkdown(cwCurrentDraft(action)) + '</div>'
+            + '<div class="cw-execute-warning">This performs the action through Cowork. '
+            + 'The destination and draft cannot be changed after confirmation.</div>'
+            + '<div class="cw-execute-error" id="execute-modal-error" role="alert"></div>'
+            + '<div class="source-modal-buttons">'
+            + '<button class="btn-source-modal btn-source-cancel" '
+            + 'onclick="cwCloseExecuteConfirm()">Cancel</button>'
+            + '<button class="cw-btn cw-btn-go cw-execute-confirm" '
+            + 'data-testid="execute-confirm-btn" onclick="cwConfirmExecute(' + taskId + ')">'
+            + escapeHtml(label) + '</button></div></div>';
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', function(event) {
+            if (event.target === overlay) cwCloseExecuteConfirm();
+        });
+}
+
+function cwCloseExecuteConfirm() {
+        if (Object.keys(_cwExecuteSending).some(function(key) {
+            return _cwExecuteSending[key];
+        })) return;
+        var modal = document.getElementById('execute-modal');
+        if (modal) modal.remove();
+        Object.keys(_cwExecuteApprovals).forEach(function(key) {
+            if (!_cwExecuteSending[key]) delete _cwExecuteApprovals[key];
+        });
+}
+
+function cwConfirmExecute(taskId) {
+        if (_cwExecuteSending[taskId]) return;
+        _cwExecuteSending[taskId] = true;
+        var button = document.querySelector('[data-testid="execute-confirm-btn"]');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Starting\u2026';
+        }
+        fetch('/api/tasks/' + taskId + '/cowork/execute', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Riveter-Action': 'confirm'
+            },
+            body: JSON.stringify({
+                approved_snapshot: _cwExecuteApprovals[taskId]
+            })
+        })
+        .then(function(r) {
+            return r.json().then(function(data) { return { ok: r.ok, data: data }; });
+        })
+        .then(function(result) {
+            delete _cwExecuteSending[taskId];
+            if (!result.ok) {
+                var error = document.getElementById('execute-modal-error');
+                if (error) error.textContent = result.data.error || 'Could not start the action.';
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = cwExecutionLabel(
+                        tasks.find(function(item) { return item.id === taskId; }),
+                        _cwActions[taskId]
+                    );
+                }
+                return;
+            }
+            var modal = document.getElementById('execute-modal');
+            if (modal) modal.remove();
+            delete _cwExecuteApprovals[taskId];
+            _cwActions[taskId] = result.data.action;
+            _cwStartedAt[taskId] = Date.now();
+            cwRerender(taskId);
+            startCoworkPoller(taskId);
+        })
+        .catch(function() {
+            delete _cwExecuteSending[taskId];
+            var error = document.getElementById('execute-modal-error');
+            if (error) error.textContent = 'The request failed before Riveter could confirm delivery.';
+            if (button) button.disabled = false;
+        });
 }
 
 function cwNoInteractionComplete(action) {
@@ -3631,8 +3783,11 @@ function renderCoworkCard(task) {
             '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '', a);
     }
 
-    if (a && a.state === 'previewing') {
-        if (!_cwPollers[task.id]) startCoworkPoller(task.id);
+    if (a && ['previewing', 'executing', 'executed', 'execute_unconfirmed'].indexOf(a.state) >= 0) {
+        if (['previewing', 'executing'].indexOf(a.state) >= 0
+                && !_cwPollers[task.id]) {
+            startCoworkPoller(task.id);
+        }
         var prog = (a.progress && a.progress.length)
             ? a.progress[a.progress.length - 1]
             : 'Cowork is reading M365';
@@ -3640,7 +3795,7 @@ function renderCoworkCard(task) {
         // it is answered nothing else happens. A spinner here reads as "still
         // working", which told Phil to keep waiting through 13 minutes of a run
         // that was blocked on him the whole time.
-        if (a.waiting_on_user) {
+        if (a.waiting_on_user && a.state === 'previewing') {
             var interaction = a.interaction_request;
             var question = interaction
                 ? cwInteractionFields(task.id, interaction)
@@ -3668,6 +3823,70 @@ function renderCoworkCard(task) {
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
                 + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>',
+                a);
+        }
+
+        if (a && a.state === 'executing') {
+            if (!_cwPollers[task.id]) startCoworkPoller(task.id);
+            var sendProgress = (a.progress && a.progress.length)
+                ? a.progress[a.progress.length - 1]
+                : 'Cowork is performing the approved action';
+            if (a.waiting_on_user) {
+                var executeInteraction = a.interaction_request;
+                return cwShell('is-running is-executing', 'needs approval', task,
+                    '<div class="cw-delivery-target"><span>Acting in</span><b>'
+                    + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'
+                    + '<div class="cw-blocked" data-testid="cw-blocked" data-cw-invocation="'
+                    + escapeAttr(executeInteraction ? executeInteraction.invocation_id : '') + '">'
+                    + '<b>Cowork needs your approval to finish this action.</b>'
+                    + (executeInteraction
+                        ? cwInteractionFields(task.id, executeInteraction)
+                        : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>')
+                    + '</div>',
+                    (executeInteraction
+                        ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
+                          + 'onclick="cwSendAnswer(' + task.id + ')">Answer and continue</button>'
+                        : '')
+                    + '<span class="cw-foot-note">the action is paused until you answer</span>',
+                    a);
+            }
+            return cwShell('is-running is-executing', 'sending', task,
+                '<div class="cw-delivery-target"><span>Acting in</span><b>'
+                + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'
+                + cwTimeline(a, sendProgress)
+                + '<div class="cw-progress"><span class="cw-spinner"></span>'
+                + '<span class="cw-progress-text"><span id="cw-live-' + task.id + '">'
+                + escapeHtml(sendProgress) + '</span><span class="cw-progress-sub" id="cw-hb-'
+                + task.id + '">' + escapeHtml(cwElapsed(task.id, a)) + '</span></span></div>',
+                '<span class="cw-foot-note">approved action in progress</span>',
+                a);
+        }
+
+        if (a && a.state === 'executed') {
+            return cwShell('is-delivered', 'delivered', task,
+                '<section class="cw-delivery-result is-confirmed" data-testid="delivery-confirmed">'
+                + '<span class="cw-delivery-mark" aria-hidden="true">\u2713</span><div>'
+                + '<b>Delivered to ' + escapeHtml(a.destination_display || a.destination_ref || 'the destination')
+                + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
+                + cwTimeline(a, '')
+                + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
+                cwOpenLink(a, 'Open in Cowork')
+                + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>',
+                a);
+        }
+
+        if (a && a.state === 'execute_unconfirmed') {
+            return cwShell('is-unconfirmed', 'check delivery', task,
+                '<section class="cw-delivery-result is-unconfirmed" data-testid="delivery-unconfirmed">'
+                + '<span class="cw-delivery-mark" aria-hidden="true">!</span><div>'
+                + '<b>Delivery could not be confirmed</b>'
+                + '<span>Check the destination before retrying. ' + escapeHtml(a.error || '') + '</span>'
+                + '</div></section>'
+                + cwTimeline(a, '')
+                + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
+                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
+                + cwOpenLink(a, 'Open in Cowork')
+                + '<button class="cw-btn cw-btn-ghost" onclick="cwDiscard(' + task.id + ')">Hide</button>',
                 a);
         }
         return cwShell('is-running', 'read-only', task,
@@ -3744,7 +3963,10 @@ function renderCoworkCard(task) {
             : editing
             ? '<button class="cw-btn cw-btn-go" onclick="cwSaveDraft(' + task.id + ')">Save edit</button>'
               + '<button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(' + task.id + ',false)">Cancel</button>'
-            : '<button class="cw-btn cw-btn-go" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
+            : '<button class="cw-btn cw-btn-go" data-testid="cw-execute-action" '
+              + 'onclick="cwOpenExecuteConfirm(' + task.id + ')">'
+              + escapeHtml(cwExecutionLabel(task, a)) + '</button>'
+              + '<button class="cw-btn cw-btn-sec" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwToggleEdit(' + task.id + ',true)">Edit</button>'
               + cwRefineBlock(a, task.id)
               + (a.conversation_id ? '' : cwRedoBlock(task.id))
@@ -3772,8 +3994,7 @@ function renderCoworkCard(task) {
         cwModeSwitch(task.id, a, false)
         + cwIntentBlock(task, true)
         + '<div class="cw-idle">Cowork can check the latest state of this in M365, then draft the action.'
-        + '<span class="cw-idle-sub">Nothing is sent from here. Open the draft in '
-        + 'Cowork if you want to act on it.</span></div>',
+        + '<span class="cw-idle-sub">Nothing happens without your explicit review and confirmation.</span></div>',
         '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with Cowork</button>'
         + '<span class="cw-foot-note">~45s &middot; read-only</span>',
         a);
@@ -4165,7 +4386,7 @@ function pollCoworkStatus(taskId) {
                     || previousQuestion !== action.blocked_question) {
                 cwRerender(taskId);
             }
-            if (action.state !== 'previewing') {
+            if (['previewing', 'executing'].indexOf(action.state) < 0) {
                 stopCoworkPoller(taskId);
                 cwRerender(taskId);
             }

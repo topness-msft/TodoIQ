@@ -1,4 +1,4 @@
-"""E2E gate on the honesty of the card's no-send claim.
+"""E2E gate on the honesty of the card's approval claim.
 
 F34 established that `--tool-callback-config` is a per-message barrier carried by
 the connected client, so it does NOT follow a conversation into the Cowork web
@@ -9,8 +9,8 @@ The old copy read "Preview only - nothing is sent. You copy and send it
 yourself." The first half is true of TodoIQ. The second half asserts how the
 user will act, and after handoff it is simply wrong.
 
-These tests pin the distinction: the claim must be scoped to this app, and must
-not promise anything about what happens after handoff.
+These tests pin the current distinction: research/drafting is read-only, while a
+separate direct action requires exact review and confirmation.
 """
 
 import json
@@ -49,12 +49,13 @@ class TestNoSendClaimIsScopedToTodoIQ:
         finally:
             _delete(page, base_url, task_id)
 
-    def test_still_states_this_app_does_not_send(self, page: Page, base_url):
-        """The true, load-bearing half of the claim must survive."""
+    def test_states_that_actions_require_review_and_confirmation(
+        self, page: Page, base_url
+    ):
         task_id = _seed(page, base_url)
         try:
             text = _card_text(page, base_url, task_id).lower()
-            assert "nothing is sent from here" in text
+            assert "nothing happens without your explicit review and confirmation" in text
         finally:
             _delete(page, base_url, task_id)
 
@@ -63,18 +64,18 @@ class TestNoSendClaimIsScopedToTodoIQ:
         task_id = _seed(page, base_url)
         try:
             text = _card_text(page, base_url, task_id).lower()
-            bare = text.replace("nothing is sent from here", "")
-            assert "nothing is sent" not in bare
+            assert "nothing is sent" not in text
         finally:
             _delete(page, base_url, task_id)
 
-    def test_still_has_no_send_or_execute_control(self, page: Page, base_url):
-        """Rewording copy must not smuggle in an execute affordance."""
+    def test_unprepared_card_has_no_direct_action_control(
+        self, page: Page, base_url
+    ):
         task_id = _seed(page, base_url)
         try:
-            text = _card_text(page, base_url, task_id)
-            for banned in ("Send now", "Execute", "Deliver", "Approve & send"):
-                assert banned not in text, banned
+            _card_text(page, base_url, task_id)
+            expect(page.get_by_role("button", name="Send Teams message")).to_have_count(0)
+            expect(page.get_by_role("button", name="Send email")).to_have_count(0)
+            expect(page.get_by_role("button", name="Create meeting")).to_have_count(0)
         finally:
             _delete(page, base_url, task_id)
-

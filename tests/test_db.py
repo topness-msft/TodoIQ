@@ -125,12 +125,80 @@ class TestDatabaseSchema(unittest.TestCase):
         self.assertEqual(tables, expected)
 
 
-class TestTaskActionsSchema(unittest.TestCase):
-    """task_actions stores one Cowork preview attempt per row.
+class TestLegacyTaskActionMigration(unittest.TestCase):
+    def test_init_db_migrates_schema_without_parent_action_id(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                parse_status TEXT NOT NULL DEFAULT 'parsed',
+                raw_input TEXT,
+                priority INTEGER NOT NULL DEFAULT 3,
+                due_date TEXT,
+                committed_date TEXT,
+                source_type TEXT DEFAULT 'manual',
+                source_id TEXT,
+                source_url TEXT,
+                source_snippet TEXT,
+                coaching_text TEXT,
+                key_people TEXT,
+                related_meeting TEXT,
+                user_notes TEXT DEFAULT '',
+                suggestion_refreshed_at TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE task_actions (
+                id INTEGER PRIMARY KEY,
+                task_id INTEGER NOT NULL,
+                action_type TEXT DEFAULT 'general',
+                state TEXT NOT NULL DEFAULT 'previewing'
+                    CHECK (state IN ('previewing','ready','failed')),
+                intent TEXT,
+                notes_snapshot TEXT,
+                redirect_text TEXT,
+                composed_prompt TEXT,
+                finding TEXT,
+                draft TEXT,
+                draft_edited TEXT,
+                destination_kind TEXT,
+                destination_ref TEXT,
+                conversation_id TEXT,
+                terminal_status TEXT,
+                tool_trace TEXT,
+                error TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
 
-    The state CHECK constraint is the Phase 2 gate expressed as schema rather than
-    UI discipline: no execute state may be reachable while Phase 1 ships.
-    """
+        init_db(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_actions)")
+        }
+        self.assertIn("parent_action_id", columns)
+        self.assertIn("delivery_confirmed_at", columns)
+        self.assertIsNotNone(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_task_actions_execution_parent'"
+            ).fetchone()
+        )
+        conn.close()
+
+
+class TestTaskActionsSchema(unittest.TestCase):
+    """task_actions stores preview and explicitly approved execution turns."""
 
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
@@ -171,6 +239,8 @@ class TestTaskActionsSchema(unittest.TestCase):
             "interaction_mode",
             "completed_at",
             "had_interaction",
+            "execution_requested_at",
+            "delivery_confirmed_at",
             # A refine turn continues an existing Cowork conversation. It is
             # still its own row so the correction chain stays auditable, and
             # this points back at the attempt it refines.
@@ -194,15 +264,16 @@ class TestTaskActionsSchema(unittest.TestCase):
         column = next(r for r in rows if r["name"] == "blocked_question")
         self.assertEqual(column["notnull"], 0)
 
-    def test_phase1_states_are_accepted(self):
-        for state in ("previewing", "ready", "failed"):
+    def test_action_states_are_accepted(self):
+        for state in (
+            "previewing", "ready", "failed",
+            "executing", "executed", "execute_unconfirmed",
+        ):
             with self.subTest(state=state):
                 self._insert(state=state)
 
-    def test_execute_states_are_rejected(self):
-        # Phase 1 ships preview only. If any of these become insertable, a code path
-        # can claim to have executed against M365 -- the gate must be in the DB.
-        for state in ("executing", "executed", "approved", "running"):
+    def test_unknown_states_are_rejected(self):
+        for state in ("approved", "running", "sent"):
             with self.subTest(state=state):
                 with self.assertRaises(sqlite3.IntegrityError):
                     self._insert(state=state)
@@ -286,6 +357,88 @@ class TestTaskActionsSchema(unittest.TestCase):
             db_module.DB_PATH = original
         row = self.conn.execute("SELECT state FROM task_actions").fetchone()
         self.assertEqual(row["state"], "failed")
+
+    def test_restart_recovery_marks_execution_delivery_unconfirmed(self):
+        import src.db as db_module
+        from src.models import recover_stuck_previews
+
+        self._insert(state="executing")
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertEqual(recover_stuck_previews(), 1)
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute(
+            "SELECT state, error FROM task_actions"
+        ).fetchone()
+        self.assertEqual(row["state"], "execute_unconfirmed")
+        self.assertIn("check the destination", row["error"].lower())
+
+    def test_one_execution_child_per_ready_preview(self):
+        import src.db as db_module
+        from src.models import create_execution_action
+
+        parent = self._insert(
+            state="ready",
+            draft="Approved draft",
+            destination_ref="sarah@microsoft.com",
+            destination_display="Sarah Goodwin",
+            destination_confirmed_at="2026-08-11T12:00:00Z",
+            delivery_channel="teams",
+            conversation_id="tenant:user:conversation",
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        snapshot = {
+            "parent_action_id": parent.lastrowid,
+            "draft": "Approved draft",
+            "destination_ref": "sarah@microsoft.com",
+            "destination_display": "Sarah Goodwin",
+            "delivery_channel": "teams",
+            "destination_confirmed_at": "2026-08-11T12:00:00Z",
+        }
+        try:
+            first = create_execution_action(parent.lastrowid, snapshot)
+            second = create_execution_action(parent.lastrowid, snapshot)
+        finally:
+            db_module.DB_PATH = original
+        self.assertEqual(first["state"], "executing")
+        self.assertEqual(first["parent_action_id"], parent.lastrowid)
+        self.assertIsNone(second)
+
+    def test_execution_rejects_a_parent_that_is_no_longer_latest(self):
+        import src.db as db_module
+        from src.models import create_execution_action
+
+        parent = self._insert(
+            state="ready",
+            draft="Approved draft",
+            destination_ref="sarah@microsoft.com",
+            destination_display="Sarah Goodwin",
+            destination_confirmed_at="2026-08-11T12:00:00Z",
+            delivery_channel="teams",
+            conversation_id="tenant:user:conversation",
+        )
+        self._insert(state="previewing")
+        self.conn.commit()
+        snapshot = {
+            "parent_action_id": parent.lastrowid,
+            "draft": "Approved draft",
+            "destination_ref": "sarah@microsoft.com",
+            "destination_display": "Sarah Goodwin",
+            "delivery_channel": "teams",
+            "destination_confirmed_at": "2026-08-11T12:00:00Z",
+        }
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            execution = create_execution_action(parent.lastrowid, snapshot)
+        finally:
+            db_module.DB_PATH = original
+        self.assertIsNone(execution)
 
     def test_late_question_recovery_cannot_overwrite_answered_sentinel(self):
         import src.db as db_module

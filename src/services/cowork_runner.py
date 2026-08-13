@@ -684,6 +684,39 @@ def compose_refine_prompt(
     return "\n\n".join(parts)
 
 
+def compose_execution_prompt(action: dict) -> str:
+    """Bind an approved draft and destination into one narrow action request."""
+    draft = (action.get("draft_edited") or action.get("draft") or "").strip()
+    destination = (action.get("destination_display") or "").strip()
+    destination_ref = (action.get("destination_ref") or "").strip()
+    action_type = action.get("action_type") or "general"
+    if action_type == "schedule-meeting":
+        verb = "Create the meeting"
+        content_rule = (
+            " Use the exact final draft as the event body so Riveter can verify "
+            "the approved meeting content."
+        )
+    elif action_type == "respond-email" or action.get("delivery_channel") == "email":
+        verb = "Send the email"
+        content_rule = (
+            " Treat the first `Subject:` line as the exact subject and all "
+            "remaining text as the exact body. Do not add attachments."
+        )
+    else:
+        verb = "Send the Teams message"
+        content_rule = ""
+    return (
+        "[APPROVED ACTION]\n"
+        f"{verb} now to {destination} ({destination_ref}).\n\n"
+        "[FINAL DRAFT]\n"
+        f"{draft}\n\n"
+        "Perform exactly this approved action. Do not rewrite the draft, change "
+        "the destination, add recipients, or take any other write action. If the "
+        "service asks for approval or missing required details, ask the user."
+        f"{content_rule}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
@@ -874,6 +907,7 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
             "tool_name": t.get("tool_name"),
             "ok": t.get("ok"),
             "duration_seconds": t.get("duration_seconds"),
+            "input": t.get("input") or t.get("inp"),
         }
         for t in trace
         if isinstance(t, dict)
@@ -923,6 +957,41 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
     return result
 
 
+def parse_execution_output(stdout: str, stderr: str = "") -> dict:
+    """Parse an unbarriered turn and require positive write-tool evidence."""
+    result = parse_cowork_output(stdout, stderr)
+    barrier = result.get("barrier") or {}
+    if (
+        barrier.get("status") == "BREACHED"
+        and result.get("error") == barrier.get("reason")
+    ):
+        result["error"] = None
+
+    tools = result.get("tools") or []
+    successful_writes = [
+        tool.get("name")
+        for tool in tools
+        if tool.get("ok") is True
+        and _looks_like_write(tool.get("name"))
+    ]
+    if not tools:
+        successful_writes = [
+            tool.get("tool_name")
+            for tool in result.get("tool_trace") or []
+            if tool.get("ok") is True
+            and _looks_like_write(tool.get("tool_name"))
+        ]
+    result["executed_write_tools"] = [
+        name for name in successful_writes if name
+    ]
+    result["delivery_confirmed"] = bool(
+        result.get("terminal_status") == "ok"
+        and result["executed_write_tools"]
+        and not result.get("error")
+    )
+    return result
+
+
 # ===========================================================================
 # Preview subprocess runner
 # ===========================================================================
@@ -939,8 +1008,8 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
 # This is DEFENCE IN DEPTH, not a sandbox. G1c enumerates the write tools, and
 # among them `graph-CallGraph` ("Direct Graph POST/PUT/PATCH") is a universal
 # bypass, while `host-SetupScheduledPrompt` runs work after this process exits.
-# A denylist over an open set can never be proven complete. The only hard
-# guarantee in Phase 1 is structural: there is no execute endpoint at all.
+# A denylist over an open set can never be proven complete. Preview turns keep
+# the barrier; approved execution turns use their own entry point and omit it.
 #
 # G1f proved callback interception does not apply to the built-in `bash` tool,
 # even when both `bash` and its displayed `Bash` label are listed. G1h then
@@ -1117,6 +1186,11 @@ def preview_label(task_id) -> str:
     return f"cowork:preview:{task_id}"
 
 
+def execution_label(task_id) -> str:
+    """A separate registry slot prevents preview state from masking a send."""
+    return f"cowork:execute:{task_id}"
+
+
 # Transcribed from the Aether server source on 2026-08-10:
 #   aether_runtime/src/orchestrator/domain/eval/auth.py
 #
@@ -1262,10 +1336,23 @@ def _canonical_tools(sse_events):
             continue
         if ev.get("event") == "ts":
             if tid not in starts:
-                starts[tid] = {"name": name, "ok": None, "duration_ms": None}
+                starts[tid] = {
+                    "name": name,
+                    "ok": None,
+                    "duration_ms": None,
+                    "input": ev.get("inp"),
+                }
                 order.append(tid)
         elif ev.get("event") == "tx":
-            entry = starts.setdefault(tid, {"name": name, "ok": None, "duration_ms": None})
+            entry = starts.setdefault(
+                tid,
+                {
+                    "name": name,
+                    "ok": None,
+                    "duration_ms": None,
+                    "input": ev.get("inp"),
+                },
+            )
             if tid not in order:
                 order.append(tid)
             entry["ok"] = ev.get("ok")
@@ -1784,6 +1871,56 @@ def continue_preview(
     with _runs_lock:
         _runs[label]["thread"] = thread
     thread.start()
+    return label
+
+
+def start_execution(
+    task_id,
+    prompt,
+    conversation_id,
+    *,
+    log_dir=None,
+) -> str:
+    """Run one explicitly approved, unbarriered API follow-up turn."""
+    if not api_transport_enabled():
+        raise RuntimeError("Direct actions require the Cowork API transport.")
+    if not conversation_id:
+        raise ValueError("A conversation id is required to execute an action.")
+
+    label = execution_label(task_id)
+    with _runs_lock:
+        entry = _runs.get(label)
+        if entry is not None and entry["result"] is None:
+            raise AlreadyRunning(label)
+        _runs[label] = {
+            "proc": None,
+            "thread": None,
+            "result": None,
+            "progress": deque(maxlen=_PROGRESS_MAX),
+        }
+
+    try:
+        write_prompt_file(f"{task_id}_execute", prompt, log_dir=log_dir)
+        thread = threading.Thread(
+            target=_collect_api,
+            args=(
+                label,
+                task_id,
+                prompt,
+                None,
+                Path(log_dir) if log_dir else LOG_DIR,
+            ),
+            kwargs={"conversation_id": conversation_id, "is_follow_up": True},
+            daemon=True,
+            name=f"cowork-execute-{task_id}",
+        )
+        with _runs_lock:
+            _runs[label]["thread"] = thread
+        thread.start()
+    except Exception:
+        with _runs_lock:
+            _runs.pop(label, None)
+        raise
     return label
 
 
@@ -2411,8 +2548,12 @@ def _api_payload_from_events(events, conversation_id):
             name = data.get("tn")
             if tid and name:
                 if tid not in starts:
-                    starts[tid] = {"tool_name": name, "ok": None,
-                                   "duration_seconds": None}
+                    starts[tid] = {
+                        "tool_name": name,
+                        "ok": None,
+                        "duration_seconds": None,
+                        "input": data.get("inp"),
+                    }
                     order.append(tid)
                 if kind == "tx":
                     starts[tid]["ok"] = data.get("ok")
@@ -2638,7 +2779,11 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
     stdout = ""
     auth_failed = False
     try:
-        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        config = (
+            json.loads(Path(config_path).read_text(encoding="utf-8"))
+            if config_path is not None
+            else None
+        )
         runner = _api_run_fn or _api_run_default
         on_progress = lambda text: _append_progress(label, text)  # noqa: E731
         call = functools.partial(
@@ -2821,8 +2966,9 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
         "conversationId": conversation_id,
         "role": "user",
         "content": [{"type": "text", "text": prompt}],
-        "toolCallbackConfig": config,
     }
+    if config is not None:
+        body["toolCallbackConfig"] = config
     sse_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",

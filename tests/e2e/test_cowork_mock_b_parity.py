@@ -24,7 +24,7 @@ def _render(page: Page, base_url, action):
     page.evaluate(
         """({taskId, action}) => {
             const task = tasks.find(t => t.id === taskId);
-            task.action_type = 'follow-up';
+            task.action_type = (action && action.action_type) || 'follow-up';
             task.coaching_text = 'Check the current position and draft the follow-up.';
             selectedTaskId = taskId;
             _cwActions[taskId] = action;
@@ -86,6 +86,12 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
                         "ok": True,
                         "duration_seconds": 8,
                     },
+                    {
+                        "name": "Bash",
+                        "ok": True,
+                        "duration_seconds": 1,
+                        "input": "{\"command\":\"python check_calendar_dates.py\"}",
+                    },
                 ]
             ),
         },
@@ -97,6 +103,11 @@ def test_running_card_uses_real_trace_and_locks_mode(page: Page, base_url):
     expect(page.get_by_test_id("session-timeline")).to_contain_text(
         "Drafting the response"
     )
+    expect(page.get_by_test_id("session-timeline")).to_contain_text(
+        "Checking date and time details"
+    )
+    expect(page.get_by_test_id("session-timeline")).not_to_contain_text("Bash")
+    expect(page.get_by_test_id("tool-icon")).to_have_count(3)
 
 
 def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
@@ -133,6 +144,175 @@ def test_ready_no_interaction_matches_completion_state(page: Page, base_url):
     page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
     page.screenshot(
         path=os.path.join(TEMP_DIR, "cowork-mock-b-parity-dark.png"),
+        full_page=True,
+    )
+
+
+def test_ready_action_opens_exact_confirmation_and_submits_once(
+    page: Page, base_url
+):
+    task_id = _render(
+        page,
+        base_url,
+        {
+            "state": "ready",
+            "action_type": "follow-up",
+            "draft": "Hi Mehdi, the review is complete.",
+            "conversation_id": "t:u:cw-send",
+            "delivery_channel": "teams",
+            "destination_ref": "mehdi@microsoft.com",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "destination_confirmed_at": "2026-08-11T12:00:00Z",
+        },
+    )
+    sent = []
+    sent_headers = []
+
+    def execute_route(route):
+        sent.append(route.request.post_data)
+        sent_headers.append(route.request.headers)
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "action": {
+                        "task_id": task_id,
+                        "state": "executing",
+                        "destination_display": "Mehdi Slaoui Andaloussi",
+                    }
+                }
+            ),
+        )
+
+    page.route(f"**/api/tasks/{task_id}/cowork/execute", execute_route)
+    page.get_by_role("button", name="Send Teams message").click()
+    modal = page.get_by_test_id("execute-confirmation")
+    expect(modal).to_be_visible()
+    expect(modal).to_contain_text("Mehdi Slaoui Andaloussi")
+    expect(modal).to_contain_text("Hi Mehdi, the review is complete.")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-execute-confirmation-light.png"),
+        full_page=True,
+    )
+    page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-execute-confirmation-dark.png"),
+        full_page=True,
+    )
+    confirm = page.get_by_test_id("execute-confirm-btn")
+    confirm.dblclick()
+    expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+    assert len(sent) == 1
+    assert sent_headers[0]["x-riveter-action"] == "confirm"
+    snapshot = json.loads(sent[0])["approved_snapshot"]
+    assert snapshot["draft"] == "Hi Mehdi, the review is complete."
+    assert snapshot["destination_ref"] == "mehdi@microsoft.com"
+
+
+def test_action_labels_and_terminal_states(page: Page, base_url):
+    _render(
+        page,
+        base_url,
+        {
+            "state": "ready",
+            "action_type": "schedule-meeting",
+            "draft": "Create a 30-minute review next week.",
+            "conversation_id": "t:u:cw-meeting",
+            "destination_ref": "mehdi@microsoft.com",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "destination_confirmed_at": "2026-08-11T12:00:00Z",
+        },
+    )
+    expect(page.get_by_role("button", name="Create meeting")).to_be_visible()
+
+    unconfirmed_task_id = _render(
+        page,
+        base_url,
+        {
+            "state": "execute_unconfirmed",
+            "draft": "Final approved text.",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "error": "Delivery could not be confirmed.",
+        },
+    )
+    expect(page.get_by_test_id("delivery-unconfirmed")).to_contain_text(
+        "Check the destination before retrying"
+    )
+    assert page.evaluate(
+        f"Boolean(_cwPollers[{unconfirmed_task_id}])"
+    ) is False
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-delivery-unconfirmed.png"),
+        full_page=True,
+    )
+
+    executed_task_id = _render(
+        page,
+        base_url,
+        {
+            "state": "executed",
+            "draft": "Final approved text.",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "delivery_confirmed_at": "2026-08-11T12:00:00Z",
+        },
+    )
+    expect(page.get_by_test_id("delivery-confirmed")).to_contain_text(
+        "Delivered to Mehdi Slaoui Andaloussi"
+    )
+    assert page.evaluate(f"Boolean(_cwPollers[{executed_task_id}])") is False
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-delivery-confirmed.png"),
+        full_page=True,
+    )
+
+
+def test_execution_progress_and_approval_states(page: Page, base_url):
+    _render(
+        page,
+        base_url,
+        {
+            "state": "executing",
+            "draft": "Final approved text.",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "progress": ["Sending the approved Teams message"],
+            "started_at": "2026-08-11T12:00:00Z",
+        },
+    )
+    expect(page.get_by_text("approved action in progress")).to_be_visible()
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-executing.png"),
+        full_page=True,
+    )
+
+    _render(
+        page,
+        base_url,
+        {
+            "state": "executing",
+            "draft": "Final approved text.",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "waiting_on_user": True,
+            "interaction_request": {
+                "invocation_id": "approval-1",
+                "questions": [
+                    {
+                        "id": "confirm",
+                        "header": "Confirm recipient",
+                        "question": "Send this message to Mehdi?",
+                        "options": [
+                            {"label": "Send", "value": "send"},
+                            {"label": "Cancel", "value": "cancel"},
+                        ],
+                    }
+                ],
+            },
+        },
+    )
+    expect(page.get_by_text("Cowork needs your approval to finish this action.")).to_be_visible()
+    expect(page.get_by_role("button", name="Answer and continue")).to_be_visible()
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-execution-approval.png"),
         full_page=True,
     )
 
