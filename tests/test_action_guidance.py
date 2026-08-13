@@ -19,6 +19,7 @@ produces a worse draft get a block, and each block says what to CHECK and what
 to INCLUDE rather than restating the task.
 """
 
+import json
 import unittest
 
 from src.services.cowork_runner import compose_prompt
@@ -89,6 +90,41 @@ class TestSchedulingOffersKnownTimes(unittest.TestCase):
             "do not create or send a meeting invitation until",
             self.prompt.lower(),
         )
+
+
+class TestSchedulingUsesCalendarVoice(unittest.TestCase):
+    def test_teams_fallback_does_not_turn_meeting_into_chat_draft(self):
+        prompt = compose_prompt(_task(), delivery_channel="teams")
+        voice = prompt.split("[VOICE]\n", 1)[1].split("\n\n[", 1)[0]
+
+        self.assertIn("calendar invitation", voice.lower())
+        self.assertNotIn("work-teams-voice", voice)
+        self.assertNotIn("match chat register", voice.lower())
+
+
+class TestSelectedPeopleOnly(unittest.TestCase):
+    def test_disambiguation_alternatives_are_not_sent_to_cowork(self):
+        prompt = compose_prompt(_task(
+            key_people=json.dumps([
+                {
+                    "name": "Rima Reyes",
+                    "email": "rima.reyes@microsoft.com",
+                    "role": "Principal Product Manager",
+                    "alternatives": [
+                        {
+                            "name": "Rima Gooden",
+                            "email": "rimagooden@microsoft.com",
+                        }
+                    ],
+                }
+            ])
+        ))
+
+        self.assertIn("Rima Reyes", prompt)
+        self.assertIn("rima.reyes@microsoft.com", prompt)
+        self.assertNotIn("Rima Gooden", prompt)
+        self.assertNotIn("rimagooden@microsoft.com", prompt)
+        self.assertNotIn('"alternatives"', prompt)
 
 
 class TestGuidanceIsScopedToTheActionType(unittest.TestCase):

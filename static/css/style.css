@@ -2943,6 +2943,7 @@ textarea.cw-draft {
 }
 .cw-tool-icon.is-search { color: var(--accent); }
 .cw-tool-icon svg { display: block; width: 15px; height: 15px; }
+.cw-tool-icon.is-cowork img { display: block; width: 16px; height: 16px; }
 .cw-draft[data-testid="cowork-draft-click-edit"] {
     cursor: text; transition: border-color .15s, background .15s;
 }

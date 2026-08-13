@@ -108,7 +108,16 @@ def test_running_card_uses_real_trace_without_mode_selector(page: Page, base_url
     )
     expect(page.get_by_test_id("session-timeline")).not_to_contain_text("Bash")
     expect(page.get_by_test_id("tool-icon")).to_have_count(4)
-    expect(page.locator('[data-testid="tool-icon"] svg')).to_have_count(4)
+    expect(page.locator('[data-testid="tool-icon"] svg')).to_have_count(3)
+    cowork_icon = page.locator(
+        '.cw-timeline-event.is-active '
+        'img[src="/static/img/coworker.svg"]'
+    )
+    expect(cowork_icon).to_have_count(1)
+    assert cowork_icon.evaluate("icon => icon.naturalWidth") > 0
+    page.locator(".cw-timeline-event.is-active").screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-connecting-icon.png")
+    )
     expect(page.locator('[data-tool-icon="teams"]')).to_have_count(1)
     expect(page.locator('[data-tool-icon="calendar"]')).to_have_count(1)
     live = page.locator(".cw-timeline-event.is-active > div > span")

@@ -347,6 +347,29 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["destination_display"], "Sarah Goodwin")
         self.assertEqual(action["destination_source"], "auto_key_people")
 
+    def test_schedule_meeting_binds_selected_person_to_calendar(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            source_type="manual",
+            key_people=json.dumps(
+                [{
+                    "name": "Rima Reyes",
+                    "email": "rima.reyes@microsoft.com",
+                    "alternatives": [{
+                        "name": "Rima Gooden",
+                        "email": "rimagooden@microsoft.com",
+                    }],
+                }]
+            ),
+        )
+        action = json.loads(self.start(tid).body)["action"]
+
+        self.assertIsNone(action["delivery_channel"])
+        self.assertEqual(action["destination_ref"], "rima.reyes@microsoft.com")
+        self.assertEqual(action["destination_display"], "Rima Reyes")
+        self.assertNotIn("work-teams-voice", action["composed_prompt"])
+        self.assertNotIn("Rima Gooden", action["composed_prompt"])
+
     def test_broadcast_destination_recorded(self):
         tid = self.make_task(
             source_url=(

@@ -436,11 +436,40 @@ _VOICE_NEUTRAL = (
 def _voice_for(channel: str) -> str:
     """The [VOICE] layer for a bound channel, or the neutral register."""
     key = (channel or "").strip().lower()
+    if key == "calendar":
+        return (
+            "This draft is a calendar invitation, not a Teams chat message or "
+            "email. Prepare a concise event title and a short event body with the "
+            "purpose or agenda. Once the user selects one of the confirmed times, "
+            "use that time directly rather than asking the invitee whether it works."
+        )
     if key == "email":
         return _voice_email()
     if key == "teams":
         return _voice_teams()
     return _VOICE_NEUTRAL
+
+
+def _selected_people_for_prompt(value) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+    try:
+        people = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if not isinstance(people, list):
+        return text
+    selected = []
+    for person in people:
+        if not isinstance(person, dict):
+            return text
+        selected.append({
+            key: person[key]
+            for key in ("name", "email", "role")
+            if person.get(key)
+        })
+    return json.dumps(selected, ensure_ascii=False)
 
 
 
@@ -612,7 +641,7 @@ def compose_prompt(task, destination: dict | None = None,
                 f"CAUTION: this is a {label} -- more than one person would see a "
                 "reply here. State who the audience is in your findings."
             )
-    people = _clean(_get(task, "key_people"))
+    people = _selected_people_for_prompt(_get(task, "key_people"))
     if people:
         source_lines.append(f"Key people: {people}")
     snippet = _clean(_get(task, "source_snippet"))
@@ -621,17 +650,19 @@ def compose_prompt(task, destination: dict | None = None,
     if source_lines:
         parts.append("[SOURCE]\n" + "\n".join(source_lines))
 
-    parts.append("[VOICE]\n" + _voice_for(delivery_channel))
+    action_type = _clean(_get(task, "action_type")).strip().lower()
+    voice_channel = "calendar" if action_type == "schedule-meeting" else delivery_channel
+    parts.append("[VOICE]\n" + _voice_for(voice_channel))
 
     # What this KIND of action has to get right. After the task and source so it
     # can refer to them, before the correction so the user can still override it.
     guidance = _ACTION_GUIDANCE.get(
-        _clean(_get(task, "action_type")).strip().lower()
+        action_type
     )
     if guidance:
         parts.append("[ACTION]\n" + guidance)
 
-    if _clean(_get(task, "action_type")).strip().lower() == "schedule-meeting":
+    if action_type == "schedule-meeting":
         available_times = _clean(_get(task, "skill_output"))
         if available_times:
             parts.append(

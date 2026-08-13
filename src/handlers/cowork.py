@@ -203,6 +203,19 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     source_type = (task.get("source_type") or "").strip().lower()
     channel = _CHANNEL_BY_SOURCE.get(source_type)
     person = people[0] if len(people) == 1 else None
+    is_schedule = (
+        (task.get("action_type") or "").strip().lower() == "schedule-meeting"
+    )
+
+    if is_schedule:
+        return {
+            "delivery_channel": None,
+            "destination_ref": (
+                person["email"] or person["name"] if person else None
+            ),
+            "destination_display": person["name"] if person else None,
+            "destination_source": "auto_key_people" if person else None,
+        }
 
     if destination.get("conversation_id"):
         label = destination.get("audience_label") or "conversation"
@@ -721,6 +734,8 @@ class CoworkHandler(tornado.web.RequestHandler):
         resolved = _carry_forward_destination(
             tid, _resolve_destination(task, destination)
         )
+        if task.get("action_type") == "schedule-meeting":
+            resolved["delivery_channel"] = None
 
         prompt = compose_prompt(
             task,

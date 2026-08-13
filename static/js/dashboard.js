@@ -3190,9 +3190,14 @@ function cwTimeline(action, liveText, liveIconName) {
             + '<span>' + escapeHtml(cwToolLabel(item)) + '</span></div></div>';
     });
     if (liveText) {
+        var liveIcon = liveIconName
+            ? cwToolIcon({name: liveIconName})
+            : '<span class="cw-tool-icon is-cowork" data-testid="tool-icon" '
+                + 'data-tool-icon="cowork" aria-hidden="true">'
+                + '<img src="/static/img/coworker.svg" alt=""></span>';
         events.push('<div class="cw-timeline-event is-active">'
             + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
-            + cwToolIcon({name: liveIconName || ''})
+            + liveIcon
             + '<div><small>now</small><span aria-live="polite">'
             + escapeHtml(liveText) + '</span></div></div>');
     }
