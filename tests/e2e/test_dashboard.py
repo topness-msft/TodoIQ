@@ -82,9 +82,12 @@ class TestDashboardLoads:
         page.goto(base_url + '/')
         logo_box = page.locator('.riveter-logo').bounding_box()
         tagline_box = page.get_by_test_id('brand-tagline').bounding_box()
+        tagline_text_box = page.get_by_test_id('brand-tagline').locator('span').bounding_box()
+        brand_link_box = page.get_by_test_id('brand-tagline').locator('a').bounding_box()
         input_box = page.locator('.input-bar').bounding_box()
-        assert logo_box and tagline_box and input_box
-        assert tagline_box['y'] >= logo_box['y'] + logo_box['height'] - 2
+        assert logo_box and tagline_box and tagline_text_box and brand_link_box and input_box
+        assert tagline_box['y'] < logo_box['y'] + logo_box['height']
+        assert brand_link_box['x'] < tagline_text_box['x']
         assert input_box['y'] >= tagline_box['y'] + tagline_box['height'] - 2
         assert page.evaluate(
             '() => document.documentElement.scrollWidth'
