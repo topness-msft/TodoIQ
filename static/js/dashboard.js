@@ -571,10 +571,14 @@ function renderSection(sectionId, sectionTasks) {
                 dueHtml += '<span class="overdue-badge">Overdue</span>';
             }
         }
-        var parseHtml = parseStatusIcon(task.parse_status);
+        var refreshingContext = task.parse_status === 'queued'
+            || task.parse_status === 'parsing';
+        var parseHtml = refreshingContext ? '' : parseStatusIcon(task.parse_status);
         var enrichedHtml = '';
         if (task.cw_state === 'previewing') {
             enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
+        } else if (refreshingContext) {
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is refreshing task context"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
             enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
         } else if (task.skill_output) {

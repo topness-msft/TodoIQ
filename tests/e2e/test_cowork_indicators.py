@@ -27,6 +27,97 @@ def _delete_task(page: Page, base_url: str, task_id: int) -> None:
 
 
 class TestCoworkIndicators:
+    def test_queued_parse_shows_cowork_icon_not_parse_ring(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            row = page.locator(f'.task-row[data-id="{task_id}"]')
+            for status in ("queued", "parsing"):
+                page.evaluate(
+                    """([taskId, parseStatus]) => {
+                        const task = tasks.find(item => item.id === taskId);
+                        task.parse_status = parseStatus;
+                        task.cw_state = null;
+                        renderTaskList();
+                    }""",
+                    [task_id, status],
+                )
+                expect(row.locator(".cw-status-running")).to_be_visible()
+                expect(
+                    row.locator(
+                        '.cw-status-running img[src="/static/img/coworker.svg"]'
+                    )
+                ).to_have_count(1)
+                assert row.locator(".cw-status-running").evaluate(
+                    "node => getComputedStyle(node).animationName"
+                ) != "none"
+                expect(row.locator(".parse-icon")).to_have_count(0)
+                expect(row.locator(".parse-ring")).to_have_count(0)
+                page.screenshot(
+                    path=os.path.join(
+                        SCREENSHOTS_DIR, f"dashboard-{status}-cowork-icon.png"
+                    ),
+                    full_page=True,
+                )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_queued_parse_with_active_cowork_shows_single_icon(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.parse_status = 'queued';
+                    task.cw_state = 'previewing';
+                    renderTaskList();
+                }""",
+                task_id,
+            )
+            row = page.locator(f'.task-row[data-id="{task_id}"]')
+            expect(
+                row.locator('img[src="/static/img/coworker.svg"]')
+            ).to_have_count(1)
+            expect(row.locator(".parse-ring")).to_have_count(0)
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_error_and_unparsed_still_show_parse_ring(self, page: Page, base_url):
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            row = page.locator(f'.task-row[data-id="{task_id}"]')
+            for status in ("error", "unparsed"):
+                page.evaluate(
+                    """([taskId, parseStatus]) => {
+                        const task = tasks.find(item => item.id === taskId);
+                        task.parse_status = parseStatus;
+                        task.cw_state = null;
+                        renderTaskList();
+                    }""",
+                    [task_id, status],
+                )
+                expect(row.locator(".parse-icon")).to_be_visible()
+                expect(row.locator(".parse-ring")).to_be_visible()
+                expect(row.locator(".cw-status-running")).to_have_count(0)
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_detail_state_omits_obsolete_parse_indicator(
         self, page: Page, base_url
     ):
