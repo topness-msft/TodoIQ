@@ -1366,6 +1366,18 @@ html, body {
     background: var(--accent-bg-hover);
     border-color: var(--accent);
 }
+.person-pill.is-unresolved {
+    border-color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, var(--bg-primary));
+    color: var(--text-primary);
+}
+.person-resolving {
+    max-width: 240px;
+    padding: 8px 12px 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+}
 
 .person-pill.has-alternatives::after {
     content: '\25BE';
@@ -3166,6 +3178,7 @@ textarea.cw-draft {
 .cw-avail-wrap {
     max-width: 100%; margin-top: 10px; overflow-x: auto;
     border: 1px solid var(--border-primary); border-radius: 8px;
+    container: cw-availability / inline-size;
 }
 .cw-avail-matrix { min-width: calc(180px + var(--cw-attendees) * 86px); }
 .cw-avail-header, .cw-avail-row {
@@ -3177,8 +3190,33 @@ textarea.cw-draft {
     background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);
 }
 .cw-avail-head {
-    padding: 8px 6px; color: var(--text-secondary); font-size: 11px;
-    font-weight: 750; letter-spacing: .06em; text-align: center;
+    display: grid; place-items: center; min-width: 0; padding: 8px 6px;
+    color: var(--text-secondary); font-size: 11px; font-weight: 750;
+    text-align: center;
+}
+.cw-avail-head-pill {
+    max-width: 100%; padding: 3px 7px; gap: 5px; cursor: default;
+    letter-spacing: 0; overflow: hidden;
+}
+.cw-avail-head-pill:hover { background: var(--accent-bg); border-color: transparent; }
+.cw-avail-head-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cw-avail-head-avatar { width: 22px; height: 22px; font-size: 9px; }
+.cw-meeting-attendees { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.cw-meeting-attendee-pill { cursor: default; }
+.cw-meeting-attendee-pill:hover { background: var(--accent-bg); border-color: transparent; }
+@container cw-availability (max-width: 640px) {
+    .cw-avail-matrix:not([data-attendees="2"]) .cw-avail-head-pill {
+        padding: 0; background: transparent; border-color: transparent;
+    }
+    .cw-avail-matrix:not([data-attendees="2"]) .cw-avail-head-name { display: none; }
+    .cw-avail-matrix:not([data-attendees="2"]) .cw-avail-head-avatar {
+        width: 26px; height: 26px; font-size: 10px;
+    }
+}
+@container cw-availability (max-width: 450px) {
+    .cw-avail-head-pill { padding: 0; background: transparent; border-color: transparent; }
+    .cw-avail-head-name { display: none; }
+    .cw-avail-head-avatar { width: 26px; height: 26px; font-size: 10px; }
 }
 .cw-avail-row {
     width: 100%; padding: 0; border: 0; border-bottom: 1px solid var(--border-primary);

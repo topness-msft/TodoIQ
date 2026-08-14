@@ -1067,12 +1067,16 @@ function renderPeoplePills(keyPeople, taskId) {
     var html = '<div class="people-list">';
     people.forEach(function(person, idx) {
         var hasAlts = person.alternatives && person.alternatives.length > 0;
+        var unresolved = person.unresolved === true
+            || !String(person.email || '').trim();
         var pillId = 'pill-' + taskId + '-' + idx;
 
         html += '<div class="person-pill-wrapper" id="wrapper-' + pillId + '">';
 
         // Pill — always clickable (dropdown always available for remove)
-        html += '<div class="person-pill has-alternatives" '
+        html += '<div class="person-pill has-alternatives'
+            + (unresolved ? ' is-unresolved' : '') + '" '
+            + (unresolved ? 'title="Choose a resolved identity before scheduling" ' : '')
             + 'onclick="event.stopPropagation(); togglePeopleDropdown(\'' + pillId + '\')">'
             + '<span class="person-pill-avatar">' + getInitials(person.name) + '</span>'
             + '<span>' + escapeHtml(person.name) + '</span>';
@@ -1083,8 +1087,9 @@ function renderPeoplePills(keyPeople, taskId) {
 
         // Dropdown — always present
         html += '<div class="alternatives-dropdown" id="dropdown-' + pillId + '">';
-        if (hasAlts) {
-            html += '<div class="alternatives-header">Did you mean?</div>';
+        if (hasAlts || (unresolved && person.email)) {
+            html += '<div class="alternatives-header">'
+                + (unresolved ? 'Choose the right person' : 'Did you mean?') + '</div>';
 
             // Current selection (highlighted)
             html += '<div class="alternative-item selected" '
@@ -1104,6 +1109,10 @@ function renderPeoplePills(keyPeople, taskId) {
                     + '<div class="alt-detail">' + escapeHtml([alt.email, alt.role].filter(Boolean).join(' \u00b7 ')) + '</div>'
                     + '</div></div>';
             });
+        } else if (unresolved) {
+            html += '<div class="alternatives-header">Resolving identity...</div>'
+                + '<div class="person-resolving">Riveter is finding matches. '
+                + 'Choose the right person here when they appear.</div>';
         }
 
         // Remove option
@@ -1146,28 +1155,39 @@ function selectPerson(taskId, personIdx, altIdx) {
 
     var people = parsePeople(task.key_people);
     var person = people[personIdx];
-    if (!person || altIdx < 0) {
+    if (!person) {
         closeAllDropdowns();
-        return; // Already selected
+        return;
     }
 
-    var alt = person.alternatives[altIdx];
-    if (!alt) return;
-
     var oldName = person.name;
-    var newName = alt.name;
+    var newName = person.name;
+    if (altIdx < 0) {
+        if (person.unresolved !== true || !person.email) {
+            closeAllDropdowns();
+            return;
+        }
+        delete person.unresolved;
+        people[personIdx] = person;
+    } else {
+        var alt = person.alternatives[altIdx];
+        if (!alt) return;
+        newName = alt.name;
 
-    // Swap: move current to alternatives, promote the selected alt
-    var oldPrimary = { name: person.name, email: person.email, role: person.role };
-    var newAlternatives = person.alternatives.filter(function(_, i) { return i !== altIdx; });
-    newAlternatives.unshift(oldPrimary);
+        // Swap: move current to alternatives, promote the selected alt
+        var oldPrimary = { name: person.name, email: person.email, role: person.role };
+        var newAlternatives = person.alternatives.filter(function(_, i) {
+            return i !== altIdx;
+        });
+        newAlternatives.unshift(oldPrimary);
 
-    people[personIdx] = {
-        name: alt.name,
-        email: alt.email,
-        role: alt.role,
-        alternatives: newAlternatives
-    };
+        people[personIdx] = {
+            name: alt.name,
+            email: alt.email,
+            role: alt.role,
+            alternatives: newAlternatives
+        };
+    }
 
     var newKeyPeople = JSON.stringify(people);
 
@@ -1268,7 +1288,7 @@ function saveNewPerson(taskId) {
     });
     if (exists) { hideAddPersonInput(taskId); return; }
 
-    people.push({ name: name, alternatives: [] });
+    people.push({ name: name, alternatives: [], unresolved: true });
     var newKeyPeople = JSON.stringify(people);
 
     fetch('/api/tasks/' + taskId, {
@@ -1283,6 +1303,7 @@ function saveNewPerson(taskId) {
             if (idx >= 0) tasks[idx] = data.task;
             renderDetailPane(data.task);
             renderTaskList();
+            refreshTask(data.task.id);
         }
     })
     .catch(function(err) { console.error('Failed to add person:', err); });
@@ -3238,11 +3259,77 @@ function cwExecutionIconName(task, action) {
         return 'teams';
 }
 
+function cwMeetingPeople(task) {
+        if (!task) return [];
+        var people = parsePeople(task.key_people);
+        var seen = {};
+        return people.map(function(person) {
+            return {
+                name: String(person.name || '').trim(),
+                email: String(person.email || '').trim().toLowerCase(),
+                unresolved: person.unresolved === true
+            };
+        }).filter(function(person) {
+            if (person.unresolved || !person.name || !person.email || seen[person.email]) {
+                return false;
+            }
+            seen[person.email] = true;
+            return true;
+        });
+}
+
+function cwUnresolvedMeetingPeople(task) {
+        if (!task) return [];
+        return parsePeople(task.key_people).filter(function(person) {
+            return String(person.name || '').trim()
+                && (person.unresolved === true || !String(person.email || '').trim());
+        });
+}
+
+function cwMeetingAttendeePills(task) {
+        return cwMeetingPeople(task).map(function(person) {
+            return '<span class="person-pill cw-meeting-attendee-pill" '
+                + 'data-testid="meeting-attendee-pill" title="' + escapeAttr(person.email) + '">'
+                + '<span class="person-pill-avatar">' + escapeHtml(getInitials(person.name))
+                + '</span><span>' + escapeHtml(person.name) + '</span></span>';
+        }).join('');
+}
+
+function cwMeetingDestination(people) {
+        if (!people.length) return {ref: '', display: ''};
+        var emails = people.map(function(person) { return person.email; });
+        return {
+            ref: emails.length === 1 ? emails[0] : JSON.stringify(emails),
+            display: people.map(function(person) { return person.name; }).join(', ')
+        };
+}
+
 function cwOpenExecuteConfirm(taskId) {
         var action = _cwActions[taskId];
         var task = tasks.find(function(item) { return item.id === taskId; });
         if (!action || !task || action.state !== 'ready') return;
         var isMeeting = task.action_type === 'schedule-meeting';
+        if (isMeeting) {
+            var unresolved = cwUnresolvedMeetingPeople(task);
+            if (unresolved.length) {
+                window.alert('Resolve ' + unresolved.map(function(person) {
+                    return person.name;
+                }).join(', ') + ' in Key People before scheduling. '
+                    + 'Riveter is refreshing identity matches now.');
+                refreshTask(taskId);
+                return;
+            }
+            var meetingPeople = cwMeetingPeople(task);
+            var currentDestination = cwMeetingDestination(meetingPeople);
+            if (!action.destination_ref
+                    || action.destination_ref !== currentDestination.ref
+                    || action.destination_display !== currentDestination.display) {
+                window.alert('The attendee list changed after this preview. '
+                    + 'Start over so Cowork can check availability for the exact '
+                    + 'people shown in Key People.');
+                return;
+            }
+        }
         if (!action.destination_confirmed_at && isMeeting
                 && action.destination_ref && action.destination_display) {
             cwConfirmDest(taskId, true);
@@ -3256,7 +3343,10 @@ function cwOpenExecuteConfirm(taskId) {
         if (old) old.remove();
         var label = cwExecutionLabel(task, action);
         var destination = action.destination_display || action.destination_ref || '';
-        var destinationHtml = '<b>' + escapeHtml(destination) + '</b>';
+        var attendeePills = isMeeting ? cwMeetingAttendeePills(task) : '';
+        var destinationHtml = attendeePills
+            ? '<div class="cw-meeting-attendees">' + attendeePills + '</div>'
+            : '<b>' + escapeHtml(destination) + '</b>';
         if (action.delivery_channel === 'teams' && task.source_url
                 && action.destination_source === 'auto_source_url') {
             destinationHtml = '<a class="cw-execute-destination-link" href="'
@@ -3283,14 +3373,14 @@ function cwOpenExecuteConfirm(taskId) {
             + '<div class="source-modal-header" id="execute-modal-title">'
             + escapeHtml(label) + '?</div>'
             + '<div class="cw-execute-destination"><span>'
-            + (isMeeting ? 'Attendee' : 'Destination') + '</span>'
+            + (isMeeting ? 'Attendees' : 'Destination') + '</span>'
             + destinationHtml + '</div>'
             + '<label class="source-modal-label">'
             + (isMeeting ? 'Meeting details' : 'Final draft') + '</label>'
             + '<div class="cw-execute-draft">' + renderCoworkMarkdown(cwCurrentDraft(action)) + '</div>'
             + '<div class="cw-execute-warning">'
             + (isMeeting
-                ? 'Review the attendee and meeting details. Cowork creates the calendar event only after you confirm.'
+                ? 'Review every attendee and the meeting details. Cowork creates the calendar event only after you confirm.'
                 : 'This performs the action through Cowork. The destination and draft cannot be changed after confirmation.')
             + '</div>'
             + '<div class="cw-execute-error" id="execute-modal-error" role="alert"></div>'
@@ -4062,6 +4152,17 @@ function cwLoad(taskId, markSeen) {
 }
 
 function cwStart(taskId, isRedo) {
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    var unresolved = task && task.action_type === 'schedule-meeting'
+        ? cwUnresolvedMeetingPeople(task) : [];
+    if (unresolved.length) {
+        window.alert('Resolve ' + unresolved.map(function(person) {
+            return person.name;
+        }).join(', ') + ' in Key People before scheduling. '
+            + 'Riveter is refreshing identity matches now.');
+        refreshTask(taskId);
+        return;
+    }
     var body = {
         interaction_mode: cwSelectedMode(taskId, _cwActions[taskId])
     };
@@ -4079,8 +4180,15 @@ function cwStart(taskId, isRedo) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
     })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
+    .then(function(res) {
+        return res.json().then(function(data) { return {ok: res.ok, data: data}; });
+    })
+    .then(function(result) {
+        var data = result.data;
+        if (!result.ok) {
+            window.alert(data.error || 'Could not start Cowork.');
+            return;
+        }
         if (data.action) {
             _cwActions[taskId] = data.action;
             delete _cwMode[taskId];
@@ -4211,7 +4319,7 @@ function cwInteractionFields(taskId, interaction) {
                 if (!person || typeof person !== 'object') return [];
                 var name = String(person.name || '').trim();
                 var email = String(person.email || '').trim().toLowerCase();
-                if (!name || !email || emails[email]) return [];
+                if (person.unresolved === true || !name || !email || emails[email]) return [];
                 emails[email] = true;
                 attendees.push({name: name, email: email});
             }
@@ -4271,9 +4379,14 @@ function cwInteractionFields(taskId, interaction) {
             var header = '<div class="cw-avail-corner" aria-hidden="true"></div>'
                 + attendees.map(function(person) {
                     return '<div class="cw-avail-head" role="columnheader" '
-                        + 'data-testid="cw-avail-col-header" title="'
-                        + escapeAttr(person.name) + '">' + escapeHtml(cwPersonInitials(person.name))
-                        + '</div>';
+                        + 'data-testid="cw-avail-col-header"><span class="person-pill '
+                        + 'cw-avail-head-pill" data-testid="cw-avail-head-pill" title="'
+                        + escapeAttr(person.name) + '" aria-label="' + escapeAttr(person.name)
+                        + '"><span class="person-pill-avatar cw-avail-head-avatar" '
+                        + 'data-testid="cw-avail-head-avatar" title="' + escapeAttr(person.name)
+                        + '">' + escapeHtml(cwPersonInitials(person.name))
+                        + '</span><span class="cw-avail-head-name">'
+                        + escapeHtml(person.name) + '</span></span></div>';
                 }).join('');
             var body = rows.map(function(row) {
                 var pressed = selected.indexOf(row.option.value) !== -1 ? 'true' : 'false';
@@ -4295,7 +4408,8 @@ function cwInteractionFields(taskId, interaction) {
             return '<div class="cw-avail-wrap"><div class="cw-avail-matrix" role="table" '
                 + 'data-testid="cw-avail-matrix" data-cw-answer="'
                 + escapeAttr(String(question.id || ''))
-                + '" data-cw-multi="' + (question.multi_select ? '1' : '0') + '" '
+                + '" data-cw-multi="' + (question.multi_select ? '1' : '0')
+                + '" data-attendees="' + attendees.length + '" '
                 + 'style="--cw-attendees:' + attendees.length + '">'
                 + '<div class="cw-avail-header" role="row">' + header + '</div>'
                 + body + '</div></div>';

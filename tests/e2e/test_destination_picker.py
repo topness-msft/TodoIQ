@@ -60,6 +60,8 @@ def _load_dashboard(page: Page, base_url: str, task_id: int, action: dict) -> No
         selectedTaskId = {task_id};
         const task = tasks.find(task => task.id === {task_id});
         task.parse_status = 'parsed';
+        clearInterval(parsePollerInterval);
+        parsePollerInterval = null;
         renderDetailPane(task);
         """
     )
@@ -239,6 +241,9 @@ class TestDestinationBinding:
                 const task = tasks.find(item => item.id === {task_id});
                 task.parse_status = 'parsed';
                 task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([
+                    {{name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'}}
+                ]);
                 renderDetailPane(task);
                 """
             )
@@ -280,6 +285,177 @@ class TestDestinationBinding:
                 ),
                 full_page=True,
             )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_multi_attendee_meeting_uses_bound_attendee_snapshot(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            draft="**Title:** Planning review\n\n**When:** Monday at 10:05 AM",
+            destination_kind="none",
+            destination_ref=(
+                '["kanika@microsoft.com","rima@microsoft.com",'
+                '"henry@microsoft.com"]'
+            ),
+            destination_display="Kanika Ramji, Rima Reyes, Henry James",
+            destination_confirmed_at=None,
+            destination_source=None,
+            delivery_channel=None,
+        )
+        confirmed = {
+            **action,
+            "destination_ref": (
+                '["kanika@microsoft.com","rima@microsoft.com",'
+                '"henry@microsoft.com"]'
+            ),
+            "destination_display": "Kanika Ramji, Rima Reyes, Henry James",
+            "destination_confirmed_at": "2026-08-13T19:00:00Z",
+        }
+        posted = {}
+
+        def destination_route(route):
+            posted.update(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"action": confirmed}),
+            )
+
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.key_people = JSON.stringify([
+                        {name: 'Kanika Ramji', email: 'kanika@microsoft.com'},
+                        {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                        {name: 'Henry James', email: 'henry@microsoft.com'}
+                    ]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+            page.route(
+                f"**/api/tasks/{task_id}/cowork/destination",
+                destination_route,
+            )
+
+            page.get_by_role("button", name="Create meeting").click()
+
+            confirmation = page.get_by_test_id("execute-confirmation")
+            expect(confirmation).to_be_visible()
+            expect(page.get_by_test_id("dest-picker")).to_have_count(0)
+            expect(confirmation).to_contain_text("Attendees")
+            expect(confirmation).to_contain_text("Kanika Ramji")
+            expect(confirmation).to_contain_text("Rima Reyes")
+            expect(confirmation).to_contain_text("Henry James")
+            expect(confirmation.get_by_test_id("meeting-attendee-pill")).to_have_count(3)
+            assert posted == {
+                "destination_ref": (
+                    '["kanika@microsoft.com","rima@microsoft.com",'
+                    '"henry@microsoft.com"]'
+                ),
+                "destination_display": "Kanika Ramji, Rima Reyes, Henry James",
+            }
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-multi-attendee-light.png"
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_create_meeting_blocks_if_key_people_changed_to_unresolved(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            draft="**Title:** Planning review\n\n**When:** Monday at 10:05 AM",
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            destination_confirmed_at="2026-08-13T19:00:00Z",
+            delivery_channel=None,
+        )
+        dialogs = []
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.key_people = JSON.stringify([
+                        {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                        {name: 'Henry James', alternatives: []}
+                    ]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+
+            with page.expect_request(
+                lambda request: request.method == "POST"
+                and request.url.endswith(f"/api/tasks/{task_id}/refresh")
+            ):
+                page.get_by_role("button", name="Create meeting").click()
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == [
+                "Resolve Henry James in Key People before scheduling. "
+                "Riveter is refreshing identity matches now."
+            ]
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_create_meeting_blocks_if_resolved_attendee_set_changed(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            draft="**Title:** Planning review\n\n**When:** Monday at 10:05 AM",
+            destination_ref='["rima@microsoft.com","henry@microsoft.com"]',
+            destination_display="Rima Reyes, Henry James",
+            destination_confirmed_at="2026-08-13T19:00:00Z",
+            delivery_channel=None,
+        )
+        dialogs = []
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.key_people = JSON.stringify([
+                        {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                        {name: 'Kanika Ramji', email: 'kanika@microsoft.com'}
+                    ]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+
+            page.get_by_role("button", name="Create meeting").click()
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == [
+                "The attendee list changed after this preview. Start over so "
+                "Cowork can check availability for the exact people shown in Key People."
+            ]
         finally:
             _delete_task(page, base_url, task_id)
 

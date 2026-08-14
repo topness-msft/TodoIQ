@@ -370,6 +370,96 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertNotIn("work-teams-voice", action["composed_prompt"])
         self.assertNotIn("Rima Gooden", action["composed_prompt"])
 
+    def test_schedule_meeting_binds_all_selected_people_to_confirmation(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            source_type="manual",
+            key_people=json.dumps([
+                {"name": "Kanika Ramji", "email": "kanika@microsoft.com"},
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                {"name": "Henry James", "email": "henry@microsoft.com"},
+            ]),
+        )
+
+        action = json.loads(self.start(tid).body)["action"]
+
+        self.assertEqual(
+            action["destination_ref"],
+            '["kanika@microsoft.com","rima@microsoft.com","henry@microsoft.com"]',
+        )
+        self.assertEqual(
+            action["destination_display"], "Kanika Ramji, Rima Reyes, Henry James"
+        )
+        self.assertIn("Kanika Ramji", action["composed_prompt"])
+        self.assertIn("Rima Reyes", action["composed_prompt"])
+        self.assertIn("Henry James", action["composed_prompt"])
+
+    def test_schedule_meeting_rejects_name_only_attendee(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            source_type="manual",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                {"name": "Henry Jammes", "alternatives": []},
+            ]),
+        )
+
+        response = self.start(tid)
+
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Resolve the identity for Henry Jammes before scheduling.",
+        )
+
+    def test_schedule_meeting_rejects_unconfirmed_directory_match(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Henry James",
+                "email": "henry@microsoft.com",
+                "unresolved": True,
+                "alternatives": [],
+            }]),
+        )
+
+        response = self.start(tid)
+
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Resolve the identity for Henry James before scheduling.",
+        )
+
+    def test_schedule_meeting_rejects_plain_text_attendees(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            source_type="manual",
+            key_people="Rima Reyes, Henry James",
+        )
+
+        response = self.start(tid)
+
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Resolve the identities for Rima Reyes, Henry James before scheduling.",
+        )
+
+    def test_schedule_meeting_deduplicates_normalized_attendee_emails(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "RIMA@microsoft.com"},
+                {"name": "Rima Reyes duplicate", "email": "rima@microsoft.com"},
+            ]),
+        )
+
+        action = json.loads(self.start(tid).body)["action"]
+
+        self.assertEqual(action["destination_ref"], "rima@microsoft.com")
+        self.assertEqual(action["destination_display"], "Rima Reyes")
+
     def test_broadcast_destination_recorded(self):
         tid = self.make_task(
             source_url=(
@@ -455,6 +545,106 @@ class TestStartPreview(CoworkAPITestBase):
         action = json.loads(response.body)["action"]
 
         self.assertEqual(action["delivery_channel"], "teams")
+        self.assertEqual(action["destination_source"], "auto_key_people")
+
+    def test_schedule_redo_rebinds_current_attendees(self):
+        from src.db import get_connection
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                {"name": "Henry James", "email": "henry@microsoft.com"},
+            ]),
+        )
+        self.start(tid)
+        self.get_preview(tid)
+        confirm = self.fetch(
+            f"/api/tasks/{tid}/cowork/destination",
+            method="POST",
+            body=json.dumps({
+                "destination_ref": (
+                    '["rima@microsoft.com","henry@microsoft.com"]'
+                ),
+                "destination_display": "Rima Reyes, Henry James",
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(confirm.code, 200)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE tasks SET key_people=? WHERE id=?",
+            (
+                json.dumps([
+                    {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                    {"name": "Kanika Ramji", "email": "kanika@microsoft.com"},
+                ]),
+                tid,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        action = json.loads(
+            self.start(tid, body={"redirect_text": "start over"}).body
+        )["action"]
+
+        self.assertEqual(
+            action["destination_ref"],
+            '["rima@microsoft.com","kanika@microsoft.com"]',
+        )
+        self.assertEqual(
+            action["destination_display"], "Rima Reyes, Kanika Ramji"
+        )
+        self.assertEqual(action["destination_source"], "auto_key_people")
+
+    def test_converting_to_schedule_does_not_carry_message_destination(self):
+        from src.db import get_connection
+
+        tid = self.make_task(
+            action_type="follow-up",
+            source_type="manual",
+            key_people=json.dumps([
+                {"name": "Sarah Goodwin", "email": "sarah@microsoft.com"},
+            ]),
+        )
+        self.start(tid)
+        self.get_preview(tid)
+        confirm = self.fetch(
+            f"/api/tasks/{tid}/cowork/destination",
+            method="POST",
+            body=json.dumps({
+                "delivery_channel": "email",
+                "destination_ref": "sarah@microsoft.com",
+                "destination_display": "Sarah Goodwin",
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(confirm.code, 200)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE tasks SET action_type=?, key_people=? WHERE id=?",
+            (
+                "schedule-meeting",
+                json.dumps([
+                    {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                    {"name": "Kanika Ramji", "email": "kanika@microsoft.com"},
+                ]),
+                tid,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        action = json.loads(
+            self.start(tid, body={"redirect_text": "schedule instead"}).body
+        )["action"]
+
+        self.assertIsNone(action["delivery_channel"])
+        self.assertEqual(
+            action["destination_ref"],
+            '["rima@microsoft.com","kanika@microsoft.com"]',
+        )
         self.assertEqual(action["destination_source"], "auto_key_people")
 
 
@@ -938,6 +1128,46 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             },
         )
 
+    def test_schedule_execution_rejects_attendee_drift_after_preview(self):
+        from src.db import get_connection
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                {"name": "Henry James", "email": "henry@microsoft.com"},
+            ]),
+        )
+        self._ready_action(
+            tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref='["rima@microsoft.com","henry@microsoft.com"]',
+            destination_display="Rima Reyes, Henry James",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE tasks SET key_people=? WHERE id=?",
+            (
+                json.dumps([
+                    {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+                    {"name": "Kanika Ramji", "email": "kanika@microsoft.com"},
+                ]),
+                tid,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "The attendee list changed after this preview. Start over and "
+            "review availability again before creating the meeting.",
+        )
+
     def test_delivery_evidence_must_match_the_approved_action(self):
         from src.handlers.cowork import (
             _delivery_evidence_matches,
@@ -1165,10 +1395,18 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self.assertEqual(self._execute(email_tid).code, 202)
         self.assertEqual(self.started[-1][3]["approval_kind"], "email")
 
-        calendar_tid = self.make_task()
+        calendar_tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
         self._ready_action(
             calendar_tid,
             action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
         )
         self.assertEqual(self._execute(calendar_tid).code, 202)
         self.assertEqual(self.started[-1][3]["approval_kind"], "calendar")

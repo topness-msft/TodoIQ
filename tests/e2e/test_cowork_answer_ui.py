@@ -94,7 +94,7 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
             };
             renderDetailPane(task);
         }""",
-        task_id,
+        arg=task_id,
     )
 
     blocked = page.locator('[data-testid="cw-blocked"]')
@@ -379,7 +379,18 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
     expect(page.locator('[data-status="tentative"]')).to_have_count(2)
     expect(page.locator('[data-status="busy"]')).to_have_count(1)
     expect(page.locator('[data-status="unknown"]')).to_have_count(1)
-    expect(page.get_by_test_id("cw-avail-col-header").nth(0)).to_have_text("RR")
+    first_header = page.get_by_test_id("cw-avail-col-header").nth(0)
+    expect(first_header.get_by_test_id("cw-avail-head-pill")).to_contain_text(
+        "Rima Reyes"
+    )
+    expect(first_header.get_by_test_id("cw-avail-head-pill")).to_have_attribute(
+        "aria-label", "Rima Reyes"
+    )
+    expect(first_header.get_by_test_id("cw-avail-head-avatar")).to_have_text("RR")
+    expect(first_header.get_by_test_id("cw-avail-head-avatar")).to_have_attribute(
+        "title", "Rima Reyes"
+    )
+    expect(first_header.locator(".cw-avail-head-name")).to_be_hidden()
     expect(page.get_by_test_id("cw-avail-cell").nth(0)).to_have_attribute(
         "aria-label", "Rima Reyes: free"
     )
@@ -401,6 +412,23 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
         path=os.path.join(TEMP_DIR, "cowork-availability-matrix-light.png"),
         full_page=True,
     )
+    page.locator(".cw-avail-wrap").evaluate(
+        """element => {
+            const clone = element.cloneNode(true);
+            clone.classList.add('cw-avail-visual-wide');
+            clone.style.cssText = [
+                'position:fixed', 'left:24px', 'top:24px', 'z-index:99999',
+                'width:760px', 'max-width:none', 'background:var(--bg-primary)'
+            ].join(';');
+            document.body.appendChild(clone);
+        }"""
+    )
+    wide = page.locator(".cw-avail-visual-wide")
+    expect(wide.locator(".cw-avail-head-name").first).to_be_visible()
+    wide.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-availability-matrix-wide-light.png")
+    )
+    wide.evaluate("element => element.remove()")
     page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
     page.screenshot(
         path=os.path.join(TEMP_DIR, "cowork-availability-matrix-dark.png"),
@@ -477,3 +505,192 @@ def test_invalid_availability_matrix_falls_back_to_time_pills(page: Page, base_u
 
     expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
     expect(page.get_by_test_id("cw-choice")).to_have_count(2)
+
+
+def test_new_key_person_is_queued_for_identity_resolution(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const input = document.createElement('input');
+                input.id = `add-person-name-${taskId}`;
+                input.value = 'Henry James';
+                document.body.appendChild(input);
+            }""",
+            task_id,
+        )
+
+        with page.expect_request(
+            lambda request: request.method == "POST"
+            and request.url.endswith(f"/api/tasks/{task_id}/refresh")
+        ):
+            page.evaluate("taskId => saveNewPerson(taskId)", task_id)
+
+        page.wait_for_function(
+            """async taskId => {
+                const response = await fetch(`/api/tasks/${taskId}`);
+                const task = (await response.json()).task;
+                return task.parse_status === 'unparsed';
+            }""",
+            arg=task_id,
+        )
+        stored = page.request.get(f"{base_url}/api/tasks/{task_id}").json()["task"]
+        people = json.loads(stored["key_people"])
+        assert people == [{
+            "name": "Henry James",
+            "alternatives": [],
+            "unresolved": True,
+        }]
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_start_over_blocks_and_refreshes_unresolved_attendee(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    dialogs = []
+    page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.accept()))
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([
+                    {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                    {name: 'Henry James', alternatives: []}
+                ]);
+            }""",
+            task_id,
+        )
+
+        with page.expect_request(
+            lambda request: request.method == "POST"
+            and request.url.endswith(f"/api/tasks/{task_id}/refresh")
+        ):
+            page.evaluate("taskId => cwStart(taskId, true)", task_id)
+
+        assert dialogs == [
+            "Resolve Henry James in Key People before scheduling. "
+            "Riveter is refreshing identity matches now."
+        ]
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_unresolved_person_pill_explains_identity_resolution(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([
+                    {name: 'Henry James', alternatives: [], unresolved: true}
+                ]);
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        unresolved = page.locator(".person-pill.is-unresolved")
+        expect(unresolved).to_contain_text("Henry James")
+        unresolved.click()
+        expect(page.locator(".alternatives-dropdown.open")).to_contain_text(
+            "Resolving identity"
+        )
+        expect(page.locator(".alternatives-dropdown.open")).to_contain_text(
+            "Choose the right person here when they appear"
+        )
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, "cowork-unresolved-person-light.png"),
+            full_page=True,
+        )
+        page.evaluate(
+            "document.documentElement.setAttribute('data-theme', 'dark')"
+        )
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, "cowork-unresolved-person-dark.png"),
+            full_page=True,
+        )
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_directory_match_requires_explicit_dropdown_confirmation(
+    page: Page, base_url
+):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                clearInterval(parsePollerInterval);
+                parsePollerInterval = null;
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Henry James',
+                    email: 'henry@microsoft.com',
+                    unresolved: true,
+                    alternatives: [{
+                        name: 'Henry Jamison',
+                        email: 'henry.jamison@microsoft.com'
+                    }]
+                }]);
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        unresolved = page.locator(".person-pill.is-unresolved")
+        unresolved.click()
+        primary = page.locator(".alternative-item.selected")
+        expect(primary).to_contain_text("Henry James")
+        expect(primary).to_contain_text("henry@microsoft.com")
+
+        with page.expect_request(
+            lambda request: request.method == "PUT"
+            and request.url.endswith(f"/api/tasks/{task_id}")
+        ) as request_info:
+            primary.click()
+
+        people = json.loads(request_info.value.post_data_json["key_people"])
+        assert people[0]["name"] == "Henry James"
+        assert people[0]["email"] == "henry@microsoft.com"
+        assert "unresolved" not in people[0]
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")

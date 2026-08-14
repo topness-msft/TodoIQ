@@ -189,6 +189,61 @@ def _people(task: dict) -> list:
     return people
 
 
+def _unresolved_schedule_people(task: dict) -> list[str]:
+    """Names that cannot be bound to calendar attendees."""
+    raw = (task.get("key_people") or "").strip()
+    if not raw:
+        return []
+    if not raw.startswith("[") and not raw.startswith("{"):
+        return [
+            name.strip()
+            for name in raw.replace(";", ",").split(",")
+            if name.strip()
+        ]
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return ["selected attendees"]
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return ["selected attendees"]
+
+    unresolved = []
+    for person in data:
+        if not isinstance(person, dict):
+            value = str(person).strip()
+            if value:
+                unresolved.append(value)
+            continue
+        if (
+            person.get("unresolved") is True
+            or not (person.get("email") or "").strip()
+        ):
+            unresolved.append((person.get("name") or "selected attendee").strip())
+    return unresolved
+
+
+def _schedule_destination(people: list[dict]) -> tuple[str | None, str | None]:
+    resolved = []
+    seen = set()
+    for person in people:
+        email = person["email"].lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        resolved.append({"name": person["name"], "email": email})
+    if not resolved:
+        return None, None
+    emails = [person["email"].lower() for person in resolved]
+    destination_ref = (
+        emails[0]
+        if len(emails) == 1
+        else json.dumps(emails, separators=(",", ":"))
+    )
+    return destination_ref, ", ".join(person["name"] for person in resolved)
+
+
 def _resolve_destination(task: dict, destination: dict) -> dict:
     """Best-effort audience binding for a new action row.
 
@@ -208,13 +263,14 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     )
 
     if is_schedule:
+        destination_ref, destination_display = _schedule_destination(people)
         return {
             "delivery_channel": None,
-            "destination_ref": (
-                person["email"] or person["name"] if person else None
+            "destination_ref": destination_ref,
+            "destination_display": destination_display,
+            "destination_source": (
+                "auto_key_people" if destination_ref else None
             ),
-            "destination_display": person["name"] if person else None,
-            "destination_source": "auto_key_people" if person else None,
         }
 
     if destination.get("conversation_id"):
@@ -288,7 +344,9 @@ def _conversation_display(label, people, person):
     return f"{label} with {joined}"
 
 
-def _carry_forward_destination(task_id: int, resolved: dict) -> dict:
+def _carry_forward_destination(
+    task_id: int, resolved: dict, *, is_schedule: bool = False
+) -> dict:
     """Keep a picker choice across a Redo.
 
     Auto-derived bindings are cheap to recompute, but a user_picker binding is
@@ -297,7 +355,13 @@ def _carry_forward_destination(task_id: int, resolved: dict) -> dict:
     revert to whatever the source URL implies.
     """
     previous = get_latest_task_action(task_id)
-    if not previous or previous.get("destination_source") != "user_picker":
+    if (
+        not previous
+        or previous.get("destination_source") != "user_picker"
+        or is_schedule
+    ):
+        return resolved
+    if previous.get("action_type") == "schedule-meeting":
         return resolved
     return {
         "delivery_channel": previous.get("delivery_channel"),
@@ -731,9 +795,21 @@ class CoworkHandler(tornado.web.RequestHandler):
         ):
             return self._fail(400, "Invalid interaction mode")
         interaction_mode = "interaction"
+        if task.get("action_type") == "schedule-meeting":
+            unresolved = _unresolved_schedule_people(task)
+            if unresolved:
+                names = ", ".join(unresolved)
+                noun = "identity" if len(unresolved) == 1 else "identities"
+                return self._fail(
+                    400,
+                    f"Resolve the {noun} for {names} before scheduling.",
+                )
         destination = parse_source_url(task.get("source_url"))
+        is_schedule = task.get("action_type") == "schedule-meeting"
         resolved = _carry_forward_destination(
-            tid, _resolve_destination(task, destination)
+            tid,
+            _resolve_destination(task, destination),
+            is_schedule=is_schedule,
         )
         if task.get("action_type") == "schedule-meeting":
             resolved["delivery_channel"] = None
@@ -963,6 +1039,20 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
             (parent.get("draft_edited") or parent.get("draft") or "").strip()
         ):
             return self._fail(409, "The final draft is empty.")
+        if parent.get("action_type") == "schedule-meeting":
+            unresolved = _unresolved_schedule_people(task)
+            current_ref, current_display = _schedule_destination(_people(task))
+            if (
+                unresolved
+                or not current_ref
+                or parent.get("destination_ref") != current_ref
+                or parent.get("destination_display") != current_display
+            ):
+                return self._fail(
+                    409,
+                    "The attendee list changed after this preview. Start over "
+                    "and review availability again before creating the meeting.",
+                )
 
         action = create_execution_action(parent["id"], approved_snapshot)
         if not action:

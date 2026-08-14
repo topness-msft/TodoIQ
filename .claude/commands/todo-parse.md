@@ -36,15 +36,16 @@ For coaching-only tasks, **skip Step 3** but first do **Step 2c** (incremental n
 
 ## Step 2c: Incremental name resolution for coaching-only re-parse
 
-Before regenerating coaching, scan the current `title`, `description` and `user_notes` for person names that are NOT already in `key_people`. To detect new names:
+Before regenerating coaching, resolve both name-only entries already in `key_people` and names in the current `title`, `description` and `user_notes` that are NOT already in `key_people`:
 
-1. Parse existing `key_people` JSON to get a set of already-resolved names (including alternatives).
-2. Scan `title`, `description` and `user_notes` for capitalized multi-word tokens that look like person names (e.g. "Alex Kim", "Sarah") that aren't in the resolved set.
-3. For each new name found, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role."
-4. Append newly resolved people to the existing `key_people` array (don't replace existing entries).
-5. Update the `key_people` column before proceeding to Step 3b.
+1. Parse existing `key_people` JSON. Treat every entry without a non-empty `email` as unresolved, even if its name is already present.
+2. For each unresolved entry, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Replace that entry with the best match as the primary person and the other matches in `alternatives`. Preserve the typed name as an alternative when it differs from the primary match. Keep `unresolved: true` on the primary person even after adding its email; directory resolution proposes candidates, but only the user's explicit choice in the alternate-name dropdown confirms the identity.
+3. Build the already-resolved name set from the updated primary people and their alternatives.
+4. Scan `title`, `description` and `user_notes` for capitalized multi-word tokens that look like person names (e.g. "Alex Kim", "Sarah") that aren't in the resolved set.
+5. Resolve each new name with the same WorkIQ query and append its best match plus alternatives to the existing array with `unresolved: true`. Every WorkIQ-derived candidate requires an explicit dropdown choice; the top search result is never implicit confirmation.
+6. Update the `key_people` column before proceeding to Step 3b.
 
-This is additive — existing resolved people are preserved, and new names get resolved so coaching text can reference them properly with inline pills.
+Existing email-backed people without an `unresolved` marker must be preserved unchanged. Name-only people are upgraded in place so the existing alternate-name dropdown becomes the required explicit identity choice before scheduling.
 
 ## Step 3: Full parse — reason about the raw_input
 
@@ -59,15 +60,16 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   - 4 = low importance
   - 5 = information/FYI/not directly actionable by me
 - **due_date**: ISO date (YYYY-MM-DD) resolved from any time references. "Next Wednesday" → calculate from today. "End of week" → Friday. "Tomorrow" → tomorrow. null if none implied.
-- **key_people**: A JSON array of resolved people. For each name mentioned, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Pick the best match and store alternatives. Format:
+- **key_people**: A JSON array of directory-matched people. For each name mentioned, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Pick the best match and store alternatives, but mark every WorkIQ-derived primary with `unresolved: true` until the user explicitly selects it in the alternate-name dropdown. Format:
   ```json
   [{"name": "Alex Kim", "email": "alex.kim@contoso.com", "role": "PM",
+    "unresolved": true,
     "alternatives": [
       {"name": "John Smith", "email": "john.smith@contoso.com", "role": "Engineer"},
       {"name": "John Adams", "email": "john.adams@contoso.com", "role": "Designer"}
     ]}]
   ```
-  Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": []}]`.
+  Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": [], "unresolved": true}]`.
 - **OOO check** (full parse only, not coaching-only re-parse): After resolving key_people, check if any key person is currently out of office. For the **first** (primary) person in key_people, call `ask_work_iq` with: "Check [full name]'s current presence and availability status. Are they showing as Out of Office in Teams or Outlook? Do they have an OOO status, automatic reply, or Out of Office presence set? Also check if I've received any recent automatic reply or OOO email from them. If they are OOO, when are they returning?" If they ARE out of office, set `waiting_activity` to: `{"status": "out_of_office", "return_date": "YYYY-MM-DD", "summary": "[OOO details]", "checked_at": "[now]"}` (use null for return_date if unknown). If they are NOT out of office, leave `waiting_activity` as null. This ensures the OOO badge shows immediately on the dashboard.
 - **source_type**: Do NOT change this field. Tasks entered via the dashboard are always 'manual'. Tasks created by /todo-refresh already have the correct source_type set from WorkIQ. Leave the existing value as-is.
 - **related_meeting**: If a meeting is mentioned, describe it. Use WorkIQ if helpful: call `ask_work_iq` with "What meetings do I have related to [topic]?" **Important:** After resolving people in the key_people step, always use their full resolved names (e.g. "Jane Doe" not "Jane") in all subsequent WorkIQ queries for more precise results.
