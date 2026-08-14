@@ -47,6 +47,15 @@ class TestDashboardLoads:
         assert page.evaluate(
             "() => document.querySelector('.riveter-logo').naturalWidth"
         ) > 0
+        brand_tagline = page.get_by_test_id('brand-tagline')
+        expect(brand_tagline).to_be_visible()
+        expect(brand_tagline).to_contain_text('Adding muscle to the fight')
+        brand_link = brand_tagline.locator('a')
+        expect(brand_link).to_have_attribute('href', 'https://aka.ms/riveter')
+        expect(brand_link).to_have_attribute('target', '_blank')
+        expect(brand_link).to_have_attribute('rel', 'noopener noreferrer')
+        header_box = page.locator('.top-bar').bounding_box()
+        assert header_box and header_box['height'] <= 76
         _screenshot(page, '01-dashboard-empty')
 
     def test_input_bar_visible(self, page: Page, base_url):
@@ -72,9 +81,11 @@ class TestDashboardLoads:
         page.set_viewport_size({'width': 375, 'height': 720})
         page.goto(base_url + '/')
         logo_box = page.locator('.riveter-logo').bounding_box()
+        tagline_box = page.get_by_test_id('brand-tagline').bounding_box()
         input_box = page.locator('.input-bar').bounding_box()
-        assert logo_box and input_box
-        assert input_box['y'] >= logo_box['y'] + logo_box['height'] - 2
+        assert logo_box and tagline_box and input_box
+        assert tagline_box['y'] >= logo_box['y'] + logo_box['height'] - 2
+        assert input_box['y'] >= tagline_box['y'] + tagline_box['height'] - 2
         assert page.evaluate(
             '() => document.documentElement.scrollWidth'
             ' <= document.documentElement.clientWidth'

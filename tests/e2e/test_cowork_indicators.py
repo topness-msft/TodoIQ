@@ -27,6 +27,76 @@ def _delete_task(page: Page, base_url: str, task_id: int) -> None:
 
 
 class TestCoworkIndicators:
+    def test_detail_state_omits_obsolete_parse_indicator(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            for status in ("unparsed", "queued", "parsing", "parsed", "error"):
+                page.evaluate(
+                    f"""
+                    const task = tasks.find(item => item.id === {task_id});
+                    task.parse_status = '{status}';
+                    selectedTaskId = {task_id};
+                    renderDetailPane(task);
+                    """
+                )
+                expect(page.locator(".detail-meta")).to_be_visible()
+                expect(
+                    page.locator(".detail-meta .parse-status-badge")
+                ).to_have_count(0)
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_running_card_omits_read_only_header_badge(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
+                _cwActions[{task_id}] = {{
+                    id: 1,
+                    task_id: {task_id},
+                    state: 'previewing',
+                    finding: '',
+                    draft: '',
+                    destination_kind: 'none'
+                }};
+                selectedTaskId = {task_id};
+                renderDetailPane(task);
+                """
+            )
+            card = page.locator(".cw-card.is-running")
+            expect(card).to_be_visible()
+            expect(card.locator(".cw-head .cw-badge")).to_have_count(0)
+            expect(card.locator(".cw-foot-note")).to_contain_text(
+                "read-only preview"
+            )
+            expect(card.locator(".cw-foot-note")).to_contain_text(
+                "nothing is sent from here"
+            )
+            expect(card.get_by_test_id("cw-stop")).to_be_visible()
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "running-card-no-header-badge.png"
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_dashboard_uses_bare_cowork_icon_for_completed_enrichment(
         self, page: Page, base_url
     ):
@@ -85,12 +155,7 @@ class TestCoworkIndicators:
             ) == "none"
             box = row.locator(".cw-status-unread").bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
-            parsed_box = row.locator(".parse-icon").bounding_box()
-            assert parsed_box
-            assert abs(
-                (box["y"] + box["height"] / 2)
-                - (parsed_box["y"] + parsed_box["height"] / 2)
-            ) <= 1
+            expect(row.locator(".parse-icon")).to_have_count(0)
             page.screenshot(
                 path=os.path.join(SCREENSHOTS_DIR, "dashboard-unread-light.png"),
                 full_page=True,

@@ -22,6 +22,7 @@ class TestRiveterVisuals:
     def test_dashboard_branding_desktop_and_mobile(self, page: Page, base_url):
         page.goto(base_url + "/")
         expect(page).to_have_title("Riveter")
+        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
         _capture(page, "dashboard-desktop-light")
 
         page.evaluate(
@@ -29,11 +30,17 @@ class TestRiveterVisuals:
         )
         expect(page.get_by_test_id("riveter-logo-dark")).to_be_visible()
         expect(page.get_by_test_id("riveter-logo-light")).to_be_hidden()
+        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
         _capture(page, "dashboard-desktop-dark")
 
         page.set_viewport_size({"width": 375, "height": 720})
         page.goto(base_url + "/")
         expect(page.get_by_test_id("riveter-logo-light")).to_be_visible()
+        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
+        assert page.evaluate(
+            "() => document.documentElement.scrollWidth"
+            " <= document.documentElement.clientWidth"
+        )
         _capture(page, "dashboard-mobile-light")
 
         for filename in ("riveter-light.png", "riveter-dark.png"):

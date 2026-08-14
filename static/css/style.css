@@ -131,12 +131,22 @@ html, body {
     flex: 0 0 388px;
 }
 
+.brand-lockup {
+    display: grid;
+    grid-template-rows: 51px 24px;
+    width: 300px;
+    height: 75px;
+    overflow: visible;
+}
+
 .riveter-logo,
 .riveter-logo-dark {
     width: 300px;
-    height: 75px;
+    height: 51px;
     object-fit: contain;
     object-position: left center;
+    grid-column: 1;
+    grid-row: 1;
 }
 
 .riveter-logo-dark {
@@ -149,6 +159,36 @@ html, body {
 
 [data-theme="dark"] .riveter-logo-dark {
     display: block;
+}
+
+.brand-tagline {
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start;
+    margin-left: 110px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: 0.025em;
+    white-space: nowrap;
+}
+
+.brand-tagline span,
+.brand-tagline a {
+    display: block;
+}
+
+.brand-tagline a {
+    width: fit-content;
+    color: var(--accent);
+    font-weight: 650;
+    text-decoration: none;
+}
+
+.brand-tagline a:hover,
+.brand-tagline a:focus-visible {
+    text-decoration: underline;
 }
 
 .app-title {
@@ -2689,10 +2729,21 @@ html, body {
         order: 1;
     }
 
-    .riveter-logo {
-        width: min(220px, 58vw);
-        height: auto;
-        max-height: 68px;
+    .brand-lockup {
+        grid-template-rows: 43px 24px;
+        width: min(240px, 64vw);
+        height: 67px;
+    }
+
+    .riveter-logo,
+    .riveter-logo-dark {
+        width: min(240px, 64vw);
+        height: 43px;
+    }
+
+    .brand-tagline {
+        margin-left: min(88px, 23vw);
+        font-size: 9px;
     }
 
     .top-bar-right {

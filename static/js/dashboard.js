@@ -772,7 +772,6 @@ function renderDetailPane(task) {
         + '<span class="meta-item">' + prioritySelector(task) + '</span>'
         + '<span class="meta-item">' + dueDateField(task) + '</span>'
         + '<span class="meta-item">' + actionTypeSelector(task) + '</span>'
-        + '<span class="meta-item">' + parseStatusBadge(task.parse_status, task.id) + '</span>'
         + (function() {
             var sa = parseWaitingActivity(task);
             if (sa && sa.status === 'out_of_office') {
@@ -4008,7 +4007,7 @@ function renderCoworkCard(task) {
                 '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>',
                 a);
         }
-        return cwShell('is-running', 'read-only', task,
+        return cwShell('is-running', '', task,
             cwModeSwitch(task.id, a, true)
             + cwIntentBlock(task, false)
             + cwTimeline(a, prog)

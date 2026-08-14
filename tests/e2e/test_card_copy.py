@@ -33,7 +33,14 @@ def _delete(page: Page, base_url: str, task_id: int) -> None:
 def _card_text(page: Page, base_url: str, task_id: int) -> str:
     page.goto(base_url + "/")
     page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
-    page.evaluate(f"selectTask({task_id})")
+    page.evaluate(
+        f"""
+        const task = tasks.find(t => t.id === {task_id});
+        task.parse_status = 'parsed';
+        selectedTaskId = {task_id};
+        renderDetailPane(task);
+        """
+    )
     page.wait_for_selector(".cw-card")
     return page.locator(".cw-card").first.inner_text()
 
