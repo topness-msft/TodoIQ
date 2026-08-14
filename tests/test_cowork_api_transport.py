@@ -444,6 +444,106 @@ class TestExecutionToolApproval(unittest.TestCase):
         self.assertIsNone(approval["json"]["edited_input"])
 
 
+class TestCalendarToolApproval(unittest.TestCase):
+    def setUp(self):
+        self.conversation_id = "tenant:user:conversation"
+        self.event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-19T11:05:00",
+            "end": "2026-08-19T11:30:00",
+            "time_zone": "America/New_York",
+            "attendees": ["rima.reyes@microsoft.com"],
+            "is_online_meeting": True,
+            "content_type": "html",
+            "body": "Quick 1:1 to sync up.",
+        }
+        self.ta = {
+            "aid": "mcp-calendar:jrpc:5",
+            "tn": "CreateEvent",
+            "sn": "outlook_calendar",
+            "params": {
+                **self.event,
+                "body": (
+                    "Quick 1:1 to sync up.<!-- aether-footer -->"
+                    '<span style="font-size:11px;color:#666;">Sent by '
+                    '<a href="https://aka.ms/cowork?cw_source=calendar&amp;'
+                    'cw_tool=CreateEvent">Copilot Cowork</a></span>'
+                ),
+            },
+        }
+
+    def test_exact_calendar_shape_builds_approval(self):
+        approval = cr._execution_tool_approval(
+            self.ta,
+            "calendar",
+            {"destination_ref": "rima.reyes@microsoft.com"},
+            self.conversation_id,
+            approved_calendar_event=self.event,
+        )
+        self.assertEqual(approval["approval_id"], "mcp-calendar:jrpc:5")
+        self.assertEqual(approval["server_name"], "outlook_calendar")
+        self.assertEqual(approval["tool_name"], "CreateEvent")
+        self.assertTrue(approval["approved"])
+
+    def test_rejects_calendar_request_drift(self):
+        cases = [
+            {**self.ta, "aid": ""},
+            {**self.ta, "sn": "m365_teams"},
+            {**self.ta, "tn": "UpdateEvent"},
+            {**self.ta, "params": {**self.ta["params"], "subject": "Changed"}},
+            {**self.ta, "params": {**self.ta["params"], "start": "2026-08-20T11:05:00"}},
+            {
+                **self.ta,
+                "params": {
+                    **self.ta["params"],
+                    "attendees": ["attacker@example.com"],
+                },
+            },
+            {
+                **self.ta,
+                "params": {
+                    **self.ta["params"],
+                    "attendees": [
+                        "rima.reyes@microsoft.com",
+                        "attacker@example.com",
+                    ],
+                },
+            },
+            {**self.ta, "params": {**self.ta["params"], "body": "Changed"}},
+            {
+                **self.ta,
+                "params": {
+                    **self.ta["params"],
+                    "body": self.event["body"],
+                },
+            },
+        ]
+        for ta in cases:
+            with self.subTest(ta=ta):
+                self.assertIsNone(
+                    cr._execution_tool_approval(
+                        ta,
+                        "calendar",
+                        {"destination_ref": "rima.reyes@microsoft.com"},
+                        self.conversation_id,
+                        approved_calendar_event=self.event,
+                    )
+                )
+
+    def test_browser_snapshot_cannot_supply_calendar_event(self):
+        self.assertIsNone(
+            cr._execution_tool_approval(
+                self.ta,
+                "calendar",
+                {
+                    "destination_ref": "rima.reyes@microsoft.com",
+                    "calendar_event": self.event,
+                },
+                self.conversation_id,
+            )
+        )
+
+
 class TestPayloadEquivalence(unittest.TestCase):
     """The API result must be indistinguishable from the CLI's, downstream."""
 

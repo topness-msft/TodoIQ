@@ -37,6 +37,7 @@ from ..models import (
 from ..services.cowork_runner import (
     AlreadyRunning,
     CoworkAnswerRejected,
+    _calendar_event_matches,
     _looks_like_write,
     answer_interaction,
     cancel_run,
@@ -518,9 +519,23 @@ def _finalise(action: dict) -> dict:
 
     trace = parsed.get("tool_trace")
     if executing:
+        approved_calendar_event = None
+        if action.get("action_type") == "schedule-meeting":
+            parent = next(
+                (
+                    item for item in list_task_actions(action["task_id"])
+                    if item["id"] == action.get("parent_action_id")
+                ),
+                None,
+            )
+            approved_calendar_event = (
+                _preview_calendar_event(parent) if parent else None
+            )
         confirmed = (
             bool(parsed.get("delivery_confirmed"))
-            and _delivery_evidence_matches(action, parsed)
+            and _delivery_evidence_matches(
+                action, parsed, approved_calendar_event
+            )
             and not failed
         )
         if not confirmed:
@@ -675,7 +690,54 @@ def _tool_content_values(value) -> list[str]:
     return []
 
 
-def _delivery_evidence_matches(action: dict, parsed: dict) -> bool:
+def _preview_calendar_event(action: dict) -> dict | None:
+    """Read the one structured CreateEvent proposal stored with the preview."""
+    trace = action.get("tool_trace")
+    if isinstance(trace, str):
+        try:
+            trace = json.loads(trace)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(trace, list):
+        return None
+    matches = [
+        item for item in trace
+        if re.sub(
+            r"[^a-z0-9]", "", str(item.get("tool_name") or "").lower()
+        ).endswith("outlookcalendarcreateevent")
+    ]
+    if len(matches) != 1:
+        return None
+    event = matches[0].get("input")
+    if isinstance(event, str):
+        try:
+            event = json.loads(event)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(event, dict):
+        return None
+    required = {
+        "subject", "start", "end", "time_zone", "attendees", "content_type", "body",
+    }
+    if not required.issubset(event) or not isinstance(event["attendees"], list):
+        return None
+    approved = {key: event[key] for key in required}
+    if "is_online_meeting" in event:
+        approved["is_online_meeting"] = event["is_online_meeting"]
+    else:
+        draft = final_action_draft(action).replace("*", "")
+        if re.search(r"Teams meeting:\s*included", draft, re.I):
+            approved["is_online_meeting"] = True
+        elif re.search(r"Teams meeting:\s*(not included|no)", draft, re.I):
+            approved["is_online_meeting"] = False
+        else:
+            return None
+    return approved
+
+
+def _delivery_evidence_matches(
+    action: dict, parsed: dict, approved_calendar_event=None
+) -> bool:
     successful_writes = [
         tool
         for tool in (parsed.get("tools") or [])
@@ -686,6 +748,10 @@ def _delivery_evidence_matches(action: dict, parsed: dict) -> bool:
     tool = successful_writes[0]
     if not _delivery_tool_matches_action(action, tool.get("name")):
         return False
+    if action.get("action_type") == "schedule-meeting":
+        return _calendar_event_matches(
+            tool.get("input"), approved_calendar_event
+        )
     destination_values = _tool_input_values_for_keys(
         tool.get("input"),
         frozenset({
@@ -708,10 +774,6 @@ def _delivery_evidence_matches(action: dict, parsed: dict) -> bool:
     if not destination or normalized_destinations != [destination]:
         return False
     draft = (action.get("draft_edited") or action.get("draft") or "").strip()
-    if action.get("action_type") == "schedule-meeting":
-        # The card does not yet approve structured subject/time/location fields.
-        # The write may run, but cannot be called confirmed from body evidence.
-        return False
     content_values = {
         value.strip() for value in _tool_content_values(tool.get("input"))
     }
@@ -1060,6 +1122,15 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                     "The attendee list changed after this preview. Start over "
                     "and review availability again before creating the meeting.",
                 )
+            approved_calendar_event = _preview_calendar_event(parent)
+            if not approved_calendar_event:
+                return self._fail(
+                    409,
+                    "This meeting preview does not contain one complete calendar "
+                    "event to approve. Start over and review a fresh preview.",
+                )
+        else:
+            approved_calendar_event = None
 
         action = create_execution_action(parent["id"], approved_snapshot)
         if not action:
@@ -1087,6 +1158,7 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                     else action.get("delivery_channel")
                 ),
                 approved_snapshot=approved_snapshot,
+                approved_calendar_event=approved_calendar_event,
                 log_dir=LOG_DIR_OVERRIDE,
             )
         except Exception as exc:  # noqa: BLE001

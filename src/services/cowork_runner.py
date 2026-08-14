@@ -1940,6 +1940,7 @@ def start_execution(
     *,
     approval_kind=None,
     approved_snapshot=None,
+    approved_calendar_event=None,
     log_dir=None,
 ) -> str:
     """Run one explicitly approved, unbarriered API follow-up turn."""
@@ -1976,6 +1977,7 @@ def start_execution(
                 "is_follow_up": True,
                 "approval_kind": approval_kind,
                 "approved_snapshot": dict(approved_snapshot or {}),
+                "approved_calendar_event": dict(approved_calendar_event or {}),
             },
             daemon=True,
             name=f"cowork-execute-{task_id}",
@@ -2751,13 +2753,85 @@ def _execution_approval_answer(data, approval_kind):
     return interaction["invocation_id"], {"0": matches[0]}
 
 
+_AETHER_FOOTERS = {
+    "teams": (
+        '<span style="font-size:11px;color:#666;">Sent by '
+        '<a href="https://aka.ms/cowork?cw_source=teams&amp;'
+        'cw_tool=PostMessage">Copilot Cowork</a></span>'
+    ),
+    "calendar": (
+        '<span style="font-size:11px;color:#666;">Sent by '
+        '<a href="https://aka.ms/cowork?cw_source=calendar&amp;'
+        'cw_tool=CreateEvent">Copilot Cowork</a></span>'
+    ),
+}
+
+
+def _calendar_event_matches(actual, expected, *, require_footer=False):
+    """Require the exact reviewed CreateEvent payload, allowing only its footer."""
+    if isinstance(actual, str):
+        try:
+            actual = json.loads(actual)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    if set(actual) != set(expected):
+        return False
+
+    actual = dict(actual)
+    expected = dict(expected)
+    raw_body = str(actual.pop("body", ""))
+    expected_body = str(expected.pop("body", ""))
+    proposed, marker, footer = raw_body.partition("<!-- aether-footer -->")
+    if marker:
+        if footer != _AETHER_FOOTERS["calendar"]:
+            return False
+    elif require_footer:
+        return False
+    if proposed != expected_body:
+        return False
+
+    actual_attendees = actual.pop("attendees", None)
+    expected_attendees = expected.pop("attendees", None)
+    if not isinstance(actual_attendees, list) or not isinstance(
+        expected_attendees, list
+    ):
+        return False
+    normalize = lambda values: sorted(str(value).strip().lower() for value in values)
+    return (
+        normalize(actual_attendees) == normalize(expected_attendees)
+        and actual == expected
+    )
+
+
+def _approved_destination_attendees(destination):
+    destination = str(destination or "").strip()
+    if not destination:
+        return []
+    if destination.startswith("["):
+        try:
+            values = json.loads(destination)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(values, list):
+            return []
+        return sorted(str(value).strip().lower() for value in values)
+    return [destination.lower()]
+
+
 def _execution_tool_approval(
-    data, approval_kind, approved_snapshot, conversation_id
+    data,
+    approval_kind,
+    approved_snapshot,
+    conversation_id,
+    *,
+    approved_calendar_event=None,
 ):
-    """Build one approval for the exact Teams action reviewed in Riveter."""
+    """Build one approval for the exact write action reviewed in Riveter."""
     if (
         not isinstance(data, dict)
-        or approval_kind != "teams"
+        or approval_kind not in {"teams", "calendar"}
         or not isinstance(approved_snapshot, dict)
         or not conversation_id
     ):
@@ -2766,6 +2840,28 @@ def _execution_tool_approval(
     server_name = str(data.get("sn") or "").strip()
     tool_name = str(data.get("tn") or "").strip()
     params = data.get("params")
+    if approval_kind == "calendar":
+        expected = approved_calendar_event
+        if (
+            not approval_id
+            or server_name.lower() != "outlook_calendar"
+            or re.sub(r"[^a-z0-9]", "", tool_name.lower()) != "createevent"
+            or not _calendar_event_matches(params, expected, require_footer=True)
+        ):
+            return None
+        destination = _approved_destination_attendees(
+            approved_snapshot.get("destination_ref")
+        )
+        event_attendees = sorted(
+            str(value).strip().lower()
+            for value in expected.get("attendees", [])
+        )
+        if not destination or event_attendees != destination:
+            return None
+        return _tool_approval_payload(
+            data, approval_id, server_name, tool_name, conversation_id
+        )
+
     if (
         not approval_id
         or server_name.lower() != "m365_teams"
@@ -2780,11 +2876,7 @@ def _execution_tool_approval(
 
     raw_body = str(params.get("body") or "")
     proposed, footer_marker, footer = raw_body.partition("<!-- aether-footer -->")
-    expected_footer = (
-        '<span style="font-size:11px;color:#666;">Sent by '
-        '<a href="https://aka.ms/cowork?cw_source=teams&amp;'
-        'cw_tool=PostMessage">Copilot Cowork</a></span>'
-    )
+    expected_footer = _AETHER_FOOTERS["teams"]
     if not footer_marker or footer != expected_footer:
         return None
     allowed_tags = {"<p>", "</p>", "<br>", "<br/>", "<br />"}
@@ -2800,6 +2892,14 @@ def _execution_tool_approval(
     if not approved or proposed != approved:
         return None
 
+    return _tool_approval_payload(
+        data, approval_id, server_name, tool_name, conversation_id
+    )
+
+
+def _tool_approval_payload(
+    data, approval_id, server_name, tool_name, conversation_id
+):
     payload = {
         "always_allow": False,
         "approval_id": approval_id,
@@ -2940,7 +3040,8 @@ def _is_auth_failure(exc) -> bool:
 
 def _collect_api(label, task_id, prompt, config_path, log_dir,
                  conversation_id=None, is_follow_up=None,
-                 approval_kind=None, approved_snapshot=None) -> None:
+                 approval_kind=None, approved_snapshot=None,
+                 approved_calendar_event=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -2974,6 +3075,8 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
             run_kwargs["approval_kind"] = approval_kind
         if approved_snapshot:
             run_kwargs["approved_snapshot"] = approved_snapshot
+        if approved_calendar_event:
+            run_kwargs["approved_calendar_event"] = approved_calendar_event
         call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
@@ -3111,7 +3214,7 @@ def new_conversation_id(_auth=None):
 
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
                      is_follow_up=None, approval_kind=None,
-                     approved_snapshot=None):
+                     approved_snapshot=None, approved_calendar_event=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -3242,6 +3345,7 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         approval_kind,
                         approved_snapshot,
                         conversation_id,
+                        approved_calendar_event=approved_calendar_event,
                     )
                     if not approval:
                         raise RuntimeError(
