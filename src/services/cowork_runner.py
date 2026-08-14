@@ -2767,7 +2767,63 @@ _AETHER_FOOTERS = {
 }
 
 
-def _calendar_event_matches(actual, expected, *, require_footer=False):
+def _reviewed_calendar_body(reviewed_draft, subject):
+    """Reproduce the calendar-card body Cowork sends from the reviewed draft."""
+    lines = [line.strip() for line in str(reviewed_draft or "").splitlines()]
+    title = f"**{subject}**"
+    try:
+        start = lines.index(title)
+    except ValueError:
+        return None
+
+    detail_lines = []
+    agenda_lines = []
+    section = "details"
+    for line in lines[start + 1:]:
+        if not line:
+            continue
+        if line == "**Agenda**":
+            section = "agenda"
+            continue
+        if not line.startswith("- "):
+            break
+        value = line[2:]
+        if section == "details":
+            value = re.sub(
+                r"\s+(?:-|—|\ufffd)\s+calendar shows free at this time$",
+                "",
+                value,
+                flags=re.I,
+            )
+            detail_lines.append(value)
+        else:
+            agenda_lines.append(value)
+    if not detail_lines or not agenda_lines:
+        return None
+
+    def render_line(value):
+        match = re.fullmatch(r"\*\*(.+?)\*\*(.*)", value)
+        if not match:
+            return html.escape(value, quote=False)
+        return (
+            f"<strong>{html.escape(match.group(1), quote=False)}</strong>"
+            f"{html.escape(match.group(2), quote=False)}"
+        )
+
+    card = (
+        f"<p><strong>{html.escape(subject, quote=False)}</strong></p>"
+        "<ul>"
+        + "".join(f"<li>{render_line(line)}</li>" for line in detail_lines)
+        + "</ul><p><strong>Agenda</strong></p><ul>"
+        + "".join(f"<li>{render_line(line)}</li>" for line in agenda_lines)
+        + "</ul>"
+    )
+    return html.escape(card, quote=False) + "<br><br>"
+
+
+def _calendar_event_matches(
+    actual, expected, *, require_footer=False, reviewed_draft=None
+):
     """Require the exact reviewed CreateEvent payload, allowing only its footer."""
     if isinstance(actual, str):
         try:
@@ -2776,11 +2832,15 @@ def _calendar_event_matches(actual, expected, *, require_footer=False):
             return False
     if not isinstance(actual, dict) or not isinstance(expected, dict):
         return False
+    actual = dict(actual)
+    expected = dict(expected)
+    actual_content_type = str(actual.pop("content_type", "html")).strip().lower()
+    expected_content_type = str(expected.pop("content_type", "html")).strip().lower()
+    if actual_content_type != expected_content_type or expected_content_type != "html":
+        return False
     if set(actual) != set(expected):
         return False
 
-    actual = dict(actual)
-    expected = dict(expected)
     raw_body = str(actual.pop("body", ""))
     expected_body = str(expected.pop("body", ""))
     proposed, marker, footer = raw_body.partition("<!-- aether-footer -->")
@@ -2789,7 +2849,13 @@ def _calendar_event_matches(actual, expected, *, require_footer=False):
             return False
     elif require_footer:
         return False
-    if proposed != expected_body:
+    reviewed_body = _reviewed_calendar_body(
+        reviewed_draft, str(expected.get("subject") or "")
+    )
+    if reviewed_draft is not None:
+        if reviewed_body is None or proposed != reviewed_body:
+            return False
+    elif proposed != expected_body:
         return False
 
     actual_attendees = actual.pop("attendees", None)
@@ -2846,7 +2912,12 @@ def _execution_tool_approval(
             not approval_id
             or server_name.lower() != "outlook_calendar"
             or re.sub(r"[^a-z0-9]", "", tool_name.lower()) != "createevent"
-            or not _calendar_event_matches(params, expected, require_footer=True)
+            or not _calendar_event_matches(
+                params,
+                expected,
+                require_footer=True,
+                reviewed_draft=approved_snapshot.get("draft"),
+            )
         ):
             return None
         destination = _approved_destination_attendees(

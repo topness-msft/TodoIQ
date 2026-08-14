@@ -447,10 +447,23 @@ class TestExecutionToolApproval(unittest.TestCase):
 class TestCalendarToolApproval(unittest.TestCase):
     def setUp(self):
         self.conversation_id = "tenant:user:conversation"
+        self.reviewed_draft = (
+            "Here's the invitation, ready to go - nothing has been sent yet.\n\n"
+            "**Phil / Rima 1:1**\n"
+            "- **When:** Monday, August 17, 3:05-3:30 PM ET (25 min)\n"
+            "- **Attendee:** Rima Reyes - calendar shows free at this time\n"
+            "- **Teams meeting:** included\n\n"
+            "**Agenda**\n"
+            "- Current priorities and where things stand\n"
+            "- Blockers or support needed\n"
+            "- Upcoming milestones and next steps\n"
+            "- Open floor - anything Rima wants to add\n\n"
+            "Just say the word and I'll send it."
+        )
         self.event = {
             "subject": "Phil / Rima 1:1",
-            "start": "2026-08-19T11:05:00",
-            "end": "2026-08-19T11:30:00",
+            "start": "2026-08-17T15:05:00",
+            "end": "2026-08-17T15:30:00",
             "time_zone": "America/New_York",
             "attendees": ["rima.reyes@microsoft.com"],
             "is_online_meeting": True,
@@ -462,21 +475,43 @@ class TestCalendarToolApproval(unittest.TestCase):
             "tn": "CreateEvent",
             "sn": "outlook_calendar",
             "params": {
-                **self.event,
+                **{
+                    key: value
+                    for key, value in self.event.items()
+                    if key not in {"body", "content_type"}
+                },
                 "body": (
-                    "Quick 1:1 to sync up.<!-- aether-footer -->"
+                    "&lt;p&gt;&lt;strong&gt;Phil / Rima 1:1&lt;/strong&gt;&lt;/p&gt;"
+                    "&lt;ul&gt;"
+                    "&lt;li&gt;&lt;strong&gt;When:&lt;/strong&gt; Monday, August 17, "
+                    "3:05-3:30 PM ET (25 min)&lt;/li&gt;"
+                    "&lt;li&gt;&lt;strong&gt;Attendee:&lt;/strong&gt; Rima Reyes&lt;/li&gt;"
+                    "&lt;li&gt;&lt;strong&gt;Teams meeting:&lt;/strong&gt; included&lt;/li&gt;"
+                    "&lt;/ul&gt;"
+                    "&lt;p&gt;&lt;strong&gt;Agenda&lt;/strong&gt;&lt;/p&gt;"
+                    "&lt;ul&gt;"
+                    "&lt;li&gt;Current priorities and where things stand&lt;/li&gt;"
+                    "&lt;li&gt;Blockers or support needed&lt;/li&gt;"
+                    "&lt;li&gt;Upcoming milestones and next steps&lt;/li&gt;"
+                    "&lt;li&gt;Open floor - anything Rima wants to add&lt;/li&gt;"
+                    "&lt;/ul&gt;"
+                    "<br><br><!-- aether-footer -->"
                     '<span style="font-size:11px;color:#666;">Sent by '
                     '<a href="https://aka.ms/cowork?cw_source=calendar&amp;'
                     'cw_tool=CreateEvent">Copilot Cowork</a></span>'
                 ),
             },
         }
+        self.snapshot = {
+            "destination_ref": "rima.reyes@microsoft.com",
+            "draft": self.reviewed_draft,
+        }
 
     def test_exact_calendar_shape_builds_approval(self):
         approval = cr._execution_tool_approval(
             self.ta,
             "calendar",
-            {"destination_ref": "rima.reyes@microsoft.com"},
+            self.snapshot,
             self.conversation_id,
             approved_calendar_event=self.event,
         )
@@ -524,11 +559,72 @@ class TestCalendarToolApproval(unittest.TestCase):
                     cr._execution_tool_approval(
                         ta,
                         "calendar",
-                        {"destination_ref": "rima.reyes@microsoft.com"},
+                        self.snapshot,
                         self.conversation_id,
                         approved_calendar_event=self.event,
                     )
                 )
+
+    def test_rejects_changed_reviewed_calendar_body(self):
+        ta = json.loads(json.dumps(self.ta))
+        ta["params"]["body"] = ta["params"]["body"].replace(
+            "Current priorities and where things stand",
+            "Send the confidential budget",
+        )
+        self.assertIsNone(
+            cr._execution_tool_approval(
+                ta,
+                "calendar",
+                self.snapshot,
+                self.conversation_id,
+                approved_calendar_event=self.event,
+            )
+        )
+
+    def test_rejects_unknown_calendar_field_or_explicit_non_html_content(self):
+        cases = [
+            {**self.ta["params"], "location": "Secret room"},
+            {**self.ta["params"], "content_type": "text"},
+        ]
+        for params in cases:
+            with self.subTest(params=params):
+                self.assertIsNone(
+                    cr._execution_tool_approval(
+                        {**self.ta, "params": params},
+                        "calendar",
+                        self.snapshot,
+                        self.conversation_id,
+                        approved_calendar_event=self.event,
+                    )
+                )
+
+    def test_rejects_confirmation_body_without_reviewed_draft(self):
+        self.assertIsNone(
+            cr._execution_tool_approval(
+                self.ta,
+                "calendar",
+                {"destination_ref": "rima.reyes@microsoft.com"},
+                self.conversation_id,
+                approved_calendar_event=self.event,
+            )
+        )
+
+    def test_rejects_unreviewed_proposal_body_with_valid_footer(self):
+        ta = json.loads(json.dumps(self.ta))
+        ta["params"]["body"] = (
+            self.event["body"]
+            + "<!-- aether-footer -->"
+            + cr._AETHER_FOOTERS["calendar"]
+        )
+        self.assertIsNone(
+            cr._execution_tool_approval(
+                ta,
+                "calendar",
+                self.snapshot,
+                self.conversation_id,
+                approved_calendar_event=self.event,
+            )
+        )
 
     def test_browser_snapshot_cannot_supply_calendar_event(self):
         self.assertIsNone(
@@ -550,6 +646,9 @@ class TestCalendarToolApproval(unittest.TestCase):
 
         actual = dict(self.event)
         del actual["content_type"]
+        self.assertTrue(cr._calendar_event_matches(actual, self.event))
+
+        actual["content_type"] = "text"
         self.assertFalse(cr._calendar_event_matches(actual, self.event))
 
 

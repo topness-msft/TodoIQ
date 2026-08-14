@@ -754,7 +754,9 @@ def _delivery_evidence_matches(
         return False
     if action.get("action_type") == "schedule-meeting":
         return _calendar_event_matches(
-            tool.get("input"), approved_calendar_event
+            tool.get("input"),
+            approved_calendar_event,
+            reviewed_draft=final_action_draft(action),
         )
     destination_values = _tool_input_values_for_keys(
         tool.get("input"),

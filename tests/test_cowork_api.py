@@ -1281,7 +1281,14 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             "action_type": "schedule-meeting",
             "delivery_channel": "teams",
             "destination_ref": "sarah@microsoft.com",
-            "draft": "Project review on Friday at 10:00",
+            "draft": (
+                "**Project review**\n"
+                "- **When:** Friday, August 21, 10:00-10:25 AM ET (25 min)\n"
+                "- **Attendee:** Sarah\n"
+                "- **Teams meeting:** included\n\n"
+                "**Agenda**\n"
+                "- Review project status"
+            ),
         }
         changed_meeting = {
             "tools": [{
@@ -1302,13 +1309,30 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             "attendees": ["sarah@microsoft.com"],
             "is_online_meeting": True,
             "content_type": "html",
-            "body": meeting_action["draft"],
+            "body": "Review project status",
         }
         matching_meeting = {
             "tools": [{
                 "name": "mcp__outlook_calendar__CreateEvent",
                 "ok": True,
-                "input": dict(approved_event),
+                "input": {
+                    key: value
+                    for key, value in approved_event.items()
+                    if key not in {"body", "content_type"}
+                } | {
+                    "body": (
+                        "&lt;p&gt;&lt;strong&gt;Project review&lt;/strong&gt;&lt;/p&gt;"
+                        "&lt;ul&gt;&lt;li&gt;&lt;strong&gt;When:&lt;/strong&gt; "
+                        "Friday, August 21, 10:00-10:25 AM ET (25 min)&lt;/li&gt;"
+                        "&lt;li&gt;&lt;strong&gt;Attendee:&lt;/strong&gt; Sarah&lt;/li&gt;"
+                        "&lt;li&gt;&lt;strong&gt;Teams meeting:&lt;/strong&gt; "
+                        "included&lt;/li&gt;&lt;/ul&gt;"
+                        "&lt;p&gt;&lt;strong&gt;Agenda&lt;/strong&gt;&lt;/p&gt;"
+                        "&lt;ul&gt;&lt;li&gt;Review project status&lt;/li&gt;&lt;/ul&gt;"
+                        "<br><br><!-- aether-footer -->"
+                        + cr._AETHER_FOOTERS["calendar"]
+                    ),
+                },
             }]
         }
         self.assertTrue(
@@ -1327,13 +1351,11 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             **approved_event,
             "attendees": ["sarah@microsoft.com", "rima@microsoft.com"],
         }
-        multi_attendee_evidence = {
-            "tools": [{
-                "name": "mcp__outlook_calendar__CreateEvent",
-                "ok": True,
-                "input": dict(multi_attendee_event),
-            }]
-        }
+        multi_attendee_evidence = json.loads(json.dumps(matching_meeting))
+        multi_attendee_evidence["tools"][0]["input"]["attendees"] = [
+            "sarah@microsoft.com",
+            "rima@microsoft.com",
+        ]
         self.assertTrue(
             _delivery_evidence_matches(
                 multi_attendee_action,
@@ -1776,6 +1798,14 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self.assertIsNone(data["action"]["error"])
 
     def test_matching_calendar_write_finalises_as_executed(self):
+        reviewed_draft = (
+            "**Phil / Rima 1:1**\n"
+            "- **When:** Wednesday, August 19, 11:05-11:30 AM ET (25 min)\n"
+            "- **Attendee:** Rima Reyes\n"
+            "- **Teams meeting:** included\n\n"
+            "**Agenda**\n"
+            "- Quick 1:1 to sync up"
+        )
         calendar_event = {
             "subject": "Phil / Rima 1:1",
             "start": "2026-08-19T11:05:00",
@@ -1796,10 +1826,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             tid,
             action_type="schedule-meeting",
             draft=None,
-            finding=(
-                "Phil / Rima 1:1\nWhen: Wednesday, August 19, "
-                "11:05-11:30 AM ET\nTeams meeting: included"
-            ),
+            finding=reviewed_draft,
             delivery_channel=None,
             destination_ref="rima@microsoft.com",
             destination_display="Rima Reyes",
@@ -1810,6 +1837,23 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             }]),
         )
         self.assertEqual(self._execute(tid).code, 202)
+        executed_event = {
+            key: value
+            for key, value in calendar_event.items()
+            if key not in {"body", "content_type"}
+        }
+        executed_event["body"] = (
+            "&lt;p&gt;&lt;strong&gt;Phil / Rima 1:1&lt;/strong&gt;&lt;/p&gt;"
+            "&lt;ul&gt;&lt;li&gt;&lt;strong&gt;When:&lt;/strong&gt; Wednesday, "
+            "August 19, 11:05-11:30 AM ET (25 min)&lt;/li&gt;"
+            "&lt;li&gt;&lt;strong&gt;Attendee:&lt;/strong&gt; Rima Reyes&lt;/li&gt;"
+            "&lt;li&gt;&lt;strong&gt;Teams meeting:&lt;/strong&gt; "
+            "included&lt;/li&gt;&lt;/ul&gt;"
+            "&lt;p&gt;&lt;strong&gt;Agenda&lt;/strong&gt;&lt;/p&gt;"
+            "&lt;ul&gt;&lt;li&gt;Quick 1:1 to sync up&lt;/li&gt;&lt;/ul&gt;"
+            "<br><br><!-- aether-footer -->"
+            + cr._AETHER_FOOTERS["calendar"]
+        )
         payload = {
             "terminal_status": "ok",
             "conversation_id": "tenant:user:conversation",
@@ -1824,7 +1868,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
                     "event": "ts",
                     "tid": "calendar-1",
                     "tn": "mcp__outlook_calendar__CreateEvent",
-                    "inp": json.dumps(calendar_event),
+                    "inp": json.dumps(executed_event),
                 },
                 {
                     "event": "tx",
