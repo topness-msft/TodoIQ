@@ -88,6 +88,8 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         self.assertIn("ask_user", self.prompt)
         self.assertIn("three exact available times", self.prompt)
         self.assertIn("CreateEvent", self.prompt)
+        self.assertIn("[avail:", self.prompt)
+        self.assertIn("unknown", self.prompt)
         self.assertLess(len(self.prompt), 1000)
 
     def test_it_does_not_request_a_message_draft(self):

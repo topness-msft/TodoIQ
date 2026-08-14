@@ -3163,6 +3163,57 @@ textarea.cw-draft {
 .cw-choice-redirect-input:focus {
     outline: 2px solid var(--accent); outline-offset: -1px;
 }
+.cw-avail-wrap {
+    max-width: 100%; margin-top: 10px; overflow-x: auto;
+    border: 1px solid var(--border-primary); border-radius: 8px;
+}
+.cw-avail-matrix { min-width: calc(180px + var(--cw-attendees) * 86px); }
+.cw-avail-header, .cw-avail-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 1.5fr) repeat(var(--cw-attendees), minmax(74px, 1fr));
+    align-items: stretch;
+}
+.cw-avail-header {
+    background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);
+}
+.cw-avail-head {
+    padding: 8px 6px; color: var(--text-secondary); font-size: 11px;
+    font-weight: 750; letter-spacing: .06em; text-align: center;
+}
+.cw-avail-row {
+    width: 100%; padding: 0; border: 0; border-bottom: 1px solid var(--border-primary);
+    background: var(--bg-primary); color: var(--text-primary); cursor: pointer;
+    text-align: left;
+}
+.cw-avail-row:last-child { border-bottom: 0; }
+.cw-avail-row:hover { background: var(--bg-tertiary); }
+.cw-avail-row[aria-pressed="true"] {
+    background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent);
+}
+.cw-avail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cw-avail-time {
+    display: flex; align-items: center; padding: 10px 12px; font-size: 12px;
+    font-weight: 650;
+}
+.cw-avail-cell {
+    display: grid; place-items: center; margin: 5px; padding: 5px 6px;
+    border-radius: 999px; font-size: 10px; font-weight: 750;
+}
+.cw-avail-cell[data-status="free"] {
+    background: color-mix(in srgb, var(--success) 16%, transparent);
+    color: var(--success);
+}
+.cw-avail-cell[data-status="tentative"] {
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
+}
+.cw-avail-cell[data-status="busy"] {
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    color: var(--danger);
+}
+.cw-avail-cell[data-status="unknown"] {
+    background: var(--bg-tertiary); color: var(--text-secondary);
+}
 .cw-choice {
     display: inline-flex; align-items: center; gap: 7px; min-height: 34px;
     max-width: 100%; padding: 5px 11px; text-align: left; cursor: pointer;

@@ -216,6 +216,9 @@ def test_choice_question_accepts_a_free_text_redirect(page: Page, base_url):
             const task = tasks.find(t => t.id === taskId);
             task.parse_status = 'parsed';
             task.action_type = 'schedule-meeting';
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
             selectedTaskId = taskId;
             _cwActions[taskId] = {
                 task_id: taskId,
@@ -289,3 +292,188 @@ def test_multi_select_buffer_restores_choices_not_redirect(page: Page, base_url)
     expect(choices.nth(0)).to_have_attribute("aria-pressed", "true")
     expect(choices.nth(1)).to_have_attribute("aria-pressed", "true")
     expect(page.get_by_test_id("cw-answer-redirect")).to_have_value("")
+
+
+def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule the planning review"},
+    )
+    task_id = created.json()["task"]["id"]
+    posted = {}
+
+    def answer_route(route):
+        posted.update(json.loads(route.request.post_data))
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps({
+                "action": {
+                    "task_id": task_id,
+                    "state": "previewing",
+                    "waiting_on_user": False,
+                    "conversation_id": "t:u:matrix",
+                },
+            }),
+        )
+
+    page.route(f"**/api/tasks/{task_id}/cowork/answer", answer_route)
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                {name: 'Greg Howard', email: 'greg.howard@microsoft.com'},
+                {name: 'Sarah Chen', email: 'sarah.chen@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                interaction_request: {
+                    invocation_id: 'matrix-1',
+                    questions: [{
+                        id: '0',
+                        question: 'Which time should I book?',
+                        options: [{
+                            value: 'Mon 10:05',
+                            label: 'Mon Aug 17 · 10:05 AM',
+                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"tentative","sarah.chen@microsoft.com":"busy"}]'
+                        }, {
+                            value: 'Tue 1:05',
+                            label: 'Tue Aug 18 · 1:05 PM',
+                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"free"}]'
+                        }, {
+                            value: 'Wed 3:05',
+                            label: 'Wed Aug 19 · 3:05 PM',
+                            description: '[avail:{"rima.reyes@microsoft.com":"unknown","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"tentative"}]'
+                        }]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"matrix-1"}',
+                conversation_id: 't:u:matrix'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    matrix = page.get_by_test_id("cw-avail-matrix")
+    expect(matrix).to_be_visible()
+    expect(page.get_by_test_id("cw-choice")).to_have_count(0)
+    expect(page.get_by_test_id("cw-avail-col-header")).to_have_count(3)
+    expect(page.get_by_test_id("cw-avail-row")).to_have_count(3)
+    expect(page.get_by_test_id("cw-avail-cell")).to_have_count(9)
+    expect(page.locator('[data-status="free"]')).to_have_count(5)
+    expect(page.locator('[data-status="tentative"]')).to_have_count(2)
+    expect(page.locator('[data-status="busy"]')).to_have_count(1)
+    expect(page.locator('[data-status="unknown"]')).to_have_count(1)
+    expect(page.get_by_test_id("cw-avail-col-header").nth(0)).to_have_text("RR")
+    expect(page.get_by_test_id("cw-avail-cell").nth(0)).to_have_attribute(
+        "aria-label", "Rima Reyes: free"
+    )
+    redirect = page.get_by_test_id("cw-answer-redirect")
+    redirect.fill("Find something later in the day")
+    page.get_by_test_id("cw-avail-row").nth(0).click()
+    expect(redirect).to_have_value("")
+    expect(page.get_by_test_id("cw-avail-row").nth(0)).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.get_by_test_id("cw-avail-row").nth(1).click()
+    expect(page.get_by_test_id("cw-avail-row").nth(0)).to_have_attribute(
+        "aria-pressed", "false"
+    )
+    expect(page.get_by_test_id("cw-avail-row").nth(1)).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-availability-matrix-light.png"),
+        full_page=True,
+    )
+    page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-availability-matrix-dark.png"),
+        full_page=True,
+    )
+    page.get_by_test_id("cw-answer-submit").click()
+    page.wait_for_function("() => !document.querySelector('[data-testid=\"cw-blocked\"]')")
+    assert posted == {
+        "invocation_id": "matrix-1",
+        "answers": {"0": "Tue 1:05"},
+    }
+
+
+def test_invalid_availability_matrix_falls_back_to_time_pills(page: Page, base_url):
+    page.goto(base_url + "/")
+    page.evaluate(
+        """() => {
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            tasks.push({
+                id: 98,
+                action_type: 'schedule-meeting',
+                key_people: JSON.stringify([
+                    {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                    {name: 'Greg Howard', email: 'greg.howard@microsoft.com'}
+                ])
+            });
+            document.body.innerHTML = cwInteractionFields(98, {
+                questions: [{
+                    id: '0',
+                    question: 'Which time?',
+                    options: [{
+                        value: 'A',
+                        label: 'Monday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"free"}]'
+                    }, {
+                        value: 'B',
+                        label: 'Tuesday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free"}]'
+                    }]
+                }]
+            });
+        }"""
+    )
+
+    expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
+    expect(page.get_by_test_id("cw-choice")).to_have_count(2)
+
+    page.evaluate(
+        """() => {
+            const task = tasks.find(item => item.id === 98);
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                {name: 'Greg Howard', email: 'greg.howard@microsoft.com'},
+                {name: 'Sarah Chen'}
+            ]);
+            document.body.innerHTML = cwInteractionFields(98, {
+                questions: [{
+                    id: '0',
+                    question: 'Which time?',
+                    options: [{
+                        value: 'A',
+                        label: 'Monday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free"}]'
+                    }, {
+                        value: 'B',
+                        label: 'Tuesday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"tentative","greg.howard@microsoft.com":"free"}]'
+                    }]
+                }]
+            });
+        }"""
+    )
+
+    expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
+    expect(page.get_by_test_id("cw-choice")).to_have_count(2)

@@ -499,6 +499,9 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
         "and never replace ask_user with a Teams message, email draft, or prose "
         "request. If an invitee's availability is not visible, say so rather than "
         "guessing.",
+        'For each ask_user option description, append [avail:{"attendee@email":'
+        '"free"}] with every selected attendee keyed by email. Use only free, '
+        "tentative, busy, or unknown from calendar data; never guess.",
     ])
     correction = _clean(redirect_text)
     if correction:

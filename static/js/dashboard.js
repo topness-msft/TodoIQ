@@ -4152,6 +4152,7 @@ function cwInteractionFields(taskId, interaction) {
         var value = buffered[id] || '';
         var input;
         if (question.options && question.options.length) {
+            var availability = cwAvailabilityMatrix(taskId, question, value);
             var selectedValues = value.split('\n').filter(Boolean);
             var usesKnownOptions = selectedValues.length > 0
                 && selectedValues.every(function(selectedValue) {
@@ -4159,7 +4160,7 @@ function cwInteractionFields(taskId, interaction) {
                         return option.value === selectedValue;
                     });
                 });
-            input = '<div class="cw-choice-grid" data-testid="cw-answer" '
+            input = (availability || ('<div class="cw-choice-grid" data-testid="cw-answer" '
                 + 'data-cw-answer="' + escapeAttr(id) + '" '
                 + 'data-cw-multi="' + (question.multi_select ? '1' : '0') + '">'
                 + question.options.map(function(option) {
@@ -4175,7 +4176,7 @@ function cwInteractionFields(taskId, interaction) {
                             ? '<small class="sr-only">' + escapeHtml(option.description) + '</small>'
                             : '')
                         + '</span></button>';
-                }).join('') + '</div>'
+                }).join('') + '</div>'))
                 + '<div class="cw-choice-redirect">'
                 + '<label for="cw-redirect-' + taskId + '-' + escapeAttr(id) + '">'
                 + 'Need a different option?</label>'
@@ -4193,6 +4194,111 @@ function cwInteractionFields(taskId, interaction) {
                 + 'oninput="cwBufferAnswer(' + taskId
                 + ', this.getAttribute(\'data-cw-answer\'), this.value)">'
                 + escapeHtml(value) + '</textarea>';
+        }
+
+        function cwSelectedAttendees(taskId) {
+            var task = tasks.find(function(item) { return item.id === taskId; });
+            if (!task) return [];
+            var people = task.key_people || [];
+            if (typeof people === 'string') {
+                try { people = JSON.parse(people); } catch (_err) { return []; }
+            }
+            if (!Array.isArray(people)) return [];
+            var attendees = [];
+            var emails = {};
+            for (var i = 0; i < people.length; i += 1) {
+                var person = people[i];
+                if (!person || typeof person !== 'object') return [];
+                var name = String(person.name || '').trim();
+                var email = String(person.email || '').trim().toLowerCase();
+                if (!name || !email || emails[email]) return [];
+                emails[email] = true;
+                attendees.push({name: name, email: email});
+            }
+            return attendees;
+        }
+
+        function cwParseAvailability(description) {
+            var match = String(description || '').match(/\[avail:(\{[^\]]+\})\]\s*$/);
+            if (!match) return null;
+            var parsed;
+            try { parsed = JSON.parse(match[1]); } catch (_err) { return null; }
+            if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return null;
+            var statuses = {};
+            var allowed = ['free', 'tentative', 'busy', 'unknown'];
+            for (var key in parsed) {
+                if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
+                var email = String(key).trim().toLowerCase();
+                var status = String(parsed[key]).trim().toLowerCase();
+                if (!email || allowed.indexOf(status) === -1) return null;
+                statuses[email] = status;
+            }
+            return statuses;
+        }
+
+        function cwPersonInitials(name) {
+            var parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+            if (!parts.length) return '?';
+            return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : ''))
+                .toUpperCase();
+        }
+
+        function cwAvailabilityMatrix(taskId, question, value) {
+            var attendees = cwSelectedAttendees(taskId);
+            var options = question.options || [];
+            if (attendees.length < 2 || options.length < 2) return '';
+            var expected = attendees.map(function(person) { return person.email; }).sort();
+            var rows = [];
+            for (var i = 0; i < options.length; i += 1) {
+                var statuses = cwParseAvailability(options[i].description);
+                if (!statuses) return '';
+                var actual = Object.keys(statuses).sort();
+                if (actual.length !== expected.length
+                        || actual.some(function(email, index) { return email !== expected[index]; })) {
+                    return '';
+                }
+                var label = String(options[i].label || '').toLowerCase();
+                var values = attendees.map(function(person) { return statuses[person.email]; });
+                if ((/all free|everyone free|both free/.test(label)
+                        && values.some(function(status) { return status !== 'free'; }))
+                        || (/conflict|unavailable/.test(label)
+                        && values.every(function(status) { return status === 'free'; }))) {
+                    return '';
+                }
+                rows.push({option: options[i], statuses: values});
+            }
+            var selected = value.split('\n');
+            var header = '<div class="cw-avail-corner" aria-hidden="true"></div>'
+                + attendees.map(function(person) {
+                    return '<div class="cw-avail-head" role="columnheader" '
+                        + 'data-testid="cw-avail-col-header" title="'
+                        + escapeAttr(person.name) + '">' + escapeHtml(cwPersonInitials(person.name))
+                        + '</div>';
+                }).join('');
+            var body = rows.map(function(row) {
+                var pressed = selected.indexOf(row.option.value) !== -1 ? 'true' : 'false';
+                return '<button type="button" class="cw-avail-row" role="row" '
+                    + 'data-testid="cw-avail-row" data-cw-option="'
+                    + escapeAttr(row.option.value) + '" aria-pressed="' + pressed + '" '
+                    + 'onclick="cwChooseOption(' + taskId + ', this)">'
+                    + '<span class="cw-avail-time" role="rowheader" data-testid="cw-avail-row-label">'
+                    + escapeHtml(row.option.label) + '</span>'
+                    + row.statuses.map(function(status, index) {
+                        var label = status === 'tentative' ? 'Tentative'
+                            : status[0].toUpperCase() + status.slice(1);
+                        return '<span class="cw-avail-cell" role="cell" '
+                            + 'data-testid="cw-avail-cell" data-status="' + status + '" '
+                            + 'aria-label="' + escapeAttr(attendees[index].name + ': ' + status)
+                            + '"><span aria-hidden="true">' + escapeHtml(label) + '</span></span>';
+                    }).join('') + '</button>';
+            }).join('');
+            return '<div class="cw-avail-wrap"><div class="cw-avail-matrix" role="table" '
+                + 'data-testid="cw-avail-matrix" data-cw-answer="'
+                + escapeAttr(String(question.id || ''))
+                + '" data-cw-multi="' + (question.multi_select ? '1' : '0') + '" '
+                + 'style="--cw-attendees:' + attendees.length + '">'
+                + '<div class="cw-avail-header" role="row">' + header + '</div>'
+                + body + '</div></div>';
         }
         var questionImage = cwSafeImageUrl(question.image_url);
         var questionVisual = questionImage
@@ -4239,6 +4345,7 @@ function cwSafeImageUrl(value) {
 function cwChooseOption(taskId, button) {
     var field = button.closest('[data-cw-answer]');
     if (!field) return;
+    var question = field.closest('.cw-blocked-question');
     var multi = field.getAttribute('data-cw-multi') === '1';
     if (!multi) {
         field.querySelectorAll('[data-cw-option]').forEach(function(choice) {
@@ -4247,7 +4354,7 @@ function cwChooseOption(taskId, button) {
     }
     var wasSelected = button.getAttribute('aria-pressed') === 'true';
     button.setAttribute('aria-pressed', String(multi ? !wasSelected : true));
-    var redirect = field.parentElement.querySelector('[data-cw-redirect="'
+    var redirect = question && question.querySelector('[data-cw-redirect="'
         + field.getAttribute('data-cw-answer') + '"]');
     if (redirect) redirect.value = '';
     cwBufferAnswer(
@@ -4267,7 +4374,7 @@ function cwRedirectAnswer(taskId, input) {
 }
 
 function cwAnswerValue(field) {
-    if (field.matches('.cw-choice-grid')) {
+    if (field.matches('.cw-choice-grid, .cw-avail-matrix')) {
         return Array.from(field.querySelectorAll('[aria-pressed="true"]')).map(
             function(option) { return option.getAttribute('data-cw-option'); }
         ).join('\n');
@@ -4281,7 +4388,8 @@ function cwSendAnswer(taskId) {
     var fields = document.querySelectorAll('[data-cw-answer]');
     var blocked = document.querySelector('[data-testid="cw-blocked"]');
     fields.forEach(function(field) {
-        var redirect = field.parentElement.querySelector('[data-cw-redirect="'
+        var question = field.closest('.cw-blocked-question');
+        var redirect = question && question.querySelector('[data-cw-redirect="'
             + field.getAttribute('data-cw-answer') + '"]');
         var value = redirect && redirect.value.trim()
             ? redirect.value.trim() : cwAnswerValue(field).trim();
