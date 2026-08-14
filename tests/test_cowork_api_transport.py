@@ -543,6 +543,15 @@ class TestCalendarToolApproval(unittest.TestCase):
             )
         )
 
+    def test_calendar_matcher_keeps_defaulted_fields_strict(self):
+        actual = dict(self.event)
+        actual["organizer"] = "someone@example.com"
+        self.assertFalse(cr._calendar_event_matches(actual, self.event))
+
+        actual = dict(self.event)
+        del actual["content_type"]
+        self.assertFalse(cr._calendar_event_matches(actual, self.event))
+
 
 class TestPayloadEquivalence(unittest.TestCase):
     """The API result must be indistinguishable from the CLI's, downstream."""

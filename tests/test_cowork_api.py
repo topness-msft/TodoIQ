@@ -1523,6 +1523,95 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             {**calendar_event, "is_online_meeting": True},
         )
 
+    def test_calendar_execution_defaults_omitted_optional_preview_fields(self):
+        calendar_tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
+        escaped_body = (
+            "&lt;p&gt;Quick 1:1 to sync up.&lt;/p&gt;"
+            "&lt;ul&gt;&lt;li&gt;Current priorities&lt;/li&gt;&lt;/ul&gt;"
+        )
+        calendar_event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-17T15:05:00",
+            "end": "2026-08-17T15:30:00",
+            "time_zone": "America/New_York",
+            "attendees": ["rima@microsoft.com"],
+            "body": escaped_body,
+        }
+        self._ready_action(
+            calendar_tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            finding=(
+                "Phil / Rima 1:1\nWhen: Monday, August 17, "
+                "3:05-3:30 PM ET\n**Teams meeting:** included"
+            ),
+            draft=None,
+            tool_trace=json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": json.dumps(calendar_event),
+            }]),
+        )
+
+        response = self._execute(calendar_tid)
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.started[-1][3]["approved_calendar_event"],
+            {
+                **calendar_event,
+                "content_type": "html",
+                "is_online_meeting": True,
+            },
+        )
+
+    def test_calendar_execution_accepts_where_teams_meeting_marker(self):
+        calendar_tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
+        calendar_event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-17T15:05:00",
+            "end": "2026-08-17T15:30:00",
+            "time_zone": "America/New_York",
+            "attendees": ["rima@microsoft.com"],
+            "body": "&lt;p&gt;Quick 1:1 to sync up.&lt;/p&gt;",
+        }
+        self._ready_action(
+            calendar_tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            finding=(
+                "Phil / Rima 1:1\nWhen: Monday, August 17, "
+                "3:05-3:30 PM ET\n**Where:** Teams meeting"
+            ),
+            draft=None,
+            tool_trace=json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": json.dumps(calendar_event),
+            }]),
+        )
+
+        response = self._execute(calendar_tid)
+
+        self.assertEqual(response.code, 202)
+        self.assertTrue(
+            self.started[-1][3]["approved_calendar_event"]["is_online_meeting"]
+        )
+
     def test_calendar_execution_rejects_missing_structured_preview(self):
         tid = self.make_task(
             action_type="schedule-meeting",

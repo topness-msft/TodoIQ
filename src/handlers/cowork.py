@@ -717,16 +717,20 @@ def _preview_calendar_event(action: dict) -> dict | None:
     if not isinstance(event, dict):
         return None
     required = {
-        "subject", "start", "end", "time_zone", "attendees", "content_type", "body",
+        "subject", "start", "end", "time_zone", "attendees", "body",
     }
     if not required.issubset(event) or not isinstance(event["attendees"], list):
         return None
     approved = {key: event[key] for key in required}
+    approved["content_type"] = event.get("content_type") or "html"
     if "is_online_meeting" in event:
         approved["is_online_meeting"] = event["is_online_meeting"]
     else:
         draft = final_action_draft(action).replace("*", "")
-        if re.search(r"Teams meeting:\s*included", draft, re.I):
+        if (
+            re.search(r"Teams meeting:\s*included", draft, re.I)
+            or re.search(r"Where:\s*Teams meeting\b", draft, re.I)
+        ):
             approved["is_online_meeting"] = True
         elif re.search(r"Teams meeting:\s*(not included|no)", draft, re.I):
             approved["is_online_meeting"] = False
