@@ -352,7 +352,7 @@ class TestCoworkIndicators:
         finally:
             _delete_task(page, base_url, task_id)
 
-    def test_dashboard_hides_cowork_workspace_until_parse_finishes(
+    def test_dashboard_keeps_cowork_workspace_while_parse_finishes(
         self, page: Page, base_url
     ):
         task_id = _seed_task(page, base_url)
@@ -370,11 +370,14 @@ class TestCoworkIndicators:
                 renderDetailPane(task);
                 """
             )
-            expect(page.locator(".detail-workspace")).to_have_count(0)
-            expect(page.locator(".cw-card")).to_have_count(0)
+            expect(page.locator(".detail-workspace .cw-card")).to_be_visible()
+            expect(page.locator(".cw-card")).to_contain_text(
+                "Refreshing task context"
+            )
+            expect(page.locator(".cw-card button")).to_have_count(0)
             page.screenshot(
                 path=os.path.join(
-                    SCREENSHOTS_DIR, "cowork-hidden-while-parsing.png"
+                    SCREENSHOTS_DIR, "cowork-visible-while-parsing.png"
                 ),
                 full_page=True,
             )

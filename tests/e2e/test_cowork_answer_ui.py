@@ -641,6 +641,219 @@ def test_unresolved_person_pill_explains_identity_resolution(page: Page, base_ur
         page.request.delete(f"{base_url}/api/tasks/{task_id}")
 
 
+def test_cowork_pane_waits_for_identity_confirmation_during_reparse(
+    page: Page, base_url
+):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                clearInterval(parsePollerInterval);
+                parsePollerInterval = null;
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'queued';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Henry Jammes',
+                    email: 'Henry.Jammes@microsoft.com',
+                    role: 'Principal PM Manager',
+                    unresolved: true,
+                    alternatives: [{
+                        name: 'James Henry',
+                        email: 'jameshenry@microsoft.com',
+                        role: 'Principal Data Scientist'
+                    }]
+                }]);
+                _cwActions[taskId] = {
+                    id: taskId,
+                    task_id: taskId,
+                    state: 'ready',
+                    finding: 'Previous finding',
+                    draft: 'Previous draft'
+                };
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        pending = page.get_by_test_id("cw-identity-pending")
+        expect(page.locator(".detail-workspace .cw-card")).to_be_visible()
+        expect(pending).to_contain_text("Henry Jammes")
+        expect(pending).to_contain_text("Choose")
+        expect(page.get_by_test_id("cw-execute-action")).to_have_count(0)
+        expect(page.get_by_text("Preview with Cowork", exact=True)).to_have_count(0)
+
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+        expect(page.get_by_test_id("cw-identity-pending")).to_contain_text(
+            "Henry Jammes"
+        )
+
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, "cowork-identity-pending-light.png"),
+            full_page=True,
+        )
+
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.key_people = JSON.stringify([{
+                    name: 'Henry Jammes',
+                    email: 'Henry.Jammes@microsoft.com',
+                    role: 'Principal PM Manager'
+                }]);
+                _cwActions[taskId] = null;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+        expect(page.get_by_test_id("cw-identity-pending")).to_have_count(0)
+        expect(page.get_by_text("Preview with Cowork", exact=True)).to_be_visible()
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_identity_refresh_does_not_hide_live_cowork_action(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                clearInterval(parsePollerInterval);
+                parsePollerInterval = null;
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'queued';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Henry Jammes',
+                    email: 'Henry.Jammes@microsoft.com',
+                    unresolved: true,
+                    alternatives: []
+                }]);
+                _cwActions[taskId] = {
+                    id: taskId,
+                    task_id: taskId,
+                    state: 'previewing',
+                    progress: ['Checking attendee calendars']
+                };
+                _cwPollers[taskId] = setInterval(function() {}, 60000);
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        expect(page.get_by_test_id("cw-identity-pending")).to_have_count(0)
+        expect(page.locator(".cw-card")).to_contain_text(
+            "Checking attendee calendars"
+        )
+        expect(page.get_by_test_id("cw-stop")).to_be_visible()
+
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'error';
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+        expect(page.locator(".cw-card")).to_contain_text(
+            "Checking attendee calendars"
+        )
+    finally:
+        page.evaluate(
+            """taskId => {
+                clearInterval(_cwPollers[taskId]);
+                delete _cwPollers[taskId];
+            }""",
+            task_id,
+        )
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_identity_refresh_loads_persisted_live_cowork_action(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    action = {
+        "id": task_id,
+        "task_id": task_id,
+        "state": "previewing",
+        "progress": ["Loading the saved Cowork preview"],
+    }
+    page.route(
+        f"**/api/tasks/{task_id}/cowork*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"action": action}),
+        ),
+    )
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                clearInterval(parsePollerInterval);
+                parsePollerInterval = null;
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'error';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Henry Jammes',
+                    email: 'Henry.Jammes@microsoft.com',
+                    unresolved: true,
+                    alternatives: []
+                }]);
+                delete _cwActions[taskId];
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        expect(page.locator(".cw-card")).to_contain_text(
+            "Loading the saved Cowork preview"
+        )
+        expect(page.get_by_test_id("cw-identity-pending")).to_have_count(0)
+        expect(page.get_by_test_id("cw-stop")).to_be_visible()
+    finally:
+        page.evaluate(
+            """taskId => {
+                clearInterval(_cwPollers[taskId]);
+                delete _cwPollers[taskId];
+            }""",
+            task_id,
+        )
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
 def test_directory_match_requires_explicit_dropdown_confirmation(
     page: Page, base_url
 ):

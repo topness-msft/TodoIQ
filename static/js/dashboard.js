@@ -896,7 +896,13 @@ function renderDetailPane(task) {
 
     evidenceHtml += '</aside>';
 
-    var workspaceHtml = task.parse_status === 'parsed'
+    var workspaceAction = _cwActions[task.id];
+    if (workspaceAction === undefined) cwLoad(task.id);
+    var hasLiveWorkspaceAction = workspaceAction
+        && ['previewing', 'executing', 'executed', 'execute_unconfirmed']
+            .indexOf(workspaceAction.state) >= 0;
+    var workspaceHtml = (['parsed', 'queued', 'parsing'].indexOf(task.parse_status) >= 0
+            || hasLiveWorkspaceAction)
         ? '<section class="detail-workspace" aria-label="Cowork workspace">'
             + renderCoworkCard(task)
             + '</section>'
@@ -3918,14 +3924,52 @@ function cwSendRefine(taskId) {
 }
 
 function renderCoworkCard(task) {
-    if (task.parse_status !== 'parsed') return '';
     var a = _cwActions[task.id];
-
+    var liveAction = a
+        && ['previewing', 'executing', 'executed', 'execute_unconfirmed']
+            .indexOf(a.state) >= 0;
     if (a === undefined) {
         cwLoad(task.id);
         return cwShell('', '', task,
             '<div class="cw-idle">Checking for a previous Cowork preview\u2026</div>', '', a);
     }
+    var unresolvedPeople = task.action_type === 'schedule-meeting'
+        ? cwUnresolvedMeetingPeople(task)
+        : [];
+    if (!liveAction && unresolvedPeople.length) {
+        var unresolvedNames = unresolvedPeople.map(function(person) {
+            return '<b>' + escapeHtml(String(person.name || '').trim()) + '</b>';
+        }).join(', ');
+        var matchesReady = unresolvedPeople.every(function(person) {
+            return Boolean(String(person.email || '').trim());
+        });
+        return cwShell('', 'needs you', task,
+            '<div class="cw-blocked" data-testid="cw-identity-pending">'
+            + '<b>' + (matchesReady
+                ? 'Confirm the attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.')
+                : 'Riveter is resolving attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.'))
+            + '</b><div class="cw-blocked-sub">'
+            + (matchesReady
+                ? 'Choose the correct match for ' + unresolvedNames
+                    + ' from the primary or alternate-name dropdown in Key People. '
+                    + 'Cowork will be ready after every attendee is confirmed.'
+                : 'Waiting for directory matches for ' + unresolvedNames
+                    + '. The choices will appear in Key People when they are ready.')
+            + '</div></div>',
+            '',
+            null);
+    }
+    if (!liveAction
+            && (task.parse_status === 'queued' || task.parse_status === 'parsing')) {
+        return cwShell('is-running', 'refreshing', task,
+            '<div class="cw-progress"><span class="cw-spinner"></span>'
+            + '<span class="cw-progress-text">Refreshing task context'
+            + '<span class="cw-progress-sub">Cowork will return here automatically when the refresh finishes.</span>'
+            + '</span></div>',
+            '',
+            null);
+    }
+    if (!liveAction && task.parse_status !== 'parsed') return '';
 
     if (a && ['previewing', 'executing', 'executed', 'execute_unconfirmed'].indexOf(a.state) >= 0) {
         if (['previewing', 'executing'].indexOf(a.state) >= 0

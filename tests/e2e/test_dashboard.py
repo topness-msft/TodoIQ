@@ -55,7 +55,15 @@ class TestDashboardLoads:
         expect(brand_link).to_have_attribute('target', '_blank')
         expect(brand_link).to_have_attribute('rel', 'noopener noreferrer')
         header_box = page.locator('.top-bar').bounding_box()
-        assert header_box and header_box['height'] <= 76
+        logo_box = logo.bounding_box()
+        tagline_text_box = brand_tagline.locator('span').bounding_box()
+        brand_link_box = brand_link.bounding_box()
+        assert header_box and logo_box and tagline_text_box and brand_link_box
+        assert header_box['height'] <= 76
+        assert logo_box['height'] >= 70
+        assert tagline_text_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
+        assert brand_link_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
+        assert brand_link_box['y'] > tagline_text_box['y']
         _screenshot(page, '01-dashboard-empty')
 
     def test_input_bar_visible(self, page: Page, base_url):
@@ -86,8 +94,10 @@ class TestDashboardLoads:
         brand_link_box = page.get_by_test_id('brand-tagline').locator('a').bounding_box()
         input_box = page.locator('.input-bar').bounding_box()
         assert logo_box and tagline_box and tagline_text_box and brand_link_box and input_box
+        assert logo_box['height'] >= 64
         assert tagline_box['y'] < logo_box['y'] + logo_box['height']
-        assert brand_link_box['x'] < tagline_text_box['x']
+        assert tagline_text_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
+        assert brand_link_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
         assert input_box['y'] >= tagline_box['y'] + tagline_box['height'] - 2
         assert page.evaluate(
             '() => document.documentElement.scrollWidth'
