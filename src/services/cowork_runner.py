@@ -2821,6 +2821,31 @@ def _reviewed_calendar_body(reviewed_draft, subject):
     return html.escape(card, quote=False) + "<br><br>"
 
 
+def _safe_preview_calendar_body(proposal_body, reviewed_draft):
+    """Allow the one observed preview-body form only when its agenda was reviewed."""
+    decoded = html.unescape(str(proposal_body or ""))
+    allowed_tags = {
+        "<p>", "</p>", "<b>", "</b>", "<ul>", "</ul>", "<li>", "</li>",
+    }
+    if any(tag.lower() not in allowed_tags for tag in re.findall(r"<[^>]+>", decoded)):
+        return False
+    match = re.fullmatch(
+        r"<p>Quick 1:1 to sync up\.</p>\s*"
+        r"<p><b>Agenda</b></p>\s*"
+        r"<ul>(?P<items>(?:\s*<li>[^<]*</li>\s*)+)</ul>",
+        decoded,
+    )
+    if not match:
+        return False
+    items = re.findall(r"<li>([^<]*)</li>", match.group("items"))
+    reviewed_items = {
+        line.strip()[2:]
+        for line in str(reviewed_draft or "").splitlines()
+        if line.strip().startswith("- ")
+    }
+    return bool(items) and all(item in reviewed_items for item in items)
+
+
 def _calendar_event_matches(
     actual, expected, *, require_footer=False, reviewed_draft=None
 ):
@@ -2853,7 +2878,13 @@ def _calendar_event_matches(
         reviewed_draft, str(expected.get("subject") or "")
     )
     if reviewed_draft is not None:
-        if reviewed_body is None or proposed != reviewed_body:
+        rendered_match = reviewed_body is not None and proposed == reviewed_body
+        preview_match = (
+            bool(marker)
+            and proposed == expected_body + "<br><br>"
+            and _safe_preview_calendar_body(expected_body, reviewed_draft)
+        )
+        if not rendered_match and not preview_match:
             return False
     elif proposed != expected_body:
         return False

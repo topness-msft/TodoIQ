@@ -3091,7 +3091,12 @@ var CW_HANDOFF_POLL_MS = 10000;
 
 function cwCurrentDraft(a) {
     if (!a) return '';
-    return (a.draft_edited != null && a.draft_edited !== '') ? a.draft_edited : (a.draft || '');
+    var draft = (a.draft_edited != null && a.draft_edited !== '')
+        ? a.draft_edited : (a.draft || '');
+    if (!draft && a.action_type === 'schedule-meeting' && a.finding) {
+        return a.finding.trim();
+    }
+    return draft;
 }
 
 function cwElapsed(taskId, action) {
@@ -3890,7 +3895,7 @@ function cwSendRefine(taskId) {
     var instruction = ((box ? box.value : _cwInstrBuf[taskId]) || '').trim();
     var a = _cwActions[taskId] || {};
     var edited = ((draftBox ? draftBox.value : _cwDraftBuf[taskId]) || '').trim();
-    var original = ((a.draft_edited || a.draft) || '').trim();
+    var original = cwCurrentDraft(a).trim();
 
     // Either an instruction or an in-place edit is enough to act on. Sending
     // the edited draft verbatim is what makes "I rewrote it, now match this"

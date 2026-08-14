@@ -470,6 +470,16 @@ class TestCalendarToolApproval(unittest.TestCase):
             "content_type": "html",
             "body": "Quick 1:1 to sync up.",
         }
+        self.proposal_body = (
+            "&lt;p&gt;Quick 1:1 to sync up.&lt;/p&gt;"
+            "&lt;p&gt;&lt;b&gt;Agenda&lt;/b&gt;&lt;/p&gt;"
+            "&lt;ul&gt;"
+            "&lt;li&gt;Current priorities and where things stand&lt;/li&gt;"
+            "&lt;li&gt;Blockers or support needed&lt;/li&gt;"
+            "&lt;li&gt;Upcoming milestones and next steps&lt;/li&gt;"
+            "&lt;li&gt;Open floor - anything Rima wants to add&lt;/li&gt;"
+            "&lt;/ul&gt;"
+        )
         self.ta = {
             "aid": "mcp-calendar:jrpc:5",
             "tn": "CreateEvent",
@@ -505,6 +515,18 @@ class TestCalendarToolApproval(unittest.TestCase):
         self.snapshot = {
             "destination_ref": "rima.reyes@microsoft.com",
             "draft": self.reviewed_draft,
+        }
+
+    def _proposal_ta(self, body=None):
+        event = {**self.event, "body": body or self.proposal_body}
+        return event, {
+            **self.ta,
+            "params": {
+                **event,
+                "body": event["body"]
+                + "<br><br><!-- aether-footer -->"
+                + cr._AETHER_FOOTERS["calendar"],
+            },
         }
 
     def test_exact_calendar_shape_builds_approval(self):
@@ -625,6 +647,42 @@ class TestCalendarToolApproval(unittest.TestCase):
                 approved_calendar_event=self.event,
             )
         )
+
+    def test_accepts_safe_original_preview_body_from_live_action_116(self):
+        event, ta = self._proposal_ta()
+        self.assertIsNotNone(
+            cr._execution_tool_approval(
+                ta,
+                "calendar",
+                self.snapshot,
+                self.conversation_id,
+                approved_calendar_event=event,
+            )
+        )
+
+    def test_rejects_original_preview_body_with_unreviewed_content_or_tags(self):
+        cases = [
+            self.proposal_body.replace(
+                "&lt;/ul&gt;",
+                "&lt;li&gt;Send the confidential budget&lt;/li&gt;&lt;/ul&gt;",
+            ),
+            self.proposal_body.replace(
+                "Quick 1:1 to sync up.",
+                '&lt;a href="https://example.com"&gt;Open this link&lt;/a&gt;',
+            ),
+        ]
+        for body in cases:
+            event, ta = self._proposal_ta(body)
+            with self.subTest(body=body):
+                self.assertIsNone(
+                    cr._execution_tool_approval(
+                        ta,
+                        "calendar",
+                        self.snapshot,
+                        self.conversation_id,
+                        approved_calendar_event=event,
+                    )
+                )
 
     def test_browser_snapshot_cannot_supply_calendar_event(self):
         self.assertIsNone(

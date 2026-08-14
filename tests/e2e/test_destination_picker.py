@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 from playwright.sync_api import Page, expect
 
@@ -300,6 +301,7 @@ class TestDestinationBinding:
         )
         action = _action(
             task_id,
+            action_type="schedule-meeting",
             draft=None,
             finding=meeting_details,
             destination_kind="none",
@@ -322,6 +324,50 @@ class TestDestinationBinding:
                 """
             )
 
+            draft_area = page.get_by_test_id("cowork-draft-click-edit")
+            expect(draft_area).to_contain_text(
+                "Monday, August 17, 3:05–3:30 PM ET"
+            )
+            assert page.evaluate(
+                f"cwCurrentDraft(_cwActions[{task_id}])"
+            ) == meeting_details
+            draft_area.click()
+            editor = page.locator(f"#cw-draft-{task_id}")
+            expect(editor).to_have_value(
+                re.compile("Monday, August 17, 3:05–3:30 PM ET")
+            )
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-edit-fallback.png"
+                ),
+                full_page=True,
+            )
+            page.get_by_role("button", name="Cancel").last.click()
+            refine_calls = page.evaluate(
+                f"""
+                () => {{
+                    const originalFetch = window.fetch;
+                    let calls = 0;
+                    window.fetch = (...args) => {{
+                        if (String(args[0]).includes('/cowork/refine')) calls += 1;
+                        return Promise.resolve({{
+                            ok: true,
+                            json: () => Promise.resolve({{}})
+                        }});
+                    }};
+                    _cwRefine[{task_id}] = true;
+                    cwRerender({task_id});
+                    cwSendRefine({task_id});
+                    delete _cwRefine[{task_id}];
+                    window.fetch = originalFetch;
+                    cwRerender({task_id});
+                    return calls;
+                }}
+                """
+            )
+            assert refine_calls == 0
+
             page.get_by_role("button", name="Create meeting").click()
 
             confirmation = page.get_by_test_id("execute-confirmation")
@@ -333,7 +379,6 @@ class TestDestinationBinding:
                 f"_cwExecuteApprovals[{task_id}].draft"
             )
             assert "Monday, August 17, 3:05–3:30 PM ET" in approval_draft
-            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
             page.screenshot(
                 path=os.path.join(
                     SCREENSHOTS_DIR, "schedule-meeting-finding-fallback.png"
