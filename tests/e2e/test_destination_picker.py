@@ -58,7 +58,9 @@ def _load_dashboard(page: Page, base_url: str, task_id: int, action: dict) -> No
         f"""
         _cwActions[{task_id}] = {json.dumps(action)};
         selectedTaskId = {task_id};
-        renderDetailPane(tasks.find(task => task.id === {task_id}));
+        const task = tasks.find(task => task.id === {task_id});
+        task.parse_status = 'parsed';
+        renderDetailPane(task);
         """
     )
 
@@ -72,6 +74,7 @@ def _load_todo(page: Page, base_url: str, task_id: int, action: dict) -> None:
         const task = tasks.find(item => item.id === {task_id});
         Object.assign(task, {{
             cw_loaded: true, cw_state: 'ready', cw_seen_at: 'seen',
+            parse_status: 'parsed',
             cw_finding: action.finding, cw_draft: action.draft,
             cw_dest_kind: action.destination_kind,
             cw_dest_ref: action.destination_ref,
@@ -195,6 +198,87 @@ class TestDestinationBinding:
             expect(page.get_by_test_id("dest-picker")).to_have_count(0)
             expect(page.get_by_test_id("dest-status")).to_contain_text(
                 "Sarah Goodwin"
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_create_meeting_opens_meeting_details_not_teams_picker(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        action = _action(
+            task_id,
+            draft=(
+                "**Title:** 1:1 with Rima Reyes\n\n"
+                "**When:** Monday, August 17 at 10:05 AM\n\n"
+                "**Duration:** 30 minutes"
+            ),
+            destination_kind="none",
+            destination_ref="rima.reyes@microsoft.com",
+            destination_display="Rima Reyes",
+            destination_confirmed_at=None,
+            destination_source="auto_key_people",
+            delivery_channel=None,
+        )
+        confirmed = {**action, "destination_confirmed_at": "2026-08-13T19:00:00Z"}
+        posted = {}
+
+        def destination_route(route):
+            posted.update(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"action": confirmed}),
+            )
+
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
+                task.action_type = 'schedule-meeting';
+                renderDetailPane(task);
+                """
+            )
+            page.route(
+                f"**/api/tasks/{task_id}/cowork/destination",
+                destination_route,
+            )
+
+            page.get_by_role("button", name="Create meeting").click()
+
+            expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
+            expect(page.get_by_test_id("dest-picker")).to_have_count(0)
+            expect(page.get_by_test_id("dest-channel")).to_have_count(0)
+            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
+                "Meeting details"
+            )
+            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
+                "Monday, August 17 at 10:05 AM"
+            )
+            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
+                "Rima Reyes"
+            )
+            assert posted == {
+                "destination_ref": "rima.reyes@microsoft.com",
+                "destination_display": "Rima Reyes",
+            }
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-details-light.png"
+                ),
+                full_page=True,
+            )
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme','dark')"
+            )
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-details-dark.png"
+                ),
+                full_page=True,
             )
         finally:
             _delete_task(page, base_url, task_id)
@@ -462,6 +546,7 @@ class TestSchedulingDestinationNote:
             page.evaluate(
                 f"""
                 const t = tasks.find(x => x.id === {task_id});
+                t.parse_status = 'parsed';
                 t.action_type = 'schedule-meeting';
                 _cwActions[{task_id}] = {json.dumps(_action(0))};
                 _cwActions[{task_id}].task_id = {task_id};
@@ -493,6 +578,7 @@ class TestSchedulingDestinationNote:
             page.evaluate(
                 f"""
                 const t = tasks.find(x => x.id === {task_id});
+                t.parse_status = 'parsed';
                 t.action_type = 'schedule-meeting';
                 _cwActions[{task_id}] = {json.dumps(action)};
                 selectedTaskId = {task_id};

@@ -181,3 +181,111 @@ def test_raw_html_and_unsafe_images_stay_inert(page: Page, base_url):
     expect(page.locator("body")).to_contain_text("<b>Unsafe image</b>")
     expect(page.locator("img")).to_have_count(0)
     expect(page.locator(".cw-choice-emoji")).to_have_count(1)
+
+
+def test_choice_question_accepts_a_free_text_redirect(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Choose a meeting time"},
+    )
+    task_id = created.json()["task"]["id"]
+    posted = {}
+
+    def answer_route(route):
+        posted.update(json.loads(route.request.post_data))
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps({
+                "action": {
+                    "task_id": task_id,
+                    "state": "previewing",
+                    "waiting_on_user": False,
+                    "conversation_id": "t:u:meeting-redirect",
+                },
+            }),
+        )
+
+    page.route(f"**/api/tasks/{task_id}/cowork/answer", answer_route)
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                interaction_request: {
+                    invocation_id: 'meeting-times-1',
+                    questions: [{
+                        id: '0',
+                        question: 'Which time should I book?',
+                        options: [
+                            {value: 'Mon 10:05', label: 'Mon 10:05 AM'},
+                            {value: 'Tue 1:05', label: 'Tue 1:05 PM'}
+                        ]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"meeting-times-1"}',
+                conversation_id: 't:u:meeting-redirect'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    choices = page.get_by_test_id("cw-choice")
+    choices.first.click()
+    expect(choices.first).to_have_attribute("aria-pressed", "true")
+    redirect = page.get_by_test_id("cw-answer-redirect")
+    expect(redirect).to_be_visible()
+    redirect.fill("Find something later in the day")
+    expect(choices.first).to_have_attribute("aria-pressed", "false")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-time-redirect-light.png"),
+        full_page=True,
+    )
+    page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-time-redirect-dark.png"),
+        full_page=True,
+    )
+
+    page.get_by_test_id("cw-answer-submit").click()
+    page.wait_for_function("() => !document.querySelector('[data-testid=\"cw-blocked\"]')")
+    assert posted == {
+        "invocation_id": "meeting-times-1",
+        "answers": {"0": "Find something later in the day"},
+    }
+
+
+def test_multi_select_buffer_restores_choices_not_redirect(page: Page, base_url):
+    page.goto(base_url + "/")
+    page.evaluate(
+        """() => {
+            _cwAnswerBuf[99] = {'0': 'A\\nB'};
+            document.body.innerHTML = cwInteractionFields(99, {
+                questions: [{
+                    id: '0',
+                    question: 'Which scopes?',
+                    multi_select: true,
+                    options: [
+                        {value: 'A', label: 'Scope A'},
+                        {value: 'B', label: 'Scope B'}
+                    ]
+                }]
+            });
+        }"""
+    )
+
+    choices = page.get_by_test_id("cw-choice")
+    expect(choices).to_have_count(2)
+    expect(choices.nth(0)).to_have_attribute("aria-pressed", "true")
+    expect(choices.nth(1)).to_have_attribute("aria-pressed", "true")
+    expect(page.get_by_test_id("cw-answer-redirect")).to_have_value("")

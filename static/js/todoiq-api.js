@@ -757,7 +757,7 @@ async function cwPoll(id) {
 // timestamp, so the client only submits the reviewed audience.
 cwConfirmDest = async function(id) {
   const t = cwTask(id);
-  const values = cwDestPickerValues();
+  const values = cwDestPickerValues(id);
   if (!t || !values) return;
   try {
     const res = await fetch(`/api/tasks/${id}/cowork/destination`, {

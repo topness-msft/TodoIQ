@@ -3242,6 +3242,12 @@ function cwOpenExecuteConfirm(taskId) {
         var action = _cwActions[taskId];
         var task = tasks.find(function(item) { return item.id === taskId; });
         if (!action || !task || action.state !== 'ready') return;
+        var isMeeting = task.action_type === 'schedule-meeting';
+        if (!action.destination_confirmed_at && isMeeting
+                && action.destination_ref && action.destination_display) {
+            cwConfirmDest(taskId, true);
+            return;
+        }
         if (!action.destination_confirmed_at) {
             cwOpenDestPicker(taskId);
             return;
@@ -3272,15 +3278,21 @@ function cwOpenExecuteConfirm(taskId) {
         overlay.innerHTML = '<div class="source-modal cw-execute-modal" role="dialog" '
             + 'aria-modal="true" aria-labelledby="execute-modal-title" '
             + 'data-testid="execute-confirmation">'
-            + '<div class="cw-execute-kicker">Approved action</div>'
+            + '<div class="cw-execute-kicker">'
+            + (isMeeting ? 'Calendar action' : 'Approved action') + '</div>'
             + '<div class="source-modal-header" id="execute-modal-title">'
             + escapeHtml(label) + '?</div>'
-            + '<div class="cw-execute-destination"><span>Destination</span>'
+            + '<div class="cw-execute-destination"><span>'
+            + (isMeeting ? 'Attendee' : 'Destination') + '</span>'
             + destinationHtml + '</div>'
-            + '<label class="source-modal-label">Final draft</label>'
+            + '<label class="source-modal-label">'
+            + (isMeeting ? 'Meeting details' : 'Final draft') + '</label>'
             + '<div class="cw-execute-draft">' + renderCoworkMarkdown(cwCurrentDraft(action)) + '</div>'
-            + '<div class="cw-execute-warning">This performs the action through Cowork. '
-            + 'The destination and draft cannot be changed after confirmation.</div>'
+            + '<div class="cw-execute-warning">'
+            + (isMeeting
+                ? 'Review the attendee and meeting details. Cowork creates the calendar event only after you confirm.'
+                : 'This performs the action through Cowork. The destination and draft cannot be changed after confirmation.')
+            + '</div>'
             + '<div class="cw-execute-error" id="execute-modal-error" role="alert"></div>'
             + '<div class="source-modal-buttons">'
             + '<button class="btn-source-modal btn-source-cancel" '
@@ -3455,34 +3467,42 @@ function cwDestBlock(action, task) {
 
 function cwOpenDestPicker(taskId) {
     var a = _cwActions[taskId];
-    if (!a) return;
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    if (!a || !task) return;
     cwCloseDestPicker();
 
+    var isMeeting = task.action_type === 'schedule-meeting';
     var channel = a.delivery_channel || 'teams';
     var ref = a.destination_ref || '';
     var overlay = document.createElement('div');
     overlay.id = 'dest-modal';
     overlay.className = 'source-modal-overlay';
     overlay.innerHTML = '<div class="source-modal" data-testid="dest-picker">'
-        + '<div class="source-modal-header">Confirm destination</div>'
-        + '<label class="source-modal-label">Channel</label>'
-        + '<select id="dest-modal-channel" class="source-modal-input" data-testid="dest-channel">'
-        + '<option value="teams"' + (channel === 'teams' ? ' selected' : '') + '>Teams</option>'
-        + '<option value="email"' + (channel === 'email' ? ' selected' : '') + '>Email</option>'
-        + '</select>'
-        + '<label class="source-modal-label">Recipient or conversation</label>'
+        + '<div class="source-modal-header">'
+        + (isMeeting ? 'Meeting attendee' : 'Confirm destination') + '</div>'
+        + (isMeeting ? ''
+            : '<label class="source-modal-label">Channel</label>'
+              + '<select id="dest-modal-channel" class="source-modal-input" data-testid="dest-channel">'
+              + '<option value="teams"' + (channel === 'teams' ? ' selected' : '') + '>Teams</option>'
+              + '<option value="email"' + (channel === 'email' ? ' selected' : '') + '>Email</option>'
+              + '</select>')
+        + '<label class="source-modal-label">'
+        + (isMeeting ? 'Attendee email' : 'Recipient or conversation') + '</label>'
         + '<input type="text" id="dest-modal-ref" class="source-modal-input" '
         + 'data-testid="dest-ref" value="' + cwEscapeAttr(ref) + '">'
         + (ref.indexOf('19:') === 0
             ? '<div class="cw-dest-hint">Linked Teams conversation \u2014 leave as-is to reply in the original thread.</div>'
             : '')
-        + '<label class="source-modal-label">Shown as</label>'
+        + '<label class="source-modal-label">'
+        + (isMeeting ? 'Attendee name' : 'Shown as') + '</label>'
         + '<input type="text" id="dest-modal-display" class="source-modal-input" '
         + 'data-testid="dest-display" value="' + cwEscapeAttr(a.destination_display || '') + '">'
         + '<div class="source-modal-buttons">'
         + '<button class="btn-source-modal btn-source-cancel" onclick="cwCloseDestPicker()">Cancel</button>'
         + '<button class="btn-source-modal btn-source-save" data-testid="dest-confirm-btn" '
-        + 'onclick="cwConfirmDest(' + taskId + ')">Confirm</button>'
+        + 'onclick="cwConfirmDest(' + taskId + ', '
+        + (isMeeting ? 'true' : 'false') + ')">'
+        + (isMeeting ? 'Review meeting' : 'Confirm') + '</button>'
         + '</div></div>';
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function(event) {
@@ -3495,18 +3515,24 @@ function cwCloseDestPicker() {
     if (existing) existing.remove();
 }
 
-function cwConfirmDest(taskId) {
+function cwConfirmDest(taskId, continueToExecute) {
+    var action = _cwActions[taskId];
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    if (!action || !task) return;
+    var isMeeting = task.action_type === 'schedule-meeting';
     var channel = document.getElementById('dest-modal-channel');
     var ref = document.getElementById('dest-modal-ref');
     var display = document.getElementById('dest-modal-display');
-    if (!channel || !ref || !display) return;
+    var refValue = ref ? ref.value.trim() : (action.destination_ref || '').trim();
+    var displayValue = display
+        ? display.value.trim() : (action.destination_display || '').trim();
+    if ((!isMeeting && !channel) || !refValue || !displayValue) return;
 
     var body = {
-        delivery_channel: channel.value,
-        destination_ref: ref.value.trim(),
-        destination_display: display.value.trim()
+        destination_ref: refValue,
+        destination_display: displayValue
     };
-    if (!body.destination_ref || !body.destination_display) return;
+    if (!isMeeting) body.delivery_channel = channel.value;
 
     fetch('/api/tasks/' + taskId + '/cowork/destination', {
         method: 'POST',
@@ -3521,6 +3547,9 @@ function cwConfirmDest(taskId) {
         }
         cwCloseDestPicker();
         cwRerender(taskId);
+        if (continueToExecute && data.action && data.action.destination_confirmed_at) {
+            cwOpenExecuteConfirm(taskId);
+        }
     })
     .catch(function(err) { console.error('Failed to confirm destination:', err); });
 }
@@ -4123,6 +4152,13 @@ function cwInteractionFields(taskId, interaction) {
         var value = buffered[id] || '';
         var input;
         if (question.options && question.options.length) {
+            var selectedValues = value.split('\n').filter(Boolean);
+            var usesKnownOptions = selectedValues.length > 0
+                && selectedValues.every(function(selectedValue) {
+                    return question.options.some(function(option) {
+                        return option.value === selectedValue;
+                    });
+                });
             input = '<div class="cw-choice-grid" data-testid="cw-answer" '
                 + 'data-cw-answer="' + escapeAttr(id) + '" '
                 + 'data-cw-multi="' + (question.multi_select ? '1' : '0') + '">'
@@ -4139,7 +4175,17 @@ function cwInteractionFields(taskId, interaction) {
                             ? '<small class="sr-only">' + escapeHtml(option.description) + '</small>'
                             : '')
                         + '</span></button>';
-                }).join('') + '</div>';
+                }).join('') + '</div>'
+                + '<div class="cw-choice-redirect">'
+                + '<label for="cw-redirect-' + taskId + '-' + escapeAttr(id) + '">'
+                + 'Need a different option?</label>'
+                + '<input id="cw-redirect-' + taskId + '-' + escapeAttr(id) + '" '
+                + 'class="cw-choice-redirect-input" data-testid="cw-answer-redirect" '
+                + 'data-cw-redirect="' + escapeAttr(id) + '" value="'
+                + escapeAttr(usesKnownOptions ? '' : value)
+                + '" placeholder="e.g. find something later in the day" '
+                + 'oninput="cwRedirectAnswer(' + taskId + ', this)">'
+                + '</div>';
         } else {
             input = '<textarea class="cw-refine-box cw-answer-box" '
                 + 'data-testid="cw-answer" data-cw-answer="' + escapeAttr(id) + '" '
@@ -4201,11 +4247,23 @@ function cwChooseOption(taskId, button) {
     }
     var wasSelected = button.getAttribute('aria-pressed') === 'true';
     button.setAttribute('aria-pressed', String(multi ? !wasSelected : true));
+    var redirect = field.parentElement.querySelector('[data-cw-redirect="'
+        + field.getAttribute('data-cw-answer') + '"]');
+    if (redirect) redirect.value = '';
     cwBufferAnswer(
         taskId,
         field.getAttribute('data-cw-answer'),
         cwAnswerValue(field)
     );
+}
+
+function cwRedirectAnswer(taskId, input) {
+    var question = input.closest('.cw-blocked-question');
+    if (!question) return;
+    question.querySelectorAll('[data-cw-option]').forEach(function(choice) {
+        choice.setAttribute('aria-pressed', 'false');
+    });
+    cwBufferAnswer(taskId, input.getAttribute('data-cw-redirect'), input.value);
 }
 
 function cwAnswerValue(field) {
@@ -4223,7 +4281,10 @@ function cwSendAnswer(taskId) {
     var fields = document.querySelectorAll('[data-cw-answer]');
     var blocked = document.querySelector('[data-testid="cw-blocked"]');
     fields.forEach(function(field) {
-        var value = cwAnswerValue(field).trim();
+        var redirect = field.parentElement.querySelector('[data-cw-redirect="'
+            + field.getAttribute('data-cw-answer') + '"]');
+        var value = redirect && redirect.value.trim()
+            ? redirect.value.trim() : cwAnswerValue(field).trim();
         if (value) answers[field.getAttribute('data-cw-answer')] = value;
     });
     if (!fields.length || Object.keys(answers).length !== fields.length) return;

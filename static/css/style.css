@@ -3032,6 +3032,7 @@ textarea.cw-draft {
 .cw-execute-modal {
     width: min(560px, 92vw); padding: 0; overflow: hidden;
     border: 1px solid var(--border-primary); border-radius: 10px;
+    background: var(--bg-secondary); color: var(--text-primary);
 }
 .cw-execute-modal > * { margin-left: 20px; margin-right: 20px; }
 .cw-execute-modal .source-modal-header {
@@ -3072,6 +3073,10 @@ textarea.cw-draft {
 .cw-execute-modal .source-modal-buttons {
     margin: 2px 0 0; padding: 14px 20px;
     border-top: 1px solid var(--border-primary); background: var(--bg-primary);
+}
+.cw-execute-modal .btn-source-cancel {
+    border: 1px solid var(--border-primary);
+    background: var(--bg-tertiary); color: var(--text-primary);
 }
 .cw-execute-confirm { min-width: 132px; }
 .cw-delivery-target {
@@ -3142,6 +3147,21 @@ textarea.cw-draft {
 .cw-choice-grid {
     display: flex; flex-wrap: wrap;
     gap: 8px; margin-top: 8px;
+}
+.cw-choice-redirect {
+    display: grid; grid-template-columns: auto minmax(180px, 1fr);
+    align-items: center; gap: 8px; margin-top: 10px;
+}
+.cw-choice-redirect label {
+    color: var(--text-secondary); font-size: 11px; white-space: nowrap;
+}
+.cw-choice-redirect-input {
+    min-width: 0; padding: 7px 9px; border: 1px solid var(--border-primary);
+    border-radius: 6px; background: var(--bg-primary); color: var(--text-primary);
+    font: inherit; font-size: 12px;
+}
+.cw-choice-redirect-input:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px;
 }
 .cw-choice {
     display: inline-flex; align-items: center; gap: 7px; min-height: 34px;

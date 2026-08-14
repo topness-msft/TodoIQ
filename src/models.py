@@ -628,7 +628,7 @@ def mark_task_action_seen(action_id: int) -> dict | None:
 
 def confirm_destination(
     action_id: int,
-    delivery_channel: str,
+    delivery_channel: str | None,
     destination_ref: str,
     destination_display: str,
     destination_source: str,
@@ -639,7 +639,7 @@ def confirm_destination(
     can never confirm a preview that is still running or has already failed.
     Confirming records who an action is for; it does not deliver anything.
     """
-    if delivery_channel not in DELIVERY_CHANNELS:
+    if delivery_channel is not None and delivery_channel not in DELIVERY_CHANNELS:
         return None
     ref = (destination_ref or "").strip()
     display = (destination_display or "").strip()
@@ -652,10 +652,11 @@ def confirm_destination(
             "UPDATE task_actions SET delivery_channel = ?, destination_ref = ?, "
             "destination_display = ?, destination_source = ?, "
             "destination_confirmed_at = ?, updated_at = ? "
-            "WHERE id = ? AND state = 'ready'",
+            "WHERE id = ? AND state = 'ready' "
+            "AND (? IS NOT NULL OR action_type = 'schedule-meeting')",
             (
                 delivery_channel, ref, display, destination_source,
-                _now(), _now(), action_id,
+                _now(), _now(), action_id, delivery_channel,
             ),
         )
         conn.commit()

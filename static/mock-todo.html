@@ -2178,22 +2178,23 @@ function cwOpenDestPicker(id) {
   if (!t) return;
   cwCloseDestPicker();
 
+  const isMeeting = t.action_type === 'schedule-meeting';
   const channel = t.cw_delivery_channel || 'teams';
   const ref = t.cw_dest_ref || '';
   const overlay = document.createElement('div');
   overlay.id = 'dest-modal';
   overlay.className = 'dest-modal-overlay';
   overlay.innerHTML = `<div class="dest-modal" data-testid="dest-picker">
-    <div class="dest-modal-header">Confirm destination</div>
-    <label class="dest-modal-label">Channel</label>
+    <div class="dest-modal-header">${isMeeting ? 'Meeting attendee' : 'Confirm destination'}</div>
+    ${isMeeting ? '' : `<label class="dest-modal-label">Channel</label>
     <select id="dest-modal-channel" class="dest-modal-input" data-testid="dest-channel">
       <option value="teams"${channel === 'teams' ? ' selected' : ''}>Teams</option>
       <option value="email"${channel === 'email' ? ' selected' : ''}>Email</option>
-    </select>
-    <label class="dest-modal-label">Recipient or conversation</label>
+    </select>`}
+    <label class="dest-modal-label">${isMeeting ? 'Attendee email' : 'Recipient or conversation'}</label>
     <input type="text" id="dest-modal-ref" class="dest-modal-input" data-testid="dest-ref" value="${cwEscapeAttr(ref)}">
     ${ref.indexOf('19:') === 0 ? '<div class="cw-dest-hint">Linked Teams conversation — leave as-is to reply in the original thread.</div>' : ''}
-    <label class="dest-modal-label">Shown as</label>
+    <label class="dest-modal-label">${isMeeting ? 'Attendee name' : 'Shown as'}</label>
     <input type="text" id="dest-modal-display" class="dest-modal-input" data-testid="dest-display" value="${cwEscapeAttr(t.cw_dest_display || '')}">
     <div class="dest-modal-buttons">
       <button class="cw-btn cw-btn-ghost" onclick="cwCloseDestPicker()">Cancel</button>
@@ -2210,25 +2211,28 @@ function cwCloseDestPicker() {
   if (existing) existing.remove();
 }
 
-function cwDestPickerValues() {
+function cwDestPickerValues(id) {
+  const t = cwTask(id);
+  if (!t) return null;
+  const isMeeting = t.action_type === 'schedule-meeting';
   const channel = document.getElementById('dest-modal-channel');
   const ref = document.getElementById('dest-modal-ref');
   const display = document.getElementById('dest-modal-display');
-  if (!channel || !ref || !display) return null;
+  if ((!isMeeting && !channel) || !ref || !display) return null;
   const values = {
-    delivery_channel: channel.value,
     destination_ref: ref.value.trim(),
     destination_display: display.value.trim()
   };
+  if (!isMeeting) values.delivery_channel = channel.value;
   return (values.destination_ref && values.destination_display) ? values : null;
 }
 
 // Standalone behaviour. On /todo this is replaced by the API-backed version.
 function cwConfirmDest(id) {
   const t = cwTask(id);
-  const values = cwDestPickerValues();
+  const values = cwDestPickerValues(id);
   if (!t || !values) return;
-  t.cw_delivery_channel = values.delivery_channel;
+  t.cw_delivery_channel = values.delivery_channel || null;
   t.cw_dest_ref = values.destination_ref;
   t.cw_dest_display = values.destination_display;
   t.cw_dest_confirmed_at = new Date().toISOString();

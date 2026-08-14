@@ -504,9 +504,10 @@ def _finalise(action: dict) -> dict:
         and row.get("destination_ref")
         and row.get("destination_display")
     ):
+        is_schedule = row.get("action_type") == "schedule-meeting"
         confirmed = confirm_destination(
             row["id"],
-            row.get("delivery_channel") or "teams",
+            None if is_schedule else (row.get("delivery_channel") or "teams"),
             row["destination_ref"],
             row["destination_display"],
             row.get("destination_source") or "auto_source_url",
@@ -1234,17 +1235,24 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
         channel = (body.get("delivery_channel") or "").strip().lower()
         ref = (body.get("destination_ref") or "").strip()
         display = (body.get("destination_display") or "").strip()
-        if channel not in DELIVERY_CHANNELS or not ref or not display:
+        is_schedule = action.get("action_type") == "schedule-meeting"
+        valid_channel = not channel if is_schedule else channel in DELIVERY_CHANNELS
+        if not valid_channel or not ref or not display:
             return self._fail(
                 400,
-                "delivery_channel, destination_ref and destination_display "
-                "are required",
+                (
+                    "schedule-meeting requires destination_ref and "
+                    "destination_display without a delivery channel"
+                    if is_schedule
+                    else "delivery_channel, destination_ref and "
+                    "destination_display are required"
+                ),
             )
 
         # Provenance is server owned: anything arriving over HTTP is a picker
         # confirmation, never an automatic resolution.
         confirmed = confirm_destination(
-            action["id"], channel, ref, display, "user_picker"
+            action["id"], None if is_schedule else channel, ref, display, "user_picker"
         )
         if not confirmed:
             return self._fail(409, "Only a ready preview can be confirmed")

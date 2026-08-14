@@ -760,6 +760,57 @@ class TestConfirmDestination(CoworkAPITestBase):
         self.assertIsNotNone(action["destination_confirmed_at"])
         self.assertIn("is_broadcast", action)
 
+    def test_schedule_meeting_confirms_attendee_without_delivery_channel(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        action_id = self.make_action(tid, state="ready")
+        from src.db import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET action_type='schedule-meeting' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._confirm(
+            tid,
+            {
+                "destination_ref": "rima.reyes@microsoft.com",
+                "destination_display": "Rima Reyes",
+            },
+        )
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(response.code, 200)
+        self.assertIsNone(action["delivery_channel"])
+        self.assertEqual(action["destination_ref"], "rima.reyes@microsoft.com")
+        self.assertIsNotNone(action["destination_confirmed_at"])
+
+    def test_schedule_meeting_rejects_message_delivery_channel(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        action_id = self.make_action(tid, state="ready")
+        from src.db import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET action_type='schedule-meeting' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._confirm(
+            tid,
+            {
+                "delivery_channel": "teams",
+                "destination_ref": "rima.reyes@microsoft.com",
+                "destination_display": "Rima Reyes",
+            },
+        )
+
+        self.assertEqual(response.code, 400)
+
     def test_rejects_unknown_channel_and_blank_destination(self):
         tid = self.make_task()
         self.make_action(tid, state="ready")
