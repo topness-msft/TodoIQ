@@ -288,6 +288,61 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+    def test_create_meeting_uses_finding_when_selected_slot_has_no_draft(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        meeting_details = (
+            "**Phil / Rima 1:1**\n\n"
+            "- **When:** Monday, August 17, 3:05–3:30 PM ET\n"
+            "- **Where:** Teams meeting\n\n"
+            "**Agenda**\n- Current priorities\n- Open questions"
+        )
+        action = _action(
+            task_id,
+            draft=None,
+            finding=meeting_details,
+            destination_kind="none",
+            destination_ref="rima.reyes@microsoft.com",
+            destination_display="Rima Reyes",
+            destination_confirmed_at="2026-08-13T19:00:00Z",
+            destination_source="auto_key_people",
+            delivery_channel=None,
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([
+                    {{name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'}}
+                ]);
+                renderDetailPane(task);
+                """
+            )
+
+            page.get_by_role("button", name="Create meeting").click()
+
+            confirmation = page.get_by_test_id("execute-confirmation")
+            expect(confirmation).to_be_visible()
+            expect(confirmation.locator(".cw-execute-draft")).to_contain_text(
+                "Monday, August 17, 3:05–3:30 PM ET"
+            )
+            approval_draft = page.evaluate(
+                f"_cwExecuteApprovals[{task_id}].draft"
+            )
+            assert "Monday, August 17, 3:05–3:30 PM ET" in approval_draft
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-finding-fallback.png"
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_multi_attendee_meeting_uses_bound_attendee_snapshot(
         self, page: Page, base_url
     ):

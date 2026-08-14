@@ -32,17 +32,18 @@ def _delete(page: Page, base_url: str, task_id: int) -> None:
     page.request.delete(f"{base_url}/api/tasks/{task_id}")
 
 
-def _stub(page: Page, task_id: int, cost):
+def _stub(page: Page, task_id: int, cost, cumulative=None, state="ready"):
     action = {
         "id": 1,
         "task_id": task_id,
-        "state": "ready",
+        "state": state,
         "progress": [],
         "finding": "Checked Teams and mail.",
         "draft": "Here is the draft.",
         "intent": "draft a reply",
         "channel": "email",
         "cost_credits": cost,
+        "credits_cumulative": cumulative,
     }
     page.route(
         f"**/api/tasks/{task_id}/cowork*",
@@ -57,7 +58,17 @@ def _stub(page: Page, task_id: int, cost):
 def _open_dashboard(page: Page, base_url: str, tid: int):
     page.goto(base_url + "/")
     page.wait_for_function(f"Boolean(tasks.find(t => t.id === {tid}))")
-    page.evaluate(f"selectTask({tid})")
+    page.evaluate(
+        f"""async () => {{
+            const response = await fetch('/api/tasks/{tid}/cowork');
+            const data = await response.json();
+            const task = tasks.find(t => t.id === {tid});
+            task.parse_status = 'parsed';
+            _cwActions[{tid}] = data.action;
+            selectedTaskId = {tid};
+            renderDetailPane(task);
+        }}"""
+    )
     page.wait_for_selector(".cw-card, .cw-shell", timeout=15000)
 
 
@@ -110,6 +121,38 @@ class TestDashboardCost:
             _stub(page, tid, 1234.56)
             _open_dashboard(page, base_url, tid)
             assert "1,235 credits" in page.locator(".cw-card, .cw-shell").first.inner_text()
+        finally:
+            _delete(page, base_url, tid)
+
+    def test_current_and_cumulative_credits_are_shown(self, page: Page, base_url):
+        tid = _seed(page, base_url)
+        try:
+            _stub(page, tid, 30.2, cumulative=407.0)
+            _open_dashboard(page, base_url, tid)
+            card = page.locator(".cw-card, .cw-shell").first
+            assert "30.2 credits" in card.inner_text()
+            assert "407 credits total" in card.inner_text()
+            page.screenshot(
+                path=os.path.join(TEMP_DIR, "cowork-cost-cumulative-dashboard.png"),
+                full_page=True,
+            )
+        finally:
+            _delete(page, base_url, tid)
+
+    def test_running_preview_shows_completed_credit_total(
+        self, page: Page, base_url
+    ):
+        tid = _seed(page, base_url)
+        try:
+            _stub(page, tid, None, cumulative=407.0, state="previewing")
+            _open_dashboard(page, base_url, tid)
+            card = page.locator(".cw-card, .cw-shell").first
+            assert "407 credits total" in card.inner_text()
+            assert "nothing is sent" not in card.inner_text().lower()
+            page.screenshot(
+                path=os.path.join(TEMP_DIR, "cowork-cost-running-total.png"),
+                full_page=True,
+            )
         finally:
             _delete(page, base_url, tid)
 

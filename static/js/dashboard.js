@@ -3353,9 +3353,13 @@ function cwOpenExecuteConfirm(taskId) {
                 + '" target="_blank" rel="noopener noreferrer">Open '
                 + escapeHtml(destination) + ' conversation</a>';
         }
+        var approvalDraft = cwCurrentDraft(action).trim();
+        if (isMeeting && !approvalDraft && action.finding) {
+            approvalDraft = action.finding.trim();
+        }
         _cwExecuteApprovals[taskId] = {
             parent_action_id: action.id,
-            draft: cwCurrentDraft(action).trim(),
+            draft: approvalDraft,
             destination_ref: action.destination_ref || '',
             destination_display: action.destination_display || '',
             delivery_channel: action.delivery_channel || '',
@@ -3376,7 +3380,7 @@ function cwOpenExecuteConfirm(taskId) {
             + destinationHtml + '</div>'
             + '<label class="source-modal-label">'
             + (isMeeting ? 'Meeting details' : 'Final draft') + '</label>'
-            + '<div class="cw-execute-draft">' + renderCoworkMarkdown(cwCurrentDraft(action)) + '</div>'
+            + '<div class="cw-execute-draft">' + renderCoworkMarkdown(approvalDraft) + '</div>'
             + '<div class="cw-execute-warning">'
             + (isMeeting
                 ? 'Review every attendee and the meeting details. Cowork creates the calendar event only after you confirm.'
@@ -3665,6 +3669,18 @@ function cwCostBadge(a) {
         + ' measured from your month-to-date usage">' + escapeHtml(text) + '</span>';
 }
 
+function cwCumulativeCostBadge(a) {
+    var c = a && a.credits_cumulative;
+    if (c === null || c === undefined || c === '') return '';
+    var n = Number(c);
+    if (!isFinite(n) || n < 0) return '';
+    var text = n >= 1000 ? Math.round(n).toLocaleString()
+        : Number.isInteger(n) ? n.toLocaleString()
+        : n.toFixed(1);
+    return '<span class="cw-foot-note" title="Credits consumed by completed Cowork'
+        + ' runs for this task">' + escapeHtml(text + ' credits total') + '</span>';
+}
+
 function cwHandoffBadge(a) {
     // What happened AFTER "Open in Cowork". Absent for a preview that was never
     // handed over, and absent whenever the lookup failed - this is additive, so
@@ -3945,7 +3961,7 @@ function renderCoworkCard(task) {
                 answerButton
                 + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                 + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
-                + '<span class="cw-foot-note">continues this preview &middot; nothing is sent to M365</span>',
+                + cwCumulativeCostBadge(a),
                 a);
         }
 
@@ -4019,7 +4035,7 @@ function renderCoworkCard(task) {
             + '</span></div>',
             '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
             + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
-            + '<span class="cw-foot-note">read-only preview &middot; nothing is sent from here</span>',
+            + cwCumulativeCostBadge(a),
             a);
     }
 
@@ -4068,6 +4084,7 @@ function renderCoworkCard(task) {
         // month-to-date credit counter across the run. Absent when it could not
         // be attributed (two previews overlapping) or the endpoint was off.
         var costBadge = cwCostBadge(a);
+        var cumulativeCostBadge = cwCumulativeCostBadge(a);
         var correction = a.redirect_text
             ? '<div class="cw-intent"><span class="i-label">Correction:</span> '
               + escapeHtml(a.redirect_text) + '</div>'
@@ -4089,7 +4106,7 @@ function renderCoworkCard(task) {
               + '<button class="cw-btn cw-btn-sec" data-testid="cw-start-over" '
               + 'title="Abandon this conversation and research again from scratch" '
               + 'onclick="cwStartOver(' + task.id + ')">Start over</button>'
-              + editedBadge + costBadge + cwHandoffBadge(a);
+              + editedBadge + costBadge + cumulativeCostBadge + cwHandoffBadge(a);
 
         return cwShell('', '', task,
             cwModeSwitch(task.id, a, false)

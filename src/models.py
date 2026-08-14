@@ -495,6 +495,17 @@ def create_task_action(task_id: int, **fields) -> dict:
         conn.close()
 
 
+def final_action_draft(action: dict) -> str:
+    """Return the exact reviewed text that an action will execute."""
+    draft = (
+        (action.get("draft_edited") or "").strip()
+        or (action.get("draft") or "").strip()
+    )
+    if not draft and action.get("action_type") == "schedule-meeting":
+        draft = (action.get("finding") or "").strip()
+    return draft
+
+
 def create_execution_action(
     parent_action_id: int, approved_snapshot: dict
 ) -> dict | None:
@@ -514,10 +525,7 @@ def create_execution_action(
             conn.rollback()
             return None
         parent = dict(parent)
-        final_draft = (
-            (parent.get("draft_edited") or "").strip()
-            or (parent.get("draft") or "").strip()
-        )
+        final_draft = final_action_draft(parent)
         expected = {
             "parent_action_id": parent["id"],
             "draft": final_draft,
@@ -542,8 +550,7 @@ def create_execution_action(
             SELECT
                 task_id, action_type, 'executing', intent, notes_snapshot,
                 redirect_text, NULL, finding,
-                COALESCE(NULLIF(TRIM(draft_edited), ''), draft),
-                COALESCE(NULLIF(TRIM(draft_edited), ''), draft),
+                ?, ?,
                 destination_kind, destination_ref, conversation_id,
                 island_url, delivery_channel, destination_display,
                 destination_confirmed_at, destination_source, id,
@@ -560,10 +567,7 @@ def create_execution_action(
               AND COALESCE(TRIM(parent.destination_ref), '') <> ''
               AND COALESCE(TRIM(parent.destination_display), '') <> ''
               AND COALESCE(TRIM(parent.conversation_id), '') <> ''
-              AND COALESCE(
-                    NULLIF(TRIM(parent.draft_edited), ''),
-                    TRIM(parent.draft), ''
-                  ) <> ''
+              AND ? <> ''
               AND NOT EXISTS (
                   SELECT 1 FROM task_actions child
                   WHERE child.parent_action_id = parent.id
@@ -572,7 +576,7 @@ def create_execution_action(
                     )
               )
             """,
-            (parent_action_id,),
+            (final_draft, final_draft, parent_action_id, final_draft),
         )
         if cursor.rowcount != 1:
             conn.rollback()

@@ -797,6 +797,37 @@ class TestGetPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertIn("Sarah asked", data["action"]["finding"])
 
+    def test_cumulative_credits_sum_completed_rows_and_skip_nulls(self):
+        from src.db import get_connection
+
+        tid = self.make_task()
+        first_id = self.make_action(tid)
+        second_id = self.make_action(tid)
+        self.make_action(tid, state="previewing")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET cost_credits=? WHERE id=?",
+            (30.2, first_id),
+        )
+        conn.execute(
+            "UPDATE task_actions SET cost_credits=? WHERE id=?",
+            (45.0, second_id),
+        )
+        conn.commit()
+        conn.close()
+
+        _, data = self.get_preview(tid)
+
+        self.assertAlmostEqual(data["action"]["credits_cumulative"], 75.2)
+
+    def test_cumulative_credits_are_null_when_no_run_is_attributable(self):
+        tid = self.make_task()
+        self.make_action(tid)
+
+        _, data = self.get_preview(tid)
+
+        self.assertIsNone(data["action"]["credits_cumulative"])
+
     def test_sse_events_never_persisted(self):
         """82 entries and the bulk of a 21KB payload."""
         noisy = json.dumps(
@@ -1110,9 +1141,19 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
         parent = get_latest_task_action(tid)
         if snapshot is None:
+            draft = (
+                parent.get("draft_edited")
+                or parent.get("draft")
+                or (
+                    parent.get("finding")
+                    if parent.get("action_type") == "schedule-meeting"
+                    else ""
+                )
+                or ""
+            ).strip()
             snapshot = {
                 "parent_action_id": parent["id"],
-                "draft": (parent.get("draft_edited") or parent.get("draft") or "").strip(),
+                "draft": draft,
                 "destination_ref": parent.get("destination_ref") or "",
                 "destination_display": parent.get("destination_display") or "",
                 "delivery_channel": parent.get("delivery_channel") or "",
@@ -1410,6 +1451,39 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         )
         self.assertEqual(self._execute(calendar_tid).code, 202)
         self.assertEqual(self.started[-1][3]["approval_kind"], "calendar")
+
+    def test_schedule_execution_uses_finding_when_draft_is_empty(self):
+        meeting_details = (
+            "Phil / Rima 1:1\n"
+            "When: Monday, August 17, 3:05-3:30 PM ET\n"
+            "Agenda: Current priorities and open questions"
+        )
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
+        self._ready_action(
+            tid,
+            action_type="schedule-meeting",
+            draft=None,
+            finding=f"\n\t{meeting_details}\n",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 202)
+        action = json.loads(response.body)["action"]
+        self.assertEqual(action["draft"], meeting_details)
+        self.assertEqual(
+            self.started[-1][3]["approved_snapshot"]["draft"],
+            meeting_details,
+        )
+        self.assertIn("Monday, August 17", self.started[-1][1])
 
     def test_rejects_unconfirmed_destination(self):
         tid = self.make_task()

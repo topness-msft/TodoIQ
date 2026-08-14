@@ -81,12 +81,7 @@ class TestCoworkIndicators:
             card = page.locator(".cw-card.is-running")
             expect(card).to_be_visible()
             expect(card.locator(".cw-head .cw-badge")).to_have_count(0)
-            expect(card.locator(".cw-foot-note")).to_contain_text(
-                "read-only preview"
-            )
-            expect(card.locator(".cw-foot-note")).to_contain_text(
-                "nothing is sent from here"
-            )
+            expect(card.locator(".cw-foot-note")).to_have_count(0)
             expect(card.get_by_test_id("cw-stop")).to_be_visible()
             page.screenshot(
                 path=os.path.join(
@@ -94,6 +89,46 @@ class TestCoworkIndicators:
                 ),
                 full_page=True,
             )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_waiting_for_answer_omits_stale_nothing_sent_footer(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                f"""
+                const task = tasks.find(item => item.id === {task_id});
+                task.parse_status = 'parsed';
+                _cwActions[{task_id}] = {{
+                    id: 2,
+                    task_id: {task_id},
+                    state: 'previewing',
+                    waiting_on_user: true,
+                    interaction_request: {{
+                        invocation_id: 'ask-1',
+                        questions: [{{
+                            id: '0',
+                            question: 'Which time works?',
+                            options: [{{value: 'Monday', label: 'Monday'}}]
+                        }}]
+                    }}
+                }};
+                selectedTaskId = {task_id};
+                renderDetailPane(task);
+                """
+            )
+
+            card = page.locator(".cw-card.is-running")
+            expect(card).to_be_visible()
+            expect(card.get_by_test_id("cw-answer-submit")).to_be_visible()
+            expect(card.get_by_test_id("cw-stop")).to_be_visible()
+            expect(card.locator(".cw-foot-note")).to_have_count(0)
         finally:
             _delete_task(page, base_url, task_id)
 

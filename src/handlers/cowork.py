@@ -25,6 +25,7 @@ from ..models import (
     confirm_destination,
     create_execution_action,
     create_task_action,
+    final_action_draft,
     get_latest_task_action,
     get_task,
     list_task_actions,
@@ -893,6 +894,14 @@ class CoworkHandler(tornado.web.RequestHandler):
             action = mark_task_action_seen(action["id"])
 
         payload = _enrich(_clean(action))
+        credited_runs = [
+            row["cost_credits"]
+            for row in list_task_actions(tid)
+            if row.get("cost_credits") is not None
+        ]
+        payload["credits_cumulative"] = (
+            sum(credited_runs) if credited_runs else None
+        )
         # Live liveness from the CLI's stderr. A preview runs for a median of
         # 119s, so the card needs something to say while it waits.
         label = (
@@ -1035,9 +1044,7 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
             return self._fail(409, "This draft has no Cowork conversation.")
         if not parent.get("destination_confirmed_at"):
             return self._fail(409, "Review and confirm the destination first.")
-        if not (
-            (parent.get("draft_edited") or parent.get("draft") or "").strip()
-        ):
+        if not final_action_draft(parent):
             return self._fail(409, "The final draft is empty.")
         if parent.get("action_type") == "schedule-meeting":
             unresolved = _unresolved_schedule_people(task)
