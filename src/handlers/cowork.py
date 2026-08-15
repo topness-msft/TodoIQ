@@ -753,8 +753,9 @@ def _delivery_evidence_matches(
     if not _delivery_tool_matches_action(action, tool.get("name")):
         return False
     if action.get("action_type") == "schedule-meeting":
+        approved_input = tool.get("approved_input")
         return _calendar_event_matches(
-            tool.get("input"),
+            approved_input if approved_input is not None else tool.get("input"),
             approved_calendar_event,
             reviewed_draft=final_action_draft(action),
         )

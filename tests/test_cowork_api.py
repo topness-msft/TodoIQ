@@ -1335,6 +1335,35 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
                 meeting_action, matching_meeting, approved_event
             )
         )
+        stale_trace_with_approved_input = json.loads(json.dumps(matching_meeting))
+        tool = stale_trace_with_approved_input["tools"][0]
+        tool["approved_input"] = tool["input"]
+        tool["input"] = approved_event
+        self.assertTrue(
+            _delivery_evidence_matches(
+                meeting_action, stale_trace_with_approved_input, approved_event
+            )
+        )
+        changed_approved_input = json.loads(
+            json.dumps(stale_trace_with_approved_input)
+        )
+        changed_approved_input["tools"][0]["approved_input"]["body"] = (
+            "Different approved body"
+        )
+        self.assertFalse(
+            _delivery_evidence_matches(
+                meeting_action, changed_approved_input, approved_event
+            )
+        )
+        failed_approved_write = json.loads(
+            json.dumps(stale_trace_with_approved_input)
+        )
+        failed_approved_write["tools"][0]["ok"] = False
+        self.assertFalse(
+            _delivery_evidence_matches(
+                meeting_action, failed_approved_write, approved_event
+            )
+        )
         missing_footer = json.loads(json.dumps(matching_meeting))
         missing_footer["tools"][0]["input"]["body"] = (
             cr._render_calendar_event_body(
@@ -1869,7 +1898,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
                     "event": "ts",
                     "tid": "calendar-1",
                     "tn": "mcp__outlook_calendar__CreateEvent",
-                    "inp": json.dumps(executed_event),
+                    "inp": json.dumps(calendar_event),
                 },
                 {
                     "event": "tx",
@@ -1878,6 +1907,9 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
                     "ok": True,
                 },
             ],
+            "approved_inputs": {
+                "calendar-1": executed_event,
+            },
             "callback_exchanges": [],
         }
         cr._runs[cr.execution_label(tid)] = {

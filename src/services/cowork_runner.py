@@ -975,7 +975,9 @@ def parse_cowork_output(stdout: str, stderr: str = "") -> dict:
     text = payload.get("text") or ""
     result["raw_text"] = text
 
-    result["tools"] = _canonical_tools(payload.get("sse_events"))
+    result["tools"] = _canonical_tools(
+        payload.get("sse_events"), payload.get("approved_inputs")
+    )
 
     result["barrier"] = _barrier_verdict(
         result["tool_trace"], payload.get("callback_exchanges"), text,
@@ -1369,7 +1371,7 @@ def warm_barrier_precheck() -> None:
         pass
 
 
-def _canonical_tools(sse_events):
+def _canonical_tools(sse_events, approved_inputs=None):
     """Tool calls with their CANONICAL names, from the `ts`/`tx` SSE events.
 
     ``tool_trace`` carries display labels: G1d logged an intercepted Teams post
@@ -1400,6 +1402,7 @@ def _canonical_tools(sse_events):
                     "ok": None,
                     "duration_ms": None,
                     "input": ev.get("inp"),
+                    "approved_input": (approved_inputs or {}).get(tid),
                 }
                 order.append(tid)
         elif ev.get("event") == "tx":
@@ -1410,6 +1413,7 @@ def _canonical_tools(sse_events):
                     "ok": None,
                     "duration_ms": None,
                     "input": ev.get("inp"),
+                    "approved_input": (approved_inputs or {}).get(tid),
                 },
             )
             if tid not in order:
@@ -2593,7 +2597,7 @@ def _iter_sse(lines):
                 continue
 
 
-def _api_payload_from_events(events, conversation_id):
+def _api_payload_from_events(events, conversation_id, approved_inputs=None):
     """Build the CLI-equivalent stdout document from ``(kind, data)`` pairs."""
     text_parts = []
     sse_events = []
@@ -2640,6 +2644,7 @@ def _api_payload_from_events(events, conversation_id):
         "tool_trace": [starts[t] for t in order],
         "text": "".join(text_parts),
         "sse_events": sse_events,
+        "approved_inputs": dict(approved_inputs or {}),
         "callback_exchanges": [],
     }
 
@@ -3379,6 +3384,7 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
     }
 
     events = []
+    approved_inputs = {}
     client = _api_http_client_fn()
     with client:
         verb = "GET" if is_follow_up else "POST"
@@ -3489,6 +3495,20 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                             "Cowork rejected the approved tool action: "
                             f"HTTP {answered.status_code}"
                         )
+                    edited_input = approval.get("edited_input")
+                    if isinstance(edited_input, dict):
+                        tool_event_id = data.get("tid")
+                        if not tool_event_id:
+                            for event_kind, event_data in reversed(events):
+                                if (
+                                    event_kind == "ts"
+                                    and _spellings(event_data.get("tn"))
+                                    & _spellings(data.get("tn"))
+                                ):
+                                    tool_event_id = event_data.get("tid")
+                                    break
+                        if tool_event_id:
+                            approved_inputs[str(tool_event_id)] = edited_input
                     tool_approval_answered = True
                     logger.info(
                         "answered %s tool approval for conversation %s",
@@ -3507,7 +3527,9 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
             "may have expired; try again, or use Start over."
         )
 
-    return _api_payload_from_events(events, conversation_id)
+    return _api_payload_from_events(
+        events, conversation_id, approved_inputs=approved_inputs
+    )
 
 
 def _api_progress_text(kind, data):

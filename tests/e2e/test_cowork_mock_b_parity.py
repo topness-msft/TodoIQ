@@ -390,6 +390,28 @@ def test_execution_progress_and_approval_states(page: Page, base_url):
             "draft": "Final approved text.",
             "destination_display": "Mehdi Slaoui Andaloussi",
             "waiting_on_user": True,
+            "interaction_request": None,
+            "progress": ["Approving the reviewed calendar event"],
+        },
+    )
+    expect(page.get_by_text("approved action in progress")).to_be_visible()
+    expect(
+        page.get_by_text("Cowork needs your approval to finish this action.")
+    ).not_to_be_visible()
+    expect(page.get_by_text("Loading Cowork’s question…")).not_to_be_visible()
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-executing-no-phantom-approval.png"),
+        full_page=True,
+    )
+
+    _render(
+        page,
+        base_url,
+        {
+            "state": "executing",
+            "draft": "Final approved text.",
+            "destination_display": "Mehdi Slaoui Andaloussi",
+            "waiting_on_user": True,
             "interaction_request": {
                 "invocation_id": "approval-1",
                 "questions": [

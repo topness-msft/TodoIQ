@@ -4109,8 +4109,8 @@ function renderCoworkCard(task) {
         if (a && a.state === 'executing') {
             if (!_cwPollers[task.id]) startCoworkPoller(task.id);
             var sendProgress = cwExecutionProgress(task, a);
-            if (a.waiting_on_user) {
-                var executeInteraction = a.interaction_request;
+            var executeInteraction = a.interaction_request;
+            if (a.waiting_on_user && executeInteraction) {
                 return cwShell('is-running is-executing', 'needs approval', task,
                     '<div class="cw-delivery-target"><span>Acting in</span><b>'
                     + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'

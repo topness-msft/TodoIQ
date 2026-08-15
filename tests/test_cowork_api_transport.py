@@ -707,8 +707,25 @@ class TestCalendarToolApproval(unittest.TestCase):
                 yield "event: rl"
                 yield 'data: {"st":"started"}'
                 yield ""
+                yield "event: ts"
+                yield "data: " + json.dumps({
+                    "tid": "calendar-1",
+                    "tn": "mcp__outlook_calendar__CreateEvent",
+                    "inp": json.dumps(self.client.ta["params"]),
+                })
+                yield ""
                 yield "event: ta"
-                yield "data: " + json.dumps(self.client.ta)
+                yield "data: " + json.dumps({
+                    **self.client.ta,
+                    "tid": "calendar-1",
+                })
+                yield ""
+                yield "event: tx"
+                yield "data: " + json.dumps({
+                    "tid": "calendar-1",
+                    "tn": "mcp__outlook_calendar__CreateEvent",
+                    "ok": True,
+                })
                 yield ""
                 yield "event: rl"
                 yield 'data: {"st":"ok"}'
@@ -764,6 +781,18 @@ class TestCalendarToolApproval(unittest.TestCase):
             )
             + "<br><br><!-- aether-footer -->"
             + cr._AETHER_FOOTERS["calendar"],
+        )
+        self.assertEqual(
+            payload["approved_inputs"]["calendar-1"],
+            approval["edited_input"],
+        )
+        original_start = next(
+            event for event in payload["sse_events"]
+            if event["event"] == "ts"
+        )
+        self.assertEqual(
+            json.loads(original_start["inp"]),
+            self.ta["params"],
         )
 
     def test_exact_calendar_shape_builds_approval(self):
