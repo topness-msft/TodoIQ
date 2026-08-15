@@ -2782,7 +2782,7 @@ def _reviewed_calendar_body(reviewed_draft, subject):
     for line in lines[start + 1:]:
         if not line:
             continue
-        if line == "**Agenda**":
+        if line in {"**Agenda**", "**Agenda:**"}:
             section = "agenda"
             continue
         if not line.startswith("- "):
@@ -2790,7 +2790,7 @@ def _reviewed_calendar_body(reviewed_draft, subject):
         value = line[2:]
         if section == "details":
             value = re.sub(
-                r"\s+(?:-|—|\ufffd)\s+calendar shows free at this time$",
+                r"\s+(?:-|—|\ufffd)\s+calendar show(?:s|ed) free at this time$",
                 "",
                 value,
                 flags=re.I,
@@ -2829,12 +2829,19 @@ def _safe_preview_calendar_body(proposal_body, reviewed_draft):
     }
     if any(tag.lower() not in allowed_tags for tag in re.findall(r"<[^>]+>", decoded)):
         return False
-    match = re.fullmatch(
+    old_shape = re.fullmatch(
         r"<p>Quick 1:1 to sync up\.</p>\s*"
         r"<p><b>Agenda</b></p>\s*"
         r"<ul>(?P<items>(?:\s*<li>[^<]*</li>\s*)+)</ul>",
         decoded,
     )
+    action_118_shape = re.fullmatch(
+        r"<p>Quick 1:1 to sync up\. Suggested agenda:</p>\s*"
+        r"<ul>(?P<items>(?:\s*<li>[^<]*</li>\s*)+)</ul>\s*"
+        r"<p>Feel free to add anything you'd like to cover\.</p>",
+        decoded,
+    )
+    match = old_shape or action_118_shape
     if not match:
         return False
     items = re.findall(r"<li>([^<]*)</li>", match.group("items"))

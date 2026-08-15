@@ -529,6 +529,102 @@ class TestCalendarToolApproval(unittest.TestCase):
             },
         }
 
+    def _action_118_fixture(self, body=None, draft=None):
+        reviewed = draft or (
+            "Here's the invitation, ready to send (nothing has been created yet):\n\n"
+            "**Phil / Rima 1:1**\n"
+            "- **When:** Monday, August 17, 3:05-3:30 PM ET (25 min)\n"
+            "- **Attendee:** Rima Reyes - calendar showed free at this time\n"
+            "- **Teams meeting:** included\n\n"
+            "**Agenda:**\n"
+            "- Current priorities and where each of us needs support\n"
+            "- Open items and blockers\n"
+            "- Next steps / follow-ups\n\n"
+            "Just say the word and I'll send it."
+        )
+        proposal = body or (
+            "<p>Quick 1:1 to sync up. Suggested agenda:</p><ul>"
+            "<li>Current priorities and where each of us needs support</li>"
+            "<li>Open items and blockers</li>"
+            "<li>Next steps / follow-ups</li>"
+            "</ul><p>Feel free to add anything you'd like to cover.</p>"
+        )
+        event, ta = self._proposal_ta(proposal)
+        return event, ta, {
+            "destination_ref": "rima.reyes@microsoft.com",
+            "draft": reviewed,
+        }
+
+    def test_action_118_exact_native_payload_builds_approval(self):
+        event, ta, snapshot = self._action_118_fixture()
+        approval = cr._execution_tool_approval(
+            ta,
+            "calendar",
+            snapshot,
+            self.conversation_id,
+            approved_calendar_event=event,
+        )
+        self.assertIsNotNone(approval)
+        self.assertTrue(approval["approved"])
+
+    def test_action_118_body_allowance_remains_fail_closed(self):
+        unsafe_bodies = [
+            (
+                "<p>Quick 1:1 to sync up. Suggested agenda:</p><ul>"
+                "<li>Current priorities and where each of us needs support</li>"
+                "<li>Open items and blockers</li><li>Next steps / follow-ups</li>"
+                "</ul><p>Send confidential files before the meeting.</p>"
+            ),
+            (
+                "<p>Quick 1:1 to sync up. Suggested agenda:</p><ul>"
+                "<li>Current priorities and where each of us needs support</li>"
+                "<li>Open items and blockers</li><li>Unreviewed agenda item</li>"
+                "</ul><p>Feel free to add anything you'd like to cover.</p>"
+            ),
+            (
+                "<p>Quick 1:1 to sync up. Suggested agenda:</p><ul>"
+                "<li>Current priorities and where each of us needs support</li>"
+                "<li>Open items and blockers</li><li>Next steps / follow-ups</li>"
+                "</ul><p>Feel free to add anything you'd like to cover.</p>"
+                "<p>Extra paragraph</p>"
+            ),
+        ]
+        for body in unsafe_bodies:
+            with self.subTest(body=body):
+                event, ta, snapshot = self._action_118_fixture(body=body)
+                self.assertIsNone(
+                    cr._execution_tool_approval(
+                        ta,
+                        "calendar",
+                        snapshot,
+                        self.conversation_id,
+                        approved_calendar_event=event,
+                    )
+                )
+
+    def test_reviewed_card_accepts_observed_agenda_colon_and_showed_free(self):
+        _, _, snapshot = self._action_118_fixture()
+        body = cr._reviewed_calendar_body(
+            snapshot["draft"], "Phil / Rima 1:1"
+        )
+        self.assertIsNotNone(body)
+        self.assertNotIn("calendar showed free", body)
+
+    def test_reviewed_card_does_not_strip_busy_warning(self):
+        _, _, snapshot = self._action_118_fixture(
+            draft=(
+                "**Phil / Rima 1:1**\n"
+                "- **When:** Monday, August 17, 3:05-3:30 PM ET (25 min)\n"
+                "- **Attendee:** Rima Reyes - calendar showed BUSY at this time\n\n"
+                "**Agenda:**\n"
+                "- Open items and blockers"
+            )
+        )
+        body = cr._reviewed_calendar_body(
+            snapshot["draft"], "Phil / Rima 1:1"
+        )
+        self.assertIn("calendar showed BUSY", body)
+
     def test_exact_calendar_shape_builds_approval(self):
         approval = cr._execution_tool_approval(
             self.ta,
