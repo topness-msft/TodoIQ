@@ -9,6 +9,17 @@
     <style>
         * { font-family: 'Segoe UI', -apple-system, system-ui, sans-serif; }
     </style>
+    <script>
+        (function() {
+            var saved = Number(localStorage.getItem('todoness-list-width'));
+            if (!Number.isFinite(saved) || !saved) return;
+            var width = Math.min(600, Math.max(260, saved));
+            if (window.innerWidth > 768) {
+                width = Math.min(width, Math.max(260, window.innerWidth - 409));
+            }
+            document.documentElement.style.setProperty('--left-panel-width', width + 'px');
+        })();
+    </script>
 </head>
 <body>
     {% block content %}{% end %}

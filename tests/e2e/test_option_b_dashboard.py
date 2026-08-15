@@ -7,6 +7,7 @@ from playwright.sync_api import Page, expect
 
 
 SCREENSHOTS_DIR = os.path.join("temp", "option-b-dashboard")
+OUTER_SPLIT_SCREENSHOTS_DIR = os.path.join("temp", "outer-split")
 
 
 def _seed_task(page: Page, base_url: str) -> int:
@@ -208,6 +209,111 @@ class TestOptionBSeparator:
             assert after_key and after_key["width"] < rerendered["width"]
         finally:
             _delete_task(page, base_url, task_id)
+
+
+class TestOuterPanelSeparator:
+    def test_drag_keyboard_persistence_and_responsive_bounds(
+        self, page: Page, base_url
+    ):
+        page.set_viewport_size({"width": 1400, "height": 900})
+        page.goto(base_url + "/")
+        panel = page.locator(".left-panel")
+        handle = page.locator(".main-split-handle")
+
+        expect(handle).to_be_visible()
+        expect(handle).to_have_attribute("role", "separator")
+        expect(handle).to_have_attribute("aria-orientation", "vertical")
+        initial = panel.bounding_box()
+        assert initial and abs(initial["width"] - 400) <= 1
+
+        handle_box = handle.bounding_box()
+        assert handle_box
+        page.mouse.move(
+            handle_box["x"] + handle_box["width"] / 2,
+            handle_box["y"] + 100,
+        )
+        page.mouse.down()
+        expect(page.locator(".main-content")).to_have_class(
+            __import__("re").compile(r"\bis-resizing\b")
+        )
+        page.mouse.move(handle_box["x"] + 120, handle_box["y"] + 100)
+        page.mouse.up()
+        expect(page.locator(".main-content")).not_to_have_class(
+            __import__("re").compile(r"\bis-resizing\b")
+        )
+        widened = panel.bounding_box()
+        assert widened and widened["width"] >= initial["width"] + 100
+        stored = page.evaluate(
+            "Number(localStorage.getItem('todoness-list-width'))"
+        )
+        assert abs(stored - widened["width"]) <= 2
+
+        page.reload()
+        restored = panel.bounding_box()
+        assert restored and abs(restored["width"] - widened["width"]) <= 2
+        handle.focus()
+        arrow_start = int(handle.get_attribute("aria-valuenow"))
+        page.keyboard.press("ArrowLeft")
+        expect(handle).to_have_attribute("aria-valuenow", str(arrow_start - 10))
+        page.keyboard.press("ArrowRight")
+        expect(handle).to_have_attribute("aria-valuenow", str(arrow_start))
+        page.keyboard.press("Home")
+        expect(handle).to_have_attribute("aria-valuenow", "260")
+        minimum = panel.bounding_box()
+        assert minimum and abs(minimum["width"] - 260) <= 1
+        page.keyboard.press("End")
+        maximum_value = int(handle.get_attribute("aria-valuemax"))
+        maximum = panel.bounding_box()
+        assert maximum and abs(maximum["width"] - maximum_value) <= 1
+        assert maximum_value <= 600
+
+        page.set_viewport_size({"width": 900, "height": 900})
+        reclamped = panel.bounding_box()
+        assert reclamped and reclamped["width"] <= 491
+        right_panel = page.locator(".right-panel").bounding_box()
+        assert right_panel and right_panel["width"] >= 400
+
+        os.makedirs(OUTER_SPLIT_SCREENSHOTS_DIR, exist_ok=True)
+        page.screenshot(
+            path=os.path.join(
+                OUTER_SPLIT_SCREENSHOTS_DIR, "outer-divider-light.png"
+            )
+        )
+
+        page.set_viewport_size({"width": 768, "height": 900})
+        expect(handle).to_be_hidden()
+        expect(panel).to_have_css("width", "768px")
+        stored_before_mobile_pointer = page.evaluate(
+            "localStorage.getItem('todoness-list-width')"
+        )
+        page.evaluate(
+            """() => document.querySelector('.main-split-handle').dispatchEvent(
+                new PointerEvent('pointerdown', {pointerId: 99, bubbles: true})
+            )"""
+        )
+        assert page.evaluate(
+            "localStorage.getItem('todoness-list-width')"
+        ) == stored_before_mobile_pointer
+        expect(page.locator(".main-content")).not_to_have_class(
+            __import__("re").compile(r"\bis-resizing\b")
+        )
+
+    def test_dark_mode_visual(self, page: Page, base_url):
+        page.set_viewport_size({"width": 1400, "height": 900})
+        page.goto(base_url + "/")
+        page.evaluate(
+            """() => {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                localStorage.setItem('theme', 'dark');
+            }"""
+        )
+        expect(page.locator(".main-split-handle")).to_be_visible()
+        os.makedirs(OUTER_SPLIT_SCREENSHOTS_DIR, exist_ok=True)
+        page.screenshot(
+            path=os.path.join(
+                OUTER_SPLIT_SCREENSHOTS_DIR, "outer-divider-dark.png"
+            )
+        )
 
 
 class TestSourceContextCard:

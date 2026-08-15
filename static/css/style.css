@@ -23,6 +23,7 @@
     --danger: #bc2f32;
     --danger-bg: #fdf3f4;
     --warning: #d47a0a;
+    --left-panel-width: 400px;
     --warning-bg: #fff8e1;
     --snooze: #795b00;
     --snooze-bg: #fef3cd;
@@ -477,13 +478,45 @@ html, body {
 
 /* ── Left Panel (Outlook message list) ──────────────────────────────── */
 .left-panel {
-    width: 400px;
-    min-width: 320px;
-    border-right: 1px solid var(--border-primary);
+    flex: 0 0 var(--left-panel-width);
+    width: var(--left-panel-width);
+    min-width: 0;
     background: var(--bg-secondary);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+.main-split-handle {
+    position: relative;
+    flex: 0 0 9px;
+    align-self: stretch;
+    cursor: col-resize;
+    touch-action: none;
+    outline: none;
+}
+
+.main-split-handle::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 4px;
+    width: 1px;
+    background: var(--border-primary);
+    transition: width 0.15s, left 0.15s, background 0.15s;
+}
+
+.main-split-handle:hover::before,
+.main-split-handle:focus-visible::before,
+.main-content.is-resizing .main-split-handle::before {
+    left: 3px;
+    width: 3px;
+    background: var(--accent);
+}
+
+.main-content.is-resizing,
+.main-content.is-resizing * {
+    cursor: col-resize !important;
+    user-select: none;
 }
 
 .search-bar {
@@ -1032,6 +1065,7 @@ html, body {
 /* ── Right Panel (Outlook reading pane) ─────────────────────────────── */
 .right-panel {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
     padding: 20px;
     background: var(--bg-tertiary);
@@ -2775,6 +2809,7 @@ html, body {
     }
 
     .left-panel {
+        flex: 0 0 auto;
         width: 100%;
         min-width: 0;
         border-right: none;
@@ -2787,6 +2822,9 @@ html, body {
         min-height: 0;
     }
 
+    .main-split-handle {
+        display: none;
+    }
 }
 
 /* === Cowork action card ================================================= */

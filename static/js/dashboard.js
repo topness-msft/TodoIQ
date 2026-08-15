@@ -16,6 +16,12 @@ var _skillPollTimer = null;
 var _runningSkills = {};
 var _loadedSections = {};
 var _detailSplitResizeObserver = null;
+var _mainSplitResizeHandler = null;
+var MAIN_SPLIT_STORAGE_KEY = 'todoness-list-width';
+var MAIN_SPLIT_DEFAULT = 400;
+var MAIN_SPLIT_MIN = 260;
+var MAIN_SPLIT_MAX = 600;
+var MAIN_DETAIL_MIN = 400;
 var DETAIL_EVIDENCE_STORAGE_KEY = 'todoness-evidence-width';
 var DETAIL_EVIDENCE_MIN = 25;
 var DETAIL_EVIDENCE_MAX = 65;
@@ -74,6 +80,7 @@ function init() {
     fetchSyncStatus();
     startSyncWatcher();
     setupKeyboardShortcuts();
+    initMainSplit();
 
     // Sync theme icon with current state
     var theme = document.documentElement.getAttribute('data-theme') || 'light';
@@ -1039,6 +1046,87 @@ function initDetailSplit() {
         e.preventDefault();
         e.stopPropagation();
         setDetailEvidenceWidth(split, handle, next, true);
+    });
+}
+
+function getMainSplitBounds(main, handle) {
+    var available = main.clientWidth - handle.offsetWidth - MAIN_DETAIL_MIN;
+    return {
+        min: MAIN_SPLIT_MIN,
+        max: Math.max(MAIN_SPLIT_MIN, Math.min(MAIN_SPLIT_MAX, available))
+    };
+}
+
+function setMainSplitWidth(main, handle, value, persist) {
+    var bounds = getMainSplitBounds(main, handle);
+    var width = Math.min(bounds.max, Math.max(bounds.min, value));
+    main.style.setProperty('--left-panel-width', width + 'px');
+    handle.setAttribute('aria-valuemin', String(bounds.min));
+    handle.setAttribute('aria-valuemax', String(bounds.max));
+    handle.setAttribute('aria-valuenow', String(Math.round(width)));
+    if (persist) localStorage.setItem(MAIN_SPLIT_STORAGE_KEY, String(width));
+}
+
+function initMainSplit() {
+    var main = document.querySelector('.main-content');
+    var handle = main && main.querySelector('.main-split-handle');
+    if (!main || !handle) return;
+
+    var saved = Number(localStorage.getItem(MAIN_SPLIT_STORAGE_KEY));
+    setMainSplitWidth(
+        main,
+        handle,
+        Number.isFinite(saved) && saved ? saved : MAIN_SPLIT_DEFAULT,
+        false
+    );
+
+    if (_mainSplitResizeHandler) {
+        window.removeEventListener('resize', _mainSplitResizeHandler);
+    }
+    _mainSplitResizeHandler = function() {
+        var preferred = Number(localStorage.getItem(MAIN_SPLIT_STORAGE_KEY));
+        setMainSplitWidth(
+            main,
+            handle,
+            Number.isFinite(preferred) && preferred
+                ? preferred
+                : Number(handle.getAttribute('aria-valuenow')) || MAIN_SPLIT_DEFAULT,
+            false
+        );
+    };
+    window.addEventListener('resize', _mainSplitResizeHandler);
+
+    handle.addEventListener('pointerdown', function(e) {
+        if (window.matchMedia('(max-width: 768px)').matches) return;
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        main.classList.add('is-resizing');
+    });
+    handle.addEventListener('pointermove', function(e) {
+        if (!handle.hasPointerCapture(e.pointerId)) return;
+        var rect = main.getBoundingClientRect();
+        setMainSplitWidth(main, handle, e.clientX - rect.left, true);
+    });
+    function finishMainResize(e) {
+        if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+        main.classList.remove('is-resizing');
+    }
+    handle.addEventListener('pointerup', finishMainResize);
+    handle.addEventListener('pointercancel', finishMainResize);
+    handle.addEventListener('keydown', function(e) {
+        if (window.matchMedia('(max-width: 768px)').matches) return;
+        var current = Number(handle.getAttribute('aria-valuenow')) || MAIN_SPLIT_DEFAULT;
+        var min = Number(handle.getAttribute('aria-valuemin')) || MAIN_SPLIT_MIN;
+        var max = Number(handle.getAttribute('aria-valuemax')) || MAIN_SPLIT_MAX;
+        var next = current;
+        if (e.key === 'ArrowLeft') next = current - 10;
+        else if (e.key === 'ArrowRight') next = current + 10;
+        else if (e.key === 'Home') next = min;
+        else if (e.key === 'End') next = max;
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+        setMainSplitWidth(main, handle, next, true);
     });
 }
 
@@ -4948,16 +5036,22 @@ function _kbActThenAdvance(taskId, action) {
     // list re-renders and the row moves to another section.
     var rows = _getVisibleRows();
     var successorId = null;
+    var destination = action === 'complete' ? 'completed' : 'dismissed';
+    var selectedIndex = -1;
     for (var i = 0; i < rows.length; i++) {
-        if (_rowTaskId(rows[i]) !== taskId) continue;
-        for (var j = i + 1; j < rows.length; j++) {
-            var candidate = _rowTaskId(rows[j]);
-            if (candidate && candidate !== taskId) {
-                successorId = candidate;
-                break;
-            }
+        if (_rowTaskId(rows[i]) === taskId) {
+            selectedIndex = i;
+            break;
         }
-        break;
+    }
+    for (var offset = 1; selectedIndex !== -1 && offset < rows.length; offset++) {
+        var candidate = _rowTaskId(rows[(selectedIndex + offset) % rows.length]);
+        var candidateTask = tasks.find(function(t) { return t.id === candidate; });
+        var allowed = candidateTask && VALID_TRANSITIONS[candidateTask.status];
+        if (candidate !== taskId && allowed && allowed.indexOf(destination) !== -1) {
+            successorId = candidate;
+            break;
+        }
     }
 
     var pending = doAction(taskId, action);
