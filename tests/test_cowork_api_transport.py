@@ -566,9 +566,18 @@ class TestCalendarToolApproval(unittest.TestCase):
         )
         self.assertIsNotNone(approval)
         self.assertTrue(approval["approved"])
+        self.assertIsInstance(approval["edited_input"], dict)
+        self.assertEqual(
+            approval["edited_input"]["body"],
+            cr._render_calendar_event_body(
+                snapshot["draft"], event["subject"]
+            )
+            + "<br><br><!-- aether-footer -->"
+            + cr._AETHER_FOOTERS["calendar"],
+        )
 
-    def test_action_118_body_allowance_remains_fail_closed(self):
-        unsafe_bodies = [
+    def test_model_generated_body_variants_are_replaced_deterministically(self):
+        generated_bodies = [
             (
                 "<p>Quick 1:1 to sync up. Suggested agenda:</p><ul>"
                 "<li>Current priorities and where each of us needs support</li>"
@@ -589,41 +598,173 @@ class TestCalendarToolApproval(unittest.TestCase):
                 "<p>Extra paragraph</p>"
             ),
         ]
-        for body in unsafe_bodies:
+        edited_bodies = []
+        for body in generated_bodies:
             with self.subTest(body=body):
                 event, ta, snapshot = self._action_118_fixture(body=body)
-                self.assertIsNone(
-                    cr._execution_tool_approval(
-                        ta,
-                        "calendar",
-                        snapshot,
-                        self.conversation_id,
-                        approved_calendar_event=event,
-                    )
+                approval = cr._execution_tool_approval(
+                    ta,
+                    "calendar",
+                    snapshot,
+                    self.conversation_id,
+                    approved_calendar_event=event,
                 )
+                self.assertIsNotNone(approval)
+                edited_bodies.append(approval["edited_input"]["body"])
+        self.assertEqual(len(set(edited_bodies)), 1)
 
-    def test_reviewed_card_accepts_observed_agenda_colon_and_showed_free(self):
+    def test_reviewed_draft_renders_valid_single_escaped_calendar_html(self):
         _, _, snapshot = self._action_118_fixture()
-        body = cr._reviewed_calendar_body(
+        body = cr._render_calendar_event_body(
             snapshot["draft"], "Phil / Rima 1:1"
         )
         self.assertIsNotNone(body)
+        self.assertIn("<strong>Phil / Rima 1:1</strong>", body)
+        self.assertIn("<strong>Agenda</strong>", body)
+        self.assertIn("<li>Open items and blockers</li>", body)
         self.assertNotIn("calendar showed free", body)
+        self.assertNotIn("&lt;p&gt;", body)
 
-    def test_reviewed_card_does_not_strip_busy_warning(self):
+    def test_reviewed_draft_html_is_escaped_and_busy_warning_is_preserved(self):
         _, _, snapshot = self._action_118_fixture(
             draft=(
                 "**Phil / Rima 1:1**\n"
                 "- **When:** Monday, August 17, 3:05-3:30 PM ET (25 min)\n"
-                "- **Attendee:** Rima Reyes - calendar showed BUSY at this time\n\n"
+                "- **Attendee:** <script>alert(1)</script> - calendar showed BUSY at this time\n\n"
                 "**Agenda:**\n"
                 "- Open items and blockers"
             )
         )
-        body = cr._reviewed_calendar_body(
+        body = cr._render_calendar_event_body(
             snapshot["draft"], "Phil / Rima 1:1"
         )
         self.assertIn("calendar showed BUSY", body)
+        self.assertNotIn("<script>", body)
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_rejects_malformed_reviewed_drafts(self):
+        cases = [
+            None,
+            "",
+            "**Wrong subject**\n- **When:** Tomorrow\n\n**Agenda**\n- Sync",
+            "**Phil / Rima 1:1**\n- **When:** Tomorrow",
+            "**Phil / Rima 1:1**\n\n**Agenda**\n- Sync",
+            "**Phil / Rima 1:1**\n- **When:** Tomorrow\n\n**Agenda**",
+        ]
+        for draft in cases:
+            with self.subTest(draft=draft):
+                self.assertIsNone(
+                    cr._render_calendar_event_body(draft, "Phil / Rima 1:1")
+                )
+
+    def test_action_120_strong_heading_payload_is_replaced(self):
+        ta = json.loads(json.dumps(self.ta))
+        ta["params"]["body"] = (
+            "<p><strong>Agenda</strong></p><ul>"
+            "<li>Current priorities and where things stand</li>"
+            "<li>Blockers or support needed</li>"
+            "<li>Upcoming milestones and next steps</li>"
+            "<li>Open floor - anything Rima wants to add</li></ul>"
+            "<br><br><!-- aether-footer -->"
+            + cr._AETHER_FOOTERS["calendar"]
+        )
+        approval = cr._execution_tool_approval(
+            ta,
+            "calendar",
+            self.snapshot,
+            self.conversation_id,
+            approved_calendar_event=self.event,
+        )
+        self.assertIsNotNone(approval)
+        self.assertEqual(
+            approval["edited_input"],
+            {
+                **self.event,
+                "body": (
+                    cr._render_calendar_event_body(
+                        self.reviewed_draft, self.event["subject"]
+                    )
+                    + "<br><br><!-- aether-footer -->"
+                    + cr._AETHER_FOOTERS["calendar"]
+                ),
+            },
+        )
+
+    def test_calendar_tool_approval_posts_complete_edited_input(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, client):
+                self.client = client
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                yield "event: rl"
+                yield 'data: {"st":"started"}'
+                yield ""
+                yield "event: ta"
+                yield "data: " + json.dumps(self.client.ta)
+                yield ""
+                yield "event: rl"
+                yield 'data: {"st":"ok"}'
+
+        class Posted:
+            status_code = 200
+            text = '{"success":true}'
+
+        class Client:
+            def __init__(self, ta):
+                self.ta = ta
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response(self)
+
+            def post(self, url, **kwargs):
+                self.posts.append({"url": url, **kwargs})
+                return Posted()
+
+        client = Client(self.ta)
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client):
+            payload = cr._api_run_default(
+                "create it",
+                None,
+                lambda _text: None,
+                conversation_id=self.conversation_id,
+                is_follow_up=True,
+                approval_kind="calendar",
+                approved_snapshot=self.snapshot,
+                approved_calendar_event=self.event,
+            )
+
+        self.assertEqual(payload["terminal_status"], "ok")
+        approval = [
+            call for call in client.posts
+            if call["url"].endswith("/v1/tool-approval")
+        ][0]["json"]
+        self.assertEqual(approval["approval_id"], self.ta["aid"])
+        self.assertEqual(approval["edited_input"]["subject"], self.event["subject"])
+        self.assertEqual(
+            approval["edited_input"]["body"],
+            cr._render_calendar_event_body(
+                self.reviewed_draft, self.event["subject"]
+            )
+            + "<br><br><!-- aether-footer -->"
+            + cr._AETHER_FOOTERS["calendar"],
+        )
 
     def test_exact_calendar_shape_builds_approval(self):
         approval = cr._execution_tool_approval(
@@ -637,6 +778,7 @@ class TestCalendarToolApproval(unittest.TestCase):
         self.assertEqual(approval["server_name"], "outlook_calendar")
         self.assertEqual(approval["tool_name"], "CreateEvent")
         self.assertTrue(approval["approved"])
+        self.assertIsInstance(approval["edited_input"], dict)
 
     def test_rejects_calendar_request_drift(self):
         cases = [
@@ -645,6 +787,15 @@ class TestCalendarToolApproval(unittest.TestCase):
             {**self.ta, "tn": "UpdateEvent"},
             {**self.ta, "params": {**self.ta["params"], "subject": "Changed"}},
             {**self.ta, "params": {**self.ta["params"], "start": "2026-08-20T11:05:00"}},
+            {**self.ta, "params": {**self.ta["params"], "end": "2026-08-20T11:30:00"}},
+            {**self.ta, "params": {**self.ta["params"], "time_zone": "UTC"}},
+            {
+                **self.ta,
+                "params": {
+                    **self.ta["params"],
+                    "is_online_meeting": False,
+                },
+            },
             {
                 **self.ta,
                 "params": {
@@ -662,12 +813,11 @@ class TestCalendarToolApproval(unittest.TestCase):
                     ],
                 },
             },
-            {**self.ta, "params": {**self.ta["params"], "body": "Changed"}},
             {
                 **self.ta,
                 "params": {
                     **self.ta["params"],
-                    "body": self.event["body"],
+                    "body": 42,
                 },
             },
         ]
@@ -683,20 +833,22 @@ class TestCalendarToolApproval(unittest.TestCase):
                     )
                 )
 
-    def test_rejects_changed_reviewed_calendar_body(self):
+    def test_replaces_changed_model_calendar_body(self):
         ta = json.loads(json.dumps(self.ta))
         ta["params"]["body"] = ta["params"]["body"].replace(
             "Current priorities and where things stand",
             "Send the confidential budget",
         )
-        self.assertIsNone(
-            cr._execution_tool_approval(
-                ta,
-                "calendar",
-                self.snapshot,
-                self.conversation_id,
-                approved_calendar_event=self.event,
-            )
+        approval = cr._execution_tool_approval(
+            ta,
+            "calendar",
+            self.snapshot,
+            self.conversation_id,
+            approved_calendar_event=self.event,
+        )
+        self.assertIsNotNone(approval)
+        self.assertNotIn(
+            "confidential budget", approval["edited_input"]["body"]
         )
 
     def test_rejects_unknown_calendar_field_or_explicit_non_html_content(self):
@@ -727,21 +879,23 @@ class TestCalendarToolApproval(unittest.TestCase):
             )
         )
 
-    def test_rejects_unreviewed_proposal_body_with_valid_footer(self):
+    def test_replaces_unreviewed_proposal_body_with_valid_footer(self):
         ta = json.loads(json.dumps(self.ta))
         ta["params"]["body"] = (
             self.event["body"]
             + "<!-- aether-footer -->"
             + cr._AETHER_FOOTERS["calendar"]
         )
-        self.assertIsNone(
-            cr._execution_tool_approval(
-                ta,
-                "calendar",
-                self.snapshot,
-                self.conversation_id,
-                approved_calendar_event=self.event,
-            )
+        approval = cr._execution_tool_approval(
+            ta,
+            "calendar",
+            self.snapshot,
+            self.conversation_id,
+            approved_calendar_event=self.event,
+        )
+        self.assertIsNotNone(approval)
+        self.assertNotEqual(
+            approval["edited_input"]["body"], ta["params"]["body"]
         )
 
     def test_accepts_safe_original_preview_body_from_live_action_116(self):
@@ -756,7 +910,7 @@ class TestCalendarToolApproval(unittest.TestCase):
             )
         )
 
-    def test_rejects_original_preview_body_with_unreviewed_content_or_tags(self):
+    def test_replaces_original_preview_body_with_unreviewed_content_or_tags(self):
         cases = [
             self.proposal_body.replace(
                 "&lt;/ul&gt;",
@@ -770,14 +924,19 @@ class TestCalendarToolApproval(unittest.TestCase):
         for body in cases:
             event, ta = self._proposal_ta(body)
             with self.subTest(body=body):
-                self.assertIsNone(
-                    cr._execution_tool_approval(
-                        ta,
-                        "calendar",
-                        self.snapshot,
-                        self.conversation_id,
-                        approved_calendar_event=event,
-                    )
+                approval = cr._execution_tool_approval(
+                    ta,
+                    "calendar",
+                    self.snapshot,
+                    self.conversation_id,
+                    approved_calendar_event=event,
+                )
+                self.assertIsNotNone(approval)
+                self.assertNotIn(
+                    "confidential budget", approval["edited_input"]["body"]
+                )
+                self.assertNotIn(
+                    "example.com", approval["edited_input"]["body"]
                 )
 
     def test_browser_snapshot_cannot_supply_calendar_event(self):

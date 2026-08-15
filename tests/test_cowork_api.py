@@ -1321,15 +1321,10 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
                     if key not in {"body", "content_type"}
                 } | {
                     "body": (
-                        "&lt;p&gt;&lt;strong&gt;Project review&lt;/strong&gt;&lt;/p&gt;"
-                        "&lt;ul&gt;&lt;li&gt;&lt;strong&gt;When:&lt;/strong&gt; "
-                        "Friday, August 21, 10:00-10:25 AM ET (25 min)&lt;/li&gt;"
-                        "&lt;li&gt;&lt;strong&gt;Attendee:&lt;/strong&gt; Sarah&lt;/li&gt;"
-                        "&lt;li&gt;&lt;strong&gt;Teams meeting:&lt;/strong&gt; "
-                        "included&lt;/li&gt;&lt;/ul&gt;"
-                        "&lt;p&gt;&lt;strong&gt;Agenda&lt;/strong&gt;&lt;/p&gt;"
-                        "&lt;ul&gt;&lt;li&gt;Review project status&lt;/li&gt;&lt;/ul&gt;"
-                        "<br><br><!-- aether-footer -->"
+                        cr._render_calendar_event_body(
+                            meeting_action["draft"], approved_event["subject"]
+                        )
+                        + "<br><br><!-- aether-footer -->"
                         + cr._AETHER_FOOTERS["calendar"]
                     ),
                 },
@@ -1338,6 +1333,17 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self.assertTrue(
             _delivery_evidence_matches(
                 meeting_action, matching_meeting, approved_event
+            )
+        )
+        missing_footer = json.loads(json.dumps(matching_meeting))
+        missing_footer["tools"][0]["input"]["body"] = (
+            cr._render_calendar_event_body(
+                meeting_action["draft"], approved_event["subject"]
+            )
+        )
+        self.assertFalse(
+            _delivery_evidence_matches(
+                meeting_action, missing_footer, approved_event
             )
         )
         multi_attendee_action = {
@@ -1843,15 +1849,10 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             if key not in {"body", "content_type"}
         }
         executed_event["body"] = (
-            "&lt;p&gt;&lt;strong&gt;Phil / Rima 1:1&lt;/strong&gt;&lt;/p&gt;"
-            "&lt;ul&gt;&lt;li&gt;&lt;strong&gt;When:&lt;/strong&gt; Wednesday, "
-            "August 19, 11:05-11:30 AM ET (25 min)&lt;/li&gt;"
-            "&lt;li&gt;&lt;strong&gt;Attendee:&lt;/strong&gt; Rima Reyes&lt;/li&gt;"
-            "&lt;li&gt;&lt;strong&gt;Teams meeting:&lt;/strong&gt; "
-            "included&lt;/li&gt;&lt;/ul&gt;"
-            "&lt;p&gt;&lt;strong&gt;Agenda&lt;/strong&gt;&lt;/p&gt;"
-            "&lt;ul&gt;&lt;li&gt;Quick 1:1 to sync up&lt;/li&gt;&lt;/ul&gt;"
-            "<br><br><!-- aether-footer -->"
+            cr._render_calendar_event_body(
+                reviewed_draft, calendar_event["subject"]
+            )
+            + "<br><br><!-- aether-footer -->"
             + cr._AETHER_FOOTERS["calendar"]
         )
         payload = {

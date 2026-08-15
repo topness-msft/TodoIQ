@@ -2767,8 +2767,8 @@ _AETHER_FOOTERS = {
 }
 
 
-def _reviewed_calendar_body(reviewed_draft, subject):
-    """Reproduce the calendar-card body Cowork sends from the reviewed draft."""
+def _render_calendar_event_body(reviewed_draft, subject):
+    """Render the reviewed meeting card as deterministic, safe event HTML."""
     lines = [line.strip() for line in str(reviewed_draft or "").splitlines()]
     title = f"**{subject}**"
     try:
@@ -2810,7 +2810,7 @@ def _reviewed_calendar_body(reviewed_draft, subject):
             f"{html.escape(match.group(2), quote=False)}"
         )
 
-    card = (
+    return (
         f"<p><strong>{html.escape(subject, quote=False)}</strong></p>"
         "<ul>"
         + "".join(f"<li>{render_line(line)}</li>" for line in detail_lines)
@@ -2818,45 +2818,10 @@ def _reviewed_calendar_body(reviewed_draft, subject):
         + "".join(f"<li>{render_line(line)}</li>" for line in agenda_lines)
         + "</ul>"
     )
-    return html.escape(card, quote=False) + "<br><br>"
 
 
-def _safe_preview_calendar_body(proposal_body, reviewed_draft):
-    """Allow the one observed preview-body form only when its agenda was reviewed."""
-    decoded = html.unescape(str(proposal_body or ""))
-    allowed_tags = {
-        "<p>", "</p>", "<b>", "</b>", "<ul>", "</ul>", "<li>", "</li>",
-    }
-    if any(tag.lower() not in allowed_tags for tag in re.findall(r"<[^>]+>", decoded)):
-        return False
-    old_shape = re.fullmatch(
-        r"<p>Quick 1:1 to sync up\.</p>\s*"
-        r"<p><b>Agenda</b></p>\s*"
-        r"<ul>(?P<items>(?:\s*<li>[^<]*</li>\s*)+)</ul>",
-        decoded,
-    )
-    action_118_shape = re.fullmatch(
-        r"<p>Quick 1:1 to sync up\. Suggested agenda:</p>\s*"
-        r"<ul>(?P<items>(?:\s*<li>[^<]*</li>\s*)+)</ul>\s*"
-        r"<p>Feel free to add anything you'd like to cover\.</p>",
-        decoded,
-    )
-    match = old_shape or action_118_shape
-    if not match:
-        return False
-    items = re.findall(r"<li>([^<]*)</li>", match.group("items"))
-    reviewed_items = {
-        line.strip()[2:]
-        for line in str(reviewed_draft or "").splitlines()
-        if line.strip().startswith("- ")
-    }
-    return bool(items) and all(item in reviewed_items for item in items)
-
-
-def _calendar_event_matches(
-    actual, expected, *, require_footer=False, reviewed_draft=None
-):
-    """Require the exact reviewed CreateEvent payload, allowing only its footer."""
+def _calendar_event_identity_matches(actual, expected, *, require_footer=False):
+    """Match every calendar field except body content, which approval replaces."""
     if isinstance(actual, str):
         try:
             actual = json.loads(actual)
@@ -2873,29 +2838,16 @@ def _calendar_event_matches(
     if set(actual) != set(expected):
         return False
 
-    raw_body = str(actual.pop("body", ""))
-    expected_body = str(expected.pop("body", ""))
+    raw_body = actual.pop("body", None)
+    expected.pop("body", None)
+    if not isinstance(raw_body, str):
+        return False
     proposed, marker, footer = raw_body.partition("<!-- aether-footer -->")
     if marker:
         if footer != _AETHER_FOOTERS["calendar"]:
             return False
     elif require_footer:
         return False
-    reviewed_body = _reviewed_calendar_body(
-        reviewed_draft, str(expected.get("subject") or "")
-    )
-    if reviewed_draft is not None:
-        rendered_match = reviewed_body is not None and proposed == reviewed_body
-        preview_match = (
-            bool(marker)
-            and proposed == expected_body + "<br><br>"
-            and _safe_preview_calendar_body(expected_body, reviewed_draft)
-        )
-        if not rendered_match and not preview_match:
-            return False
-    elif proposed != expected_body:
-        return False
-
     actual_attendees = actual.pop("attendees", None)
     expected_attendees = expected.pop("attendees", None)
     if not isinstance(actual_attendees, list) or not isinstance(
@@ -2907,6 +2859,33 @@ def _calendar_event_matches(
         normalize(actual_attendees) == normalize(expected_attendees)
         and actual == expected
     )
+
+
+def _calendar_event_matches(
+    actual, expected, *, require_footer=False, reviewed_draft=None
+):
+    """Verify delivery used the deterministic body built from the reviewed draft."""
+    if isinstance(actual, str):
+        try:
+            actual = json.loads(actual)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not isinstance(actual, dict):
+        return False
+    if not _calendar_event_identity_matches(
+        actual,
+        expected,
+        require_footer=require_footer or reviewed_draft is not None,
+    ):
+        return False
+    raw_body = actual.get("body")
+    proposed, _marker, _footer = raw_body.partition("<!-- aether-footer -->")
+    if reviewed_draft is None:
+        return proposed == str(expected.get("body") or "")
+    rendered = _render_calendar_event_body(
+        reviewed_draft, str(expected.get("subject") or "")
+    )
+    return rendered is not None and proposed == rendered + "<br><br>"
 
 
 def _approved_destination_attendees(destination):
@@ -2950,11 +2929,10 @@ def _execution_tool_approval(
             not approval_id
             or server_name.lower() != "outlook_calendar"
             or re.sub(r"[^a-z0-9]", "", tool_name.lower()) != "createevent"
-            or not _calendar_event_matches(
+            or not _calendar_event_identity_matches(
                 params,
                 expected,
                 require_footer=True,
-                reviewed_draft=approved_snapshot.get("draft"),
             )
         ):
             return None
@@ -2967,8 +2945,24 @@ def _execution_tool_approval(
         )
         if not destination or event_attendees != destination:
             return None
+        reviewed_body = _render_calendar_event_body(
+            approved_snapshot.get("draft"), str(expected.get("subject") or "")
+        )
+        if reviewed_body is None:
+            return None
+        edited_input = dict(expected)
+        edited_input["body"] = (
+            reviewed_body
+            + "<br><br><!-- aether-footer -->"
+            + _AETHER_FOOTERS["calendar"]
+        )
         return _tool_approval_payload(
-            data, approval_id, server_name, tool_name, conversation_id
+            data,
+            approval_id,
+            server_name,
+            tool_name,
+            conversation_id,
+            edited_input=edited_input,
         )
 
     if (
@@ -3007,14 +3001,20 @@ def _execution_tool_approval(
 
 
 def _tool_approval_payload(
-    data, approval_id, server_name, tool_name, conversation_id
+    data,
+    approval_id,
+    server_name,
+    tool_name,
+    conversation_id,
+    *,
+    edited_input=None,
 ):
     payload = {
         "always_allow": False,
         "approval_id": approval_id,
         "approved": True,
         "conversation_id": conversation_id,
-        "edited_input": None,
+        "edited_input": edited_input,
         "scope": None,
         "server_name": server_name,
         "session_id": conversation_id,
@@ -3457,6 +3457,19 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         approved_calendar_event=approved_calendar_event,
                     )
                     if not approval:
+                        params = data.get("params")
+                        logger.warning(
+                            "Rejected Cowork tool action that did not match approval: %s",
+                            {
+                                "approval_id": data.get("aid"),
+                                "server_name": data.get("sn"),
+                                "tool_name": data.get("tn"),
+                                "parameter_keys": (
+                                    sorted(params) if isinstance(params, dict) else None
+                                ),
+                                "parameter_type": type(params).__name__,
+                            },
+                        )
                         raise RuntimeError(
                             "Cowork requested a tool action that did not exactly "
                             "match the action approved in Riveter. Nothing was "
