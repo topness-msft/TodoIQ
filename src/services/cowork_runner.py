@@ -2777,6 +2777,45 @@ _AETHER_FOOTERS = {
 }
 
 
+_EMAIL_ATOM_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+$")
+_EMAIL_DOMAIN_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _normalize_single_email(value):
+    """Return one normalized bare email address, or None for unsafe input."""
+    if not isinstance(value, str):
+        return None
+    address = value.strip()
+    if (
+        not address
+        or len(address) > 254
+        or any(char.isspace() for char in address)
+        or address.count("@") != 1
+    ):
+        return None
+    local, domain = address.rsplit("@", 1)
+    if (
+        not local
+        or len(local) > 64
+        or not domain
+        or "." not in domain
+        or any(
+            not atom or not _EMAIL_ATOM_RE.fullmatch(atom)
+            for atom in local.split(".")
+        )
+    ):
+        return None
+    labels = domain.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or not _EMAIL_DOMAIN_LABEL_RE.fullmatch(label)
+        for label in labels
+    ):
+        return None
+    return address.lower()
+
+
 def _approved_email_input(reviewed_draft, destination):
     """Build the exact Outlook input from the email draft reviewed in Riveter."""
     draft = str(reviewed_draft or "").strip()
@@ -2785,8 +2824,8 @@ def _approved_email_input(reviewed_draft, destination):
         return None
     subject = lines[0].split(":", 1)[1].strip()
     body = "\n".join(lines[1:]).strip()
-    destination = str(destination or "").strip().lower()
-    if not subject or not body or not destination or "@" not in destination:
+    destination = _normalize_single_email(destination)
+    if not subject or not body or not destination:
         return None
     # Outlook's approval payload is HTML even when the initial proposal was text.
     rendered = html.escape(body, quote=False).replace("\r\n", "\n")

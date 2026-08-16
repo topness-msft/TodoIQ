@@ -229,6 +229,7 @@ function fetchSectionTasks(sectionId) {
 // Polls for tasks in transitional parse states (queued/parsing/unparsed)
 // since Claude writes directly to the DB, bypassing WebSocket.
 var parsePollerInterval = null;
+var parsePollerCursor = 0;
 
 function startParsePoller() {
     parsePollerInterval = setInterval(pollParseStatus, 3000);
@@ -241,12 +242,29 @@ function pollParseStatus() {
     });
     if (!pending.length) return;
 
-    // Re-fetch all tasks and update any that changed
-    fetch('/api/tasks')
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
+    // Poll exact task IDs. The list endpoint is intentionally capped, so a
+    // pending task outside its first page would otherwise remain stale forever.
+    if (parsePollerCursor >= pending.length) parsePollerCursor = 0;
+    var batchSize = Math.min(20, pending.length);
+    var batch = [];
+    for (var i = 0; i < batchSize; i++) {
+        batch.push(pending[(parsePollerCursor + i) % pending.length]);
+    }
+    parsePollerCursor = (parsePollerCursor + batchSize) % pending.length;
+    var requests = batch.map(function(task) {
+        return fetch('/api/tasks/' + task.id, { cache: 'no-store' })
+            .then(function(res) {
+                if (!res.ok) return null;
+                return res.json();
+            })
+            .catch(function() { return null; });
+    });
+    Promise.all(requests)
+        .then(function(results) {
             var updated = false;
-            (data.tasks || []).forEach(function(fresh) {
+            results.forEach(function(data) {
+                var fresh = data && data.task;
+                if (!fresh) return;
                 var existing = tasks.find(function(t) { return t.id === fresh.id; });
                 if (existing) {
                     // Check if parse_status changed or other fields updated
@@ -264,8 +282,7 @@ function pollParseStatus() {
                     if (sel) renderDetailPane(sel);
                 }
             }
-        })
-        .catch(function() {}); // Silent fail on poll
+        });
 }
 
 // ── Input Bar ──────────────────────────────────────────────────────────

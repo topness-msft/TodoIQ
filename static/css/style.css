@@ -118,7 +118,7 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 76px;
+    height: 92px;
     padding: 0 12px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-primary);
@@ -133,16 +133,17 @@ html, body {
 }
 
 .brand-lockup {
+    display: block;
     position: relative;
-    width: 300px;
-    height: 75px;
-    overflow: visible;
+    width: 270px;
+    height: 90px;
+    overflow: hidden;
 }
 
 .riveter-logo,
 .riveter-logo-dark {
-    width: 300px;
-    height: 75px;
+    width: 270px;
+    height: 90px;
     object-fit: contain;
     object-position: left center;
     position: absolute;
@@ -159,42 +160,6 @@ html, body {
 
 [data-theme="dark"] .riveter-logo-dark {
     display: block;
-}
-
-.brand-tagline {
-    position: absolute;
-    inset: 0;
-    color: var(--text-secondary);
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 1.15;
-    letter-spacing: 0.025em;
-    white-space: nowrap;
-}
-
-.brand-tagline span,
-.brand-tagline a {
-    display: block;
-}
-
-.brand-tagline span {
-    position: absolute;
-    top: 38px;
-    left: 148px;
-}
-
-.brand-tagline a {
-    position: absolute;
-    top: 59px;
-    left: 148px;
-    color: var(--accent);
-    font-weight: 650;
-    text-decoration: none;
-}
-
-.brand-tagline a:hover,
-.brand-tagline a:focus-visible {
-    text-decoration: underline;
 }
 
 .app-title {
@@ -2757,7 +2722,7 @@ html, body {
 @media (max-width: 768px) {
     .top-bar {
         height: auto;
-        min-height: 76px;
+        min-height: 92px;
         flex-wrap: wrap;
         padding: 0 8px;
     }
@@ -2769,28 +2734,14 @@ html, body {
     }
 
     .brand-lockup {
-        width: min(240px, 64vw);
-        height: 67px;
+        width: min(225px, 60vw);
+        height: 75px;
     }
 
     .riveter-logo,
     .riveter-logo-dark {
-        width: min(240px, 64vw);
-        height: 67px;
-    }
-
-    .brand-tagline {
-        font-size: 9px;
-    }
-
-    .brand-tagline span {
-        top: 34px;
-        left: min(118px, 32vw);
-    }
-
-    .brand-tagline a {
-        top: 53px;
-        left: min(118px, 32vw);
+        width: min(225px, 60vw);
+        height: 75px;
     }
 
     .top-bar-right {

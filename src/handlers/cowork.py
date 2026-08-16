@@ -40,6 +40,7 @@ from ..services.cowork_runner import (
     _approved_email_input,
     _calendar_event_matches,
     _looks_like_write,
+    _normalize_single_email,
     answer_interaction,
     cancel_run,
     compose_prompt,
@@ -362,7 +363,11 @@ def _conversation_display(label, people, person):
 
 
 def _carry_forward_destination(
-    task_id: int, resolved: dict, *, is_schedule: bool = False
+    task_id: int,
+    resolved: dict,
+    *,
+    is_schedule: bool = False,
+    is_email: bool = False,
 ) -> dict:
     """Keep a picker choice across a Redo.
 
@@ -379,6 +384,19 @@ def _carry_forward_destination(
     ):
         return resolved
     if previous.get("action_type") == "schedule-meeting":
+        return resolved
+    if is_email:
+        ref = _normalize_single_email(previous.get("destination_ref"))
+        if (
+            previous.get("delivery_channel") in DELIVERY_CHANNELS
+            and ref
+        ):
+            return {
+                "delivery_channel": "email",
+                "destination_ref": ref,
+                "destination_display": previous.get("destination_display"),
+                "destination_source": "user_picker",
+            }
         return resolved
     return {
         "delivery_channel": previous.get("delivery_channel"),
@@ -901,10 +919,12 @@ class CoworkHandler(tornado.web.RequestHandler):
                 )
         destination = parse_source_url(task.get("source_url"))
         is_schedule = task.get("action_type") == "schedule-meeting"
+        is_email = task.get("action_type") == "respond-email"
         resolved = _carry_forward_destination(
             tid,
             _resolve_destination(task, destination),
             is_schedule=is_schedule,
+            is_email=is_email,
         )
         if task.get("action_type") == "schedule-meeting":
             resolved["delivery_channel"] = None
@@ -1445,15 +1465,10 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
             if is_email
             else channel in DELIVERY_CHANNELS
         )
+        normalized_email_ref = _normalize_single_email(ref) if is_email else None
         valid_ref = bool(ref) and (
             not is_email
-            or (
-                "@" in ref
-                and not ref.startswith("[")
-                and not ref.startswith("19:")
-                and "," not in ref
-                and ";" not in ref
-            )
+            or bool(normalized_email_ref)
         )
         if not valid_channel or not valid_ref or not display:
             return self._fail(
@@ -1466,6 +1481,8 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
                     "destination_display are required"
                 ),
             )
+        if normalized_email_ref:
+            ref = normalized_email_ref
 
         # Provenance is server owned: anything arriving over HTTP is a picker
         # confirmation, never an automatic resolution.

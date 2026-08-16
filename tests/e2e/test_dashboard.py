@@ -47,23 +47,16 @@ class TestDashboardLoads:
         assert page.evaluate(
             "() => document.querySelector('.riveter-logo').naturalWidth"
         ) > 0
-        brand_tagline = page.get_by_test_id('brand-tagline')
-        expect(brand_tagline).to_be_visible()
-        expect(brand_tagline).to_contain_text('Adding muscle to the fight')
-        brand_link = brand_tagline.locator('a')
+        expect(page.get_by_test_id('brand-tagline')).to_have_count(0)
+        brand_link = page.locator('.brand-lockup')
         expect(brand_link).to_have_attribute('href', 'https://aka.ms/riveter')
         expect(brand_link).to_have_attribute('target', '_blank')
         expect(brand_link).to_have_attribute('rel', 'noopener noreferrer')
         header_box = page.locator('.top-bar').bounding_box()
         logo_box = logo.bounding_box()
-        tagline_text_box = brand_tagline.locator('span').bounding_box()
-        brand_link_box = brand_link.bounding_box()
-        assert header_box and logo_box and tagline_text_box and brand_link_box
-        assert header_box['height'] <= 76
-        assert logo_box['height'] >= 70
-        assert tagline_text_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
-        assert brand_link_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
-        assert brand_link_box['y'] > tagline_text_box['y']
+        assert header_box and logo_box
+        assert header_box['height'] <= 92
+        assert logo_box['height'] == 90
         _screenshot(page, '01-dashboard-empty')
 
     def test_input_bar_visible(self, page: Page, base_url):
@@ -89,16 +82,10 @@ class TestDashboardLoads:
         page.set_viewport_size({'width': 375, 'height': 720})
         page.goto(base_url + '/')
         logo_box = page.locator('.riveter-logo').bounding_box()
-        tagline_box = page.get_by_test_id('brand-tagline').bounding_box()
-        tagline_text_box = page.get_by_test_id('brand-tagline').locator('span').bounding_box()
-        brand_link_box = page.get_by_test_id('brand-tagline').locator('a').bounding_box()
         input_box = page.locator('.input-bar').bounding_box()
-        assert logo_box and tagline_box and tagline_text_box and brand_link_box and input_box
-        assert logo_box['height'] >= 64
-        assert tagline_box['y'] < logo_box['y'] + logo_box['height']
-        assert tagline_text_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
-        assert brand_link_box['x'] >= logo_box['x'] + logo_box['width'] * 0.47
-        assert input_box['y'] >= tagline_box['y'] + tagline_box['height'] - 2
+        assert logo_box and input_box
+        assert logo_box['height'] == 75
+        assert input_box['y'] >= logo_box['y'] + logo_box['height'] - 2
         assert page.evaluate(
             '() => document.documentElement.scrollWidth'
             ' <= document.documentElement.clientWidth'

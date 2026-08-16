@@ -16,6 +16,7 @@ def _seed_task(page: Page, base_url: str) -> int:
             "description": "Indicator test task",
             "action_type": "follow-up",
             "skill_output": "Existing enrichment",
+            "parse_status": "parsed",
         },
     )
     assert response.ok
@@ -472,5 +473,63 @@ class TestCoworkIndicators:
                 ),
                 full_page=True,
             )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_parse_poller_reconciles_pending_task_without_bulk_list_fetch(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        requests = []
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(
+                """taskId => {
+                    clearInterval(parsePollerInterval);
+                    const task = tasks.find(item => item.id === taskId);
+                    task.parse_status = 'queued';
+                    const blocked = Array.from({length: 20}, (_, index) => ({
+                        id: -(index + 1),
+                        title: `Unavailable ${index + 1}`,
+                        status: 'active',
+                        parse_status: 'queued'
+                    }));
+                    tasks = blocked.concat([task]);
+                    selectedTaskId = taskId;
+                    renderTaskList();
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+            expect(page.locator(".cw-card")).to_contain_text(
+                "Refreshing task context"
+            )
+            page.on("request", lambda request: requests.append(request.url))
+
+            page.evaluate("pollParseStatus()")
+            page.wait_for_timeout(500)
+            assert page.evaluate(
+                "taskId => tasks.find(task => task.id === taskId).parse_status",
+                task_id,
+            ) == "queued"
+            page.evaluate("pollParseStatus()")
+            page.wait_for_function(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    return task && task.parse_status === 'parsed';
+                }""",
+                arg=task_id,
+            )
+
+            expect(page.locator(".cw-card")).not_to_contain_text(
+                "Refreshing task context"
+            )
+            assert any(
+                url.endswith(f"/api/tasks/{task_id}") for url in requests
+            )
+            assert not any(url.endswith("/api/tasks") for url in requests)
         finally:
             _delete_task(page, base_url, task_id)

@@ -22,7 +22,7 @@ class TestRiveterVisuals:
     def test_dashboard_branding_desktop_and_mobile(self, page: Page, base_url):
         page.goto(base_url + "/")
         expect(page).to_have_title("Riveter")
-        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
+        expect(page.get_by_test_id("brand-tagline")).to_have_count(0)
         _capture(page, "dashboard-desktop-light")
 
         page.evaluate(
@@ -30,13 +30,13 @@ class TestRiveterVisuals:
         )
         expect(page.get_by_test_id("riveter-logo-dark")).to_be_visible()
         expect(page.get_by_test_id("riveter-logo-light")).to_be_hidden()
-        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
+        expect(page.get_by_test_id("brand-tagline")).to_have_count(0)
         _capture(page, "dashboard-desktop-dark")
 
         page.set_viewport_size({"width": 375, "height": 720})
         page.goto(base_url + "/")
         expect(page.get_by_test_id("riveter-logo-light")).to_be_visible()
-        expect(page.get_by_test_id("brand-tagline")).to_be_visible()
+        expect(page.get_by_test_id("brand-tagline")).to_have_count(0)
         assert page.evaluate(
             "() => document.documentElement.scrollWidth"
             " <= document.documentElement.clientWidth"
@@ -47,22 +47,9 @@ class TestRiveterVisuals:
             image = Image.open(Path("static") / "img" / filename)
             assert image.mode == "RGBA"
             assert image.getpixel((0, 0))[3] == 0
-            gap = image.crop((660, 310, 739, 374))
-            assert not any(
-                alpha > 180 and min(red, green, blue) > 240
-                for red, green, blue, alpha in gap.getdata()
-            )
-
-        dark = Image.open(Path("static") / "img" / "riveter-dark.png").convert("RGBA")
-        wordmark = dark.crop((730, 35, 1840, 275))
-        gray_pixels = [
-            (r, g, b)
-            for r, g, b, a in wordmark.getdata()
-            if a > 180 and max(r, g, b) - min(r, g, b) < 12
-        ]
-        assert gray_pixels
-        average = sum(sum(pixel) / 3 for pixel in gray_pixels) / len(gray_pixels)
-        assert 140 <= average <= 230
+            width, height = image.size
+            assert 2.8 <= width / height <= 3.2
+            assert image.getpixel((width - 1, 0))[3] == 0
 
     def test_right_pane_alternatives(self, page: Page, base_url):
         page.set_viewport_size({"width": 1440, "height": 960})

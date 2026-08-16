@@ -353,6 +353,53 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertIn("work-email-voice", voice)
         self.assertNotIn("work-teams-voice", voice)
 
+    def test_email_redo_does_not_carry_forward_an_invalid_legacy_recipient(self):
+        invalid_refs = (
+            "alice@example.com bob@example.com",
+            "alice@example.com,bob@example.com",
+            "alice@example.com;bob@example.com",
+            "19:meeting_Nm@thread.v2",
+            '["alice@example.com"]',
+            ".alice@example.com",
+            "alice@example..com",
+        )
+        for invalid_ref in invalid_refs:
+            with self.subTest(destination_ref=invalid_ref):
+                tid = self.make_task(
+                    action_type="respond-email",
+                    source_type="manual",
+                    key_people=json.dumps([{
+                        "name": "Phil Topness",
+                        "email": "phil@topness.com",
+                    }]),
+                )
+                self.start(tid)
+                from src.db import get_connection
+
+                conn = get_connection()
+                conn.execute(
+                    """
+                    UPDATE task_actions
+                    SET delivery_channel='teams',
+                        destination_ref=?,
+                        destination_display='Legacy recipient',
+                        destination_source='user_picker'
+                    WHERE task_id=?
+                    """,
+                    (invalid_ref, tid),
+                )
+                conn.commit()
+                conn.close()
+
+                response = self.start(tid, body={"redirect_text": "try again"})
+                action = json.loads(response.body)["action"]
+
+                self.assertEqual(action["delivery_channel"], "email")
+                self.assertEqual(action["destination_ref"], "phil@topness.com")
+                self.assertEqual(
+                    action["destination_source"], "auto_key_people"
+                )
+
     def test_respond_email_does_not_reuse_a_teams_conversation(self):
         tid = self.make_task(
             title="Email Phil after the Teams discussion",
@@ -576,6 +623,44 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["destination_source"], "user_picker")
         self.assertIn("work-email-voice", action["composed_prompt"].split("[VOICE]")[1])
 
+    def test_email_redo_migrates_legacy_teams_picker_to_email_voice(self):
+        tid = self.make_task(
+            action_type="respond-email",
+            source_type="manual",
+            key_people=json.dumps([{
+                "name": "Phil Topness",
+                "email": "phil@topness.com",
+                "unresolved": True,
+            }]),
+        )
+        self.start(tid)
+        from src.db import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            """
+            UPDATE task_actions
+            SET delivery_channel='teams',
+                destination_ref='phil@topness.com',
+                destination_display='Phil Topness',
+                destination_source='user_picker'
+            WHERE task_id=?
+            """,
+            (tid,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.start(tid, body={"redirect_text": "try again"})
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_ref"], "phil@topness.com")
+        self.assertEqual(action["destination_source"], "user_picker")
+        voice = action["composed_prompt"].split("[VOICE]", 1)[1]
+        self.assertIn("work-email-voice", voice)
+        self.assertNotIn("work-teams-voice", voice)
+
     def test_redo_rederives_an_unconfirmed_destination(self):
         tid = self.make_task(
             source_type="chat",
@@ -689,6 +774,26 @@ class TestStartPreview(CoworkAPITestBase):
             '["rima@microsoft.com","kanika@microsoft.com"]',
         )
         self.assertEqual(action["destination_source"], "auto_key_people")
+
+
+class TestApprovedEmailInput(unittest.TestCase):
+    def test_rejects_invalid_or_multiple_recipient_refs(self):
+        invalid_refs = (
+            "alice@example.com bob@example.com",
+            "alice@example.com,bob@example.com",
+            "alice@example.com;bob@example.com",
+            "19:meeting_Nm@thread.v2",
+            '["alice@example.com"]',
+            ".alice@example.com",
+            "alice@example..com",
+        )
+        for invalid_ref in invalid_refs:
+            with self.subTest(destination=invalid_ref):
+                self.assertIsNone(
+                    cr._approved_email_input(
+                        "Subject: Hello\n\nApproved body", invalid_ref
+                    )
+                )
 
 
 class TestChannelInferredFromTaskText(CoworkAPITestBase):
@@ -1107,6 +1212,42 @@ class TestConfirmDestination(CoworkAPITestBase):
 
         self.assertEqual(teams_response.code, 400)
         self.assertEqual(conversation_as_email.code, 400)
+
+    def test_respond_email_rejects_invalid_or_multiple_recipient_refs(self):
+        invalid_refs = (
+            "alice@example.com bob@example.com",
+            "alice@example.com,bob@example.com",
+            "alice@example.com;bob@example.com",
+            "19:meeting_Nm@thread.v2",
+            '["alice@example.com"]',
+            ".alice@example.com",
+            "alice@example..com",
+        )
+        for invalid_ref in invalid_refs:
+            with self.subTest(destination_ref=invalid_ref):
+                tid = self.make_task(action_type="respond-email")
+                action_id = self.make_action(tid, state="ready")
+                from src.db import get_connection
+
+                conn = get_connection()
+                conn.execute(
+                    "UPDATE task_actions SET action_type='respond-email' "
+                    "WHERE id=?",
+                    (action_id,),
+                )
+                conn.commit()
+                conn.close()
+
+                response = self._confirm(
+                    tid,
+                    {
+                        "delivery_channel": "email",
+                        "destination_ref": invalid_ref,
+                        "destination_display": "Recipient",
+                    },
+                )
+
+                self.assertEqual(response.code, 400)
 
     def test_rejects_unknown_channel_and_blank_destination(self):
         tid = self.make_task()
