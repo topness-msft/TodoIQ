@@ -37,3 +37,4 @@ temp/
 /_wiq_*
 /demo.py
 /*.txt
+!/requirements.txt

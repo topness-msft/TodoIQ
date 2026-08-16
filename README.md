@@ -1,57 +1,238 @@
-# TodoIQ
+# Riveter
 
-Local AI-powered task manager that integrates with Microsoft 365 via WorkIQ MCP.
+Riveter is a local, AI-assisted task manager for Microsoft 365. It turns
+actionable Teams messages, meetings, and flagged inbox mail into a focused task
+list, then uses Cowork to research context, draft responses, and carry out an
+action only after an explicit review.
 
-TodoNess scans your Teams messages, meetings, and flagged emails to surface actionable items as suggested tasks. It provides AI coaching, follow-up drafting, and meeting prep through a web dashboard.
+Everything durable stays on your machine in SQLite. Microsoft 365 access uses
+your delegated WorkIQ and Cowork sessions; Riveter does not ask for or store
+separate Graph credentials.
 
-## Prerequisites
+![Riveter dashboard with an email draft ready for review](docs/images/dashboard-email-draft.png)
 
+## What it does
+
+- Surfaces direct asks from Teams, meetings, and **flagged Inbox mail**.
+- Keeps active, suggested, waiting, snoozed, completed, and dismissed work in
+  one local dashboard.
+- Adds source context, key people, priority, coaching, and task-specific notes.
+- Uses Cowork to research and draft email, Teams, follow-up, preparation, and
+  scheduling actions.
+- Handles Cowork follow-up questions without losing the running conversation.
+- Requires a separate confirmation for external writes and binds execution to
+  the reviewed draft and destination.
+- Shows live Cowork progress and cumulative credit usage.
+- Runs in the foreground or as a Windows tray application at logon.
+
+![Cowork email execution with visible progress and cumulative credits](docs/images/cowork-sending.png)
+
+## Safety model
+
+Riveter treats AI output as a proposal, not authorization.
+
+1. WorkIQ detects or enriches a task.
+2. Cowork researches and creates a preview behind a write barrier.
+3. You review the destination and editable draft in Riveter.
+4. A separate confirmation starts execution.
+5. Riveter verifies that Cowork's requested write matches the approved action.
+6. Ambiguous delivery is reported as unconfirmed rather than guessed.
+
+## Requirements
+
+### Base dashboard
+
+- Windows 10 or 11
 - Python 3.11+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- WorkIQ MCP configured in Claude Code settings
+- Git
 
-## Quick Start
+### Microsoft 365 automation
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+- [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
+  installed and authenticated
+- A Copilot CLI environment that exposes the WorkIQ tools
+- Microsoft 365 access for the signed-in account
 
-# Start the dashboard server
-python -m src.app
+### Cowork actions
 
-# Open http://localhost:8766
+- Microsoft Cowork CLI access and entitlement
+- An authenticated Cowork session
+
+The dashboard and local task lifecycle work without WorkIQ or Cowork. Sync,
+context retrieval, drafting, and direct actions require the corresponding
+service.
+
+## Install on Windows
+
+Open PowerShell and run:
+
+```powershell
+git clone https://github.com/topness-msft/TodoIQ.git
+Set-Location TodoIQ
+
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-## Usage
+Install GitHub Copilot CLI if it is not already available:
 
-The dashboard runs as a local web server. AI features (scanning, parsing, skills) run through Claude Code slash commands:
+```powershell
+winget install GitHub.Copilot
+copilot
+```
+
+Inside Copilot CLI, run `/login` if authentication is requested. Your Copilot
+environment must also have WorkIQ available; Riveter launches commands with the
+`workiq` tool explicitly enabled.
+
+If your organization provides the Cowork CLI, install or update it with the
+Microsoft preview installer and authenticate:
+
+```powershell
+irm https://aka.ms/cowork/ps1 | iex
+cowork auth login
+```
+
+Confirm the command-line dependencies:
+
+```powershell
+python --version
+copilot --version
+cowork --version
+```
+
+### Start in console mode
+
+```powershell
+python -m src.app 8766
+```
+
+Open [http://localhost:8766](http://localhost:8766). The first start creates
+`data/claudetodo.db` and applies any schema migrations automatically.
+
+### Install the tray application
+
+After the console test succeeds, stop it with `Ctrl+C`, then register Riveter at
+Windows logon:
+
+```powershell
+python scripts/install_startup.py
+```
+
+The installer registers a scheduled task named `TodoNess` (the legacy internal
+task name), installs `pystray` and Pillow if needed, and asks whether to start
+the tray immediately.
+
+The tray menu provides:
+
+- **Open Dashboard**
+- **Sync Now**
+- **Stop & Exit**
+
+To remove the scheduled task and stop the tray process:
+
+```powershell
+python scripts/uninstall_startup.py
+```
+
+## First-run checks
+
+Use these checks before connecting real work:
+
+```powershell
+# Server and database
+Invoke-WebRequest http://localhost:8766/api/stats -UseBasicParsing
+
+# Main dashboard
+Invoke-WebRequest http://localhost:8766/ -UseBasicParsing
+
+# Alternate task surface
+Invoke-WebRequest http://localhost:8766/todo -UseBasicParsing
+
+# Runner state
+Invoke-RestMethod http://localhost:8766/api/runner-status
+```
+
+Each HTTP request should return `200`. The runner response should not report an
+orphaned process.
+
+## Examples
+
+### Add a task manually
+
+Enter this in the dashboard quick-add field:
+
+```text
+Reply to Alex with a short overview of the workshop
+```
+
+Riveter stores the task immediately, then asks Copilot CLI to parse its action
+type, priority, people, and useful context.
+
+The equivalent API call is:
+
+```powershell
+Invoke-RestMethod http://localhost:8766/api/tasks `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"title":"Reply to Alex with a short overview of the workshop"}'
+```
+
+### Refresh from Microsoft 365
+
+Select **Refresh** in the dashboard. Riveter runs `/todo-refresh`, which checks:
+
+- direct asks from Teams and meetings,
+- items where you are waiting for a response, and
+- flagged messages in the Inbox.
+
+Broad unflagged email scanning is intentionally disabled because WorkIQ cannot
+reliably restrict those results to Inbox.
+
+### Draft and send an email
+
+1. Open an email task.
+2. Start the Cowork action.
+3. Answer any follow-up question Cowork asks.
+4. Review the finding, recipient, subject, and editable body.
+5. Select **Send email**.
+6. Confirm the exact draft and destination.
+
+Email tasks use the configured work-email voice skill. Cowork cannot send from
+the preview turn; only the separately confirmed execution turn can request the
+write.
+
+### Put a task into Waiting
+
+Use **Waiting** after you send a request or hand work to someone else. Riveter
+periodically checks person-scoped email and Teams context for a reply and keeps
+the task visible until it is resolved.
+
+## Copilot commands
+
+Riveter invokes these project commands through Copilot CLI:
 
 | Command | Purpose |
-|---------|---------|
-| `/todo` | Status summary and dashboard URL |
-| `/todo-add "text"` | Add a task with natural language parsing |
-| `/todo-parse` | Parse tasks added via the dashboard quick-add |
-| `/todo-refresh` | Scan M365 for new actionable items |
+|---|---|
+| `/todo` | Show task status and the dashboard URL |
+| `/todo-add "text"` | Add and enrich a task from natural language |
+| `/todo-parse` | Parse tasks added from the dashboard |
+| `/todo-refresh` | Scan Microsoft 365 for actionable work |
 | `/todo-review` | Review tasks needing attention |
-| `/waiting-check` | Check for activity on waiting tasks |
-| `/suggestion-check` | Check if suggested tasks are already resolved |
+| `/waiting-check` | Look for activity on waiting tasks |
+| `/suggestion-check` | Check whether suggested work is already resolved |
 
-Skills generate contextual drafts for individual tasks:
+Task-focused skills include `respond-email`, `schedule-meeting`,
+`teams-message`, `follow-up`, and `prepare`.
 
-| Skill | Purpose |
-|-------|---------|
-| `respond-email` | Draft an email response |
-| `schedule-meeting` | Suggest meeting times |
-| `teams-message` | Draft a Teams message |
-| `follow-up` | Draft a follow-up message |
-| `prepare` | Build meeting/presentation prep notes |
+## Configuration
 
-## Settings
-
-App-wide settings live in `data/settings.json`, which is gitignored because it
-is per-user. Every value fails closed: if the file is missing, unreadable or
-malformed, TodoIQ falls back to its shipped defaults rather than to no
-behaviour at all.
+Per-user settings live in `data/settings.json`, which is intentionally
+gitignored:
 
 ```json
 {
@@ -69,79 +250,69 @@ behaviour at all.
 }
 ```
 
-### `cowork_voice` — which voice a draft is written in
+- `cowork_voice` selects the voice skill named in prompts for each channel.
+  Set a value to `null` to use only Riveter's built-in writing rules.
+- `default_channel` chooses a writing register for manually entered tasks that
+  have no channel signal. It never chooses a recipient.
+- `meeting_preferences` applies standing duration, start-offset, and free-text
+  scheduling preferences.
 
-Cowork drafts are written in your own voice using a Cowork skill, chosen by the
-channel the task is bound to. Set `teams` and `email` to the skill you want for
-each. Set either to `null` to name no skill for that channel; the inline
-mechanics (contractions, no em-dashes, no corporate filler, channel-specific
-openings and sign-offs) still apply, because a skill lives outside this repo and
-can change or fail to resolve without a code change.
+Malformed or missing settings fall back to safe defaults.
 
-`default_channel` is the voice used when a task carries no channel signal of its
-own — typically one you typed yourself rather than one derived from a Teams
-thread or a mail item. It is the LAST thing consulted: a task from a Teams
-thread is written in the Teams voice regardless of what this is set to. It
-selects a voice only, and never binds a recipient, so a task with no destination
-still shows "No delivery destination selected". Leave it `null` to keep the
-neutral register, which avoids both a subject line and a sign-off.
+## Data and logs
 
-### `meeting_preferences` — how meetings get proposed
+Runtime data is local and gitignored:
 
-Standing defaults applied whenever a draft proposes or books a meeting time.
-`default_minutes` is the length to assume, and `start_offset_minutes` is how far
-past the hour or half hour to start. The offset is fixed and does not scale with
-length: at 5, a 25 minute meeting runs :05 to :30 and a 55 minute meeting runs
-:05 to :00. `notes` is free text for anything else standing ("Never book me
-before 9am").
+| Path | Contents |
+|---|---|
+| `data/claudetodo.db` | SQLite source of truth |
+| `data/backups/` | Automatic SQLite backups |
+| `data/todoness.log` | Tray and server logs |
+| `data/settings.json` | Per-user settings |
+| `data/todoness.pid` | Single-instance guard |
 
-Omit the block entirely and nothing is added to the prompt. Values that are not
-sane numbers are dropped rather than passed through, so a malformed block
-behaves like an absent one.
+Do not copy the database while Riveter is running. Stop the tray or console
+server first.
 
-This is deliberately not tied to a task's action type. The per-action guidance
-is, and only 6 of the 17 open tasks that read as scheduling are classified that
-way, so anything keyed to it applies about a third of the time. These
-preferences ride every prompt, phrased as a condition, so they also apply when a
-task is redirected into a meeting after the fact.
+## Troubleshooting
 
-## Architecture
+### `copilot CLI not found on PATH`
 
-See [CLAUDE.md](CLAUDE.md) for detailed architecture, database schema, and development notes.
+Restart PowerShell after installing GitHub Copilot CLI, then run
+`copilot --version`.
 
-```
-Claude Code Commands (/todo-refresh, /todo-add, skills)
-  |-- calls WorkIQ MCP for M365 data
-  |-- writes results to SQLite
+### Cowork says authentication is required
 
-SQLite DB (data/claudetodo.db)
-  |-- tasks, task_context, refresh_schedule, sync_log
-
-Tornado Web Server (localhost:8766)
-  |-- reads SQLite, serves dashboard + REST API + WebSocket
+```powershell
+cowork auth login
 ```
 
-## Run at Startup (Windows)
+Riveter performs one silent authentication recovery and one retry. If that
+fails, interactive login is required.
 
-TodoNess can run as a background app with a system tray icon that starts automatically at logon.
+### Port 8766 is already in use
 
-```bash
-# Install dependencies and register startup task
-python scripts/install_startup.py
+Another Riveter console or tray instance is probably running. Stop it from the
+tray menu or run `scripts/uninstall_startup.py` before starting another copy.
 
-# To remove from startup
-python scripts/uninstall_startup.py
+### The tray exits immediately
+
+Check `data/todoness.log`. The installer also reports stale PID files and port
+ownership failures instead of claiming a successful start.
+
+## Development
+
+```powershell
+python -m pip install pytest pytest-playwright
+python -m playwright install chromium
+
+# Unit tests
+python -m pytest -q
+
+# Browser and visual tests
+python -m pytest -q -m e2e
 ```
 
-The tray icon provides:
-- **Double-click** to open the dashboard
-- **Sync Now** to trigger a manual M365 scan
-- **Stop & Exit** to shut down
-
-Logs are written to `data/todoness.log`. Requires `pystray` and `Pillow` (installed automatically by the install script).
-
-## Dependencies
-
-Core app: `tornado`, `jinja2` (see `requirements.txt`).
-
-Tray launcher (optional): `pystray`, `Pillow`.
+See [CLAUDE.md](CLAUDE.md) and
+[`.github/agents/PROJECT-CONTEXT.md`](.github/agents/PROJECT-CONTEXT.md) for the
+architecture, test protocol, deployment probes, and safety invariants.
