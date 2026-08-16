@@ -1193,7 +1193,7 @@ function renderPeoplePills(keyPeople, taskId) {
             + (unresolved ? 'title="Choose a resolved identity before scheduling" ' : '')
             + 'onclick="event.stopPropagation(); togglePeopleDropdown(\'' + pillId + '\')">'
             + '<span class="person-pill-avatar">' + getInitials(person.name) + '</span>'
-            + '<span>' + escapeHtml(person.name) + '</span>';
+            + '<span class="person-name">' + escapeHtml(person.name) + '</span>';
         if (person.role) {
             html += ' <span class="person-role">' + escapeHtml(person.role) + '</span>';
         }
@@ -3154,6 +3154,7 @@ var _cwActions = {};
 var _cwLoading = {};
 var _cwEditing = {};
 var _cwRedo = {};
+var _cwRepairingSubject = {};
 // Selection for the next run. Once a run starts, the persisted action row is
 // authoritative; this map only lets the user choose the mode before that row exists.
 var _cwMode = {};
@@ -3441,6 +3442,75 @@ function cwMeetingDestination(people) {
         };
 }
 
+function cwDeriveEmailSubject(task, action) {
+        var finding = String((action && action.finding) || '');
+        var found = finding.match(
+            /^\s*(?:\*\*)?Subject:(?:\*\*)?[ \t]*(\S[^\r\n]*)/im
+        );
+        if (found) return found[1].trim().slice(0, 80);
+
+        var sourceParts = String((task && task.source_id) || '').split('::');
+        var sourceType = String((task && task.source_type) || sourceParts[0] || '')
+            .toLowerCase();
+        if (sourceParts.length >= 3 && sourceType === 'email') {
+            var sourceSubject = sourceParts.slice(2).join('::').trim();
+            if (sourceSubject) {
+                var isReply = (task && task.action_type === 'respond-email')
+                    || (action && action.action_type === 'respond-email');
+                if (isReply
+                        && !/^(?:re|fw|fwd):/i.test(sourceSubject)) {
+                    sourceSubject = 'Re: ' + sourceSubject;
+                }
+                return sourceSubject.slice(0, 80);
+            }
+        }
+
+        var title = String((task && task.title) || '').trim();
+        var topic = title.match(/\b(?:about|regarding)\s+(.+?)\s*[.!?]?$/i);
+        if (topic) {
+            var prefix = /^(?:reply|respond)\b/i.test(title) ? 'Re: ' : '';
+            return (prefix + topic[1]).slice(0, 80);
+        }
+        if (/^send\s+an?\s+introductory\s+email\b/i.test(title)) {
+            return 'Introduction';
+        }
+        return (title || 'Message').replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function cwRepairEmailSubject(taskId, task, action, draft) {
+        if (_cwRepairingSubject[taskId]) return;
+        _cwRepairingSubject[taskId] = true;
+        var subject = cwDeriveEmailSubject(task, action);
+        var repairedDraft = 'Subject: ' + subject + '\n\n' + draft;
+
+        fetch('/api/tasks/' + taskId + '/cowork', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ draft_edited: repairedDraft })
+        })
+        .then(function(res) {
+            return res.json().then(function(data) {
+                return { ok: res.ok, data: data };
+            });
+        })
+        .then(function(result) {
+            delete _cwRepairingSubject[taskId];
+            if (!result.ok || !result.data.action) {
+                window.alert(
+                    result.data.error || 'Riveter could not add the email subject.'
+                );
+                return;
+            }
+            _cwActions[taskId] = result.data.action;
+            cwRerender(taskId);
+            cwOpenExecuteConfirm(taskId);
+        })
+        .catch(function() {
+            delete _cwRepairingSubject[taskId];
+            window.alert('Riveter could not add the email subject.');
+        });
+}
+
 function cwOpenExecuteConfirm(taskId) {
         var action = _cwActions[taskId];
         var task = tasks.find(function(item) { return item.id === taskId; });
@@ -3458,7 +3528,7 @@ function cwOpenExecuteConfirm(taskId) {
         }
         if (isEmail
                 && !/^Subject:[ \t]*\S[^\r\n]*/i.test(approvalDraft.split(/\r?\n/)[0])) {
-            window.alert('The final email draft must start with a Subject: line.');
+            cwRepairEmailSubject(taskId, task, action, approvalDraft);
             return;
         }
         if (isEmail && !approvalDraft.split(/\r?\n/).slice(1).join('\n').trim()) {

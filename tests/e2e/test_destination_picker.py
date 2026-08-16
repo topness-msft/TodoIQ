@@ -236,17 +236,37 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
-    def test_subjectless_email_never_opens_send_confirmation(
+    def test_subjectless_email_is_repaired_before_send_confirmation(
         self, page: Page, base_url
     ):
         task_id = _seed_task(page, base_url)
         dialogs = []
+        saved = {}
         action = _action(
             task_id,
-            draft="afafsas",
+            finding="Cowork found the original thread.",
+            draft="Hi Phil,\n\nThanks for the update.",
             destination_ref="phil@topness.com",
             destination_display="Phil Topness",
             delivery_channel="email",
+        )
+        page.route(
+            f"**/api/tasks/{task_id}/cowork",
+            lambda route: (
+                saved.update(route.request.post_data_json),
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({
+                        "action": {
+                            **action,
+                            "draft_edited": route.request.post_data_json[
+                                "draft_edited"
+                            ],
+                        }
+                    }),
+                ),
+            ),
         )
         page.on(
             "dialog",
@@ -264,10 +284,56 @@ class TestDestinationBinding:
                 task_id,
             )
 
-            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
-            assert dialogs == [
-                "The final email draft must start with a Subject: line."
-            ]
+            confirmation = page.get_by_test_id("execute-confirmation")
+            expect(confirmation).to_be_visible()
+            expect(confirmation).to_contain_text("Destination picker gate")
+            expect(confirmation).to_contain_text("Thanks for the update.")
+            assert saved["draft_edited"].startswith(
+                "Subject: Destination picker gate\n\n"
+            )
+            assert page.evaluate(
+                "taskId => _cwExecuteApprovals[taskId].draft",
+                task_id,
+            ) == saved["draft_edited"]
+            assert page.evaluate(
+                """() => cwDeriveEmailSubject(
+                    {title: 'Reply to Phil about the Ascentium contract'},
+                    {finding: ''}
+                )"""
+            ) == "Re: the Ascentium contract"
+            assert page.evaluate(
+                """() => cwDeriveEmailSubject(
+                    {title: 'Follow up'},
+                    {finding: '**Subject:** Ascentium proposal - next steps'}
+                )"""
+            ) == "Ascentium proposal - next steps"
+            assert page.evaluate(
+                """() => cwDeriveEmailSubject(
+                    {
+                        title: 'Reply to Sarah about the proposal',
+                        action_type: 'respond-email',
+                        source_type: 'email',
+                        source_id: 'email::sarah@example.com::FY27 proposal'
+                    },
+                    {finding: ''}
+                )"""
+            ) == "Re: FY27 proposal"
+            assert dialogs == []
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "email-subject-repaired-light.png"
+                ),
+                full_page=True,
+            )
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme', 'dark')"
+            )
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "email-subject-repaired-dark.png"
+                ),
+                full_page=True,
+            )
         finally:
             _delete_task(page, base_url, task_id)
 

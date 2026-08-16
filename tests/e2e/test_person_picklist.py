@@ -59,6 +59,77 @@ def _stored_people(page: Page, base_url: str, task_id: int) -> list[dict]:
 
 
 class TestPersonPicklist:
+    def test_long_person_chip_stays_inside_key_people_card(
+        self, page: Page, base_url
+    ):
+        response = page.request.post(
+            f"{base_url}/api/tasks",
+            data={
+                "title": "Long Key People pill visual gate",
+                "description": "Verify long people stay inside the card.",
+                "parse_status": "parsed",
+                "key_people": json.dumps([{
+                    "name": "Phil Topness",
+                    "email": "phil@topness.com",
+                    "role": "Principal Consultant, Ascentium Federal",
+                    "alternatives": [{
+                        "name": "Phil Topness",
+                        "email": "phil.topness@microsoft.com",
+                        "role": "Copilot Acceleration Team",
+                    }],
+                }]),
+            },
+        )
+        assert response.ok
+        task_id = response.json()["task"]["id"]
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            page.goto(base_url)
+            page.wait_for_function(f"Boolean(tasks.find(task => task.id === {task_id}))")
+            page.evaluate(f"selectTask({task_id})")
+            wrapper = page.locator(".person-pill-wrapper").filter(
+                has_text="Phil Topness"
+            )
+            chip = wrapper.locator(".person-pill")
+            expect(wrapper).to_have_count(1)
+            expect(chip).to_be_visible()
+            card = wrapper.locator(
+                "xpath=ancestor::*[contains(@class,'detail-card')][1]"
+            )
+            chip_box = chip.bounding_box()
+            card_box = card.bounding_box()
+
+            assert chip_box is not None
+            assert card_box is not None
+            assert chip_box["x"] + chip_box["width"] <= (
+                card_box["x"] + card_box["width"] - 12
+            )
+            assert chip.locator(".person-name").evaluate(
+                "el => getComputedStyle(el).textOverflow"
+            ) == "ellipsis"
+            assert chip.locator(".person-role").evaluate(
+                "el => getComputedStyle(el).textOverflow"
+            ) == "ellipsis"
+
+            expect(chip.locator(".person-pill-avatar")).to_be_visible()
+            chip.click()
+            expect(wrapper.locator(".alternatives-dropdown")).to_be_visible()
+            expect(wrapper.locator(".remove-person")).to_be_visible()
+
+            page.screenshot(
+                path=os.path.join(SCREENSHOTS_DIR, "long-chip-light.png"),
+                full_page=True,
+            )
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme', 'dark')"
+            )
+            page.screenshot(
+                path=os.path.join(SCREENSHOTS_DIR, "long-chip-dark.png"),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_picklist_renders_and_persists_mutations(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
