@@ -317,6 +317,56 @@ class TestOuterPanelSeparator:
 
 
 class TestSourceContextCard:
+    def test_manual_teams_source_uses_destination_label(
+        self, page: Page, base_url
+    ):
+        response = page.request.post(
+            f"{base_url}/api/tasks",
+            data={
+                "title": "Open the linked Teams conversation",
+                "description": "Review the meeting request in the linked chat.",
+                "source_type": "manual",
+                "source_url": (
+                    "https://teams.microsoft.com/l/chat/"
+                    "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
+                    "d87be1b4-816c-4eff-9edd-7a5823986db1"
+                    "@unq.gbl.spaces/conversations"
+                ),
+                "parse_status": "parsed",
+            },
+        )
+        assert response.ok
+        task_id = response.json()["task"]["id"]
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        try:
+            _open_task(page, base_url, task_id)
+            source_link = page.locator(
+                ".detail-source-card .source-meta-link"
+            )
+            expect(source_link).to_contain_text("Teams chat")
+            expect(source_link).not_to_contain_text("manual")
+            expect(source_link).to_have_attribute(
+                "href", __import__("re").compile(r"teams\.microsoft\.com/l/chat/")
+            )
+
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "manual-teams-source-label-light.png"
+                ),
+                full_page=True,
+            )
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme', 'dark')"
+            )
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "manual-teams-source-label-dark.png"
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_equivalent_source_and_description_render_once(
         self, page: Page, base_url
     ):

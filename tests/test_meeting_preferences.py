@@ -138,6 +138,20 @@ class MeetingPreferenceTest(unittest.TestCase):
         self.assertIn("25 minutes", p)
         self.assertIn("5 minutes past", p)
 
+    def test_native_schedule_prompt_carries_source_urls_as_reference_only(self):
+        related = "https://contoso.sharepoint.com/sites/project/agenda.docx"
+        task = make_task(
+            action_type="schedule-meeting",
+            raw_input=f"Schedule this meeting {make_task()['source_url']} {related}",
+        )
+        with _with(PREFS):
+            p = cr.compose_prompt(task)
+        self.assertEqual(p.count(task["source_url"]), 1)
+        self.assertIn(f"Source URL: {task['source_url']}", p)
+        self.assertIn(related, p)
+        self.assertIn("Reference only", p)
+        self.assertIn("Selected attendees: Brandon Knoertzer", p)
+
     def test_free_text_notes_are_carried(self):
         with _with({"meeting_preferences": {"notes": "Never book me before 9am."}}):
             self.assertIn("Never book me before 9am.", cr.compose_prompt(make_task()))

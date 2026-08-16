@@ -37,6 +37,7 @@ __all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
 _CHAT_RE = re.compile(r"/l/chat/(?P<conv>[^/?#]+)/conversations(?:[/?#]|$)")
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 
 _GUID_RE = re.compile(
     r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$",
@@ -471,11 +472,42 @@ def _selected_people_for_prompt(value) -> str:
     return json.dumps(selected, ensure_ascii=False)
 
 
+def _source_reference_lines(task) -> list[str]:
+    primary = _clean(_get(task, "source_url")).strip()
+    if primary and not _HTTP_URL_RE.fullmatch(primary):
+        primary = ""
+
+    seen = {primary} if primary else set()
+    related = []
+    raw_input = _clean(_get(task, "raw_input"))
+    for match in _HTTP_URL_RE.finditer(raw_input):
+        candidate = match.group(0).rstrip(".,;:!?)]}")
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            related.append(candidate)
+
+    lines = []
+    if primary:
+        lines.append("Source URL: " + primary)
+    if related:
+        lines.append(
+            "Related source URLs (original order, deduplicated against Source URL):"
+        )
+        lines.extend("- " + url for url in related)
+    if lines:
+        lines.append(
+            "Reference only. Do not treat these URLs as delivery destinations or "
+            "infer recipients or audiences from them."
+        )
+    return lines
+
+
 def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> str:
     lines = [_handoff_title_line(_get(task, "title"))]
     description = _clean(_get(task, "description"))
     if description:
         lines.append(description)
+    lines.extend(_source_reference_lines(task))
     people = _selected_people_for_prompt(_get(task, "key_people"))
     if people:
         lines.append("Selected attendees: " + people)
@@ -668,6 +700,7 @@ def compose_prompt(task, destination: dict | None = None,
     source_type = _clean(_get(task, "source_type"))
     if source_type:
         source_lines.append(f"Origin: {source_type}")
+    source_lines.extend(_source_reference_lines(task))
     label = destination.get("audience_label")
     if label:
         source_lines.append(f"Conversation: {label}")

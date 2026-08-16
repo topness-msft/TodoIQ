@@ -2744,7 +2744,9 @@ function sourceMetaLink(task, includeSnippet) {
     // Detail cards already render the snippet as a quote; callers can omit it
     // here so source metadata does not repeat the same content.
     var snippetLabel = includeSnippet === false ? '' : task.source_snippet;
-    var label = subject || (snippetLabel ? truncate(snippetLabel, 50) : (task.source_type || 'manual'));
+    var label = subject || (snippetLabel
+        ? truncate(snippetLabel, 50)
+        : (sourceDestinationLabel(task.source_url) || task.source_type || 'manual'));
     if (task.source_url) {
         var icon = sourceTypeIcon(task.source_type);
         return icon + ' <a href="' + escapeHtml(task.source_url) + '" target="_blank" '
@@ -2765,6 +2767,15 @@ function sourceTypeIcon(sourceType) {
         manual: '&#9998;'
     };
     return '<span class="source-icon">' + (icons[sourceType] || icons.manual) + '</span>';
+}
+
+function sourceDestinationLabel(url) {
+    var labels = {
+        chat: 'Teams chat',
+        email: 'Outlook email',
+        meeting: 'Calendar event'
+    };
+    return labels[detectSourceType(url)] || '';
 }
 
 function detectSourceType(url) {

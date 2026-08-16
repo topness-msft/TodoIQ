@@ -392,6 +392,41 @@ class TestSourceAndAudience(unittest.TestCase):
     def test_destination_derived_when_not_supplied(self):
         self.assertIn("direct message", compose_prompt(make_task()))
 
+    def test_source_and_related_urls_reach_prompt_without_changing_destination(self):
+        docs_url = "https://contoso.sharepoint.com/sites/project/agenda.docx"
+        other_chat = (
+            "https://teams.microsoft.com/l/message/"
+            "19:other@thread.v2/1785000000000"
+        )
+        p = compose_prompt(
+            make_task(
+                raw_input=(
+                    f"Use {URL_1TO1} with {docs_url}, then reference {other_chat}."
+                )
+            )
+        )
+        self.assertEqual(p.count(URL_1TO1), 1)
+        self.assertIn(f"Source URL: {URL_1TO1}", p)
+        self.assertLess(p.index(docs_url), p.index(other_chat))
+        self.assertIn("Reference only", p)
+        self.assertIn("direct message", p)
+        self.assertNotIn("team channel", p)
+
+    def test_non_http_raw_input_is_not_added_as_source_context(self):
+        p = compose_prompt(
+            make_task(source_url=None, raw_input="Email mailto:person@example.com")
+        )
+        self.assertNotIn("mailto:person@example.com", p)
+        self.assertNotIn("Related source URLs", p)
+
+    def test_mixed_case_http_scheme_is_preserved(self):
+        source_url = "HTTPS://teams.microsoft.com/l/chat/example/conversations"
+        p = compose_prompt(
+            make_task(source_url=source_url, raw_input=f"Open {source_url}")
+        )
+        self.assertIn(f"Source URL: {source_url}", p)
+        self.assertEqual(p.count(source_url), 1)
+
 
 class TestDeterminism(unittest.TestCase):
 
