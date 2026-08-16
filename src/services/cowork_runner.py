@@ -24,11 +24,14 @@ cannot positively prove is a 1:1 is reported as a broadcast.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import html
+import json
 import re
 import uuid
+import zlib
 from urllib.parse import unquote, quote, urlparse
-import json
 
 __all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
 
@@ -759,7 +762,9 @@ def compose_execution_prompt(action: dict) -> str:
         verb = "Send the email"
         content_rule = (
             " Treat the first `Subject:` line as the exact subject and all "
-            "remaining text as the exact body. Do not add attachments."
+            "remaining text as the exact body. Use SendEmailWithAttachments to "
+            "send a new message; do not use ReplyToMessage or ReplyAllToMessage. "
+            "Do not add attachments."
         )
     else:
         verb = "Send the Teams message"
@@ -2669,6 +2674,37 @@ def _collect(label, proc, task_id, log_dir, argv, spawn_fn) -> None:
 
 _TERMINAL_RUN_STATES = ("fail", "cancel")
 _TURN_COMPLETE_RUN_STATES = ("ok", "fail", "cancel")
+_SSE_DECOMPRESSED_LIMIT = 512 * 1024
+_SSE_BASE64_LIMIT = 4 * ((_SSE_DECOMPRESSED_LIMIT + 2) // 3)
+
+
+def _decompress_sse_data(data):
+    """Decode one bounded gzip/base64 SSE envelope."""
+    encoded = data.get("data")
+    if not isinstance(encoded, str) or len(encoded) > _SSE_BASE64_LIMIT:
+        return None
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        decoder = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+        decoded = decoder.decompress(compressed, _SSE_DECOMPRESSED_LIMIT + 1)
+        if (
+            len(decoded) > _SSE_DECOMPRESSED_LIMIT
+            or decoder.unconsumed_tail
+            or not decoder.eof
+        ):
+            return None
+        decoded += decoder.flush(_SSE_DECOMPRESSED_LIMIT + 1 - len(decoded))
+        if len(decoded) > _SSE_DECOMPRESSED_LIMIT or decoder.unused_data:
+            return None
+        inner = json.loads(decoded.decode("utf-8"))
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        ValueError,
+        zlib.error,
+    ):
+        return None
+    return inner if isinstance(inner, dict) else None
 
 
 def _iter_sse(lines):
@@ -2685,9 +2721,14 @@ def _iter_sse(lines):
             kind = line[6:].strip()
         elif line.startswith("data:"):
             try:
-                yield kind, json.loads(line[5:].strip())
+                data = json.loads(line[5:].strip())
             except (json.JSONDecodeError, TypeError):
                 continue
+            if isinstance(data, dict) and data.get("compressed") is True:
+                data = _decompress_sse_data(data)
+                if data is None:
+                    continue
+            yield kind, data
 
 
 def _api_payload_from_events(events, conversation_id, approved_inputs=None):
@@ -3147,13 +3188,20 @@ def _execution_tool_approval(
             approved_snapshot.get("draft"),
             approved_snapshot.get("destination_ref"),
         )
+        actual_identity = dict(params) if isinstance(params, dict) else {}
+        expected_identity = dict(expected) if isinstance(expected, dict) else {}
+        actual_body = actual_identity.pop("body", None)
+        expected_identity.pop("body", None)
         if (
             not approval_id
             or server_name.lower() != "outlook"
             or re.sub(r"[^a-z0-9]", "", tool_name.lower())
             != "sendemailwithattachments"
             or not isinstance(params, dict)
-            or params != expected
+            or not isinstance(expected, dict)
+            or not isinstance(actual_body, str)
+            or set(params) != set(expected)
+            or actual_identity != expected_identity
         ):
             return None
         return _tool_approval_payload(

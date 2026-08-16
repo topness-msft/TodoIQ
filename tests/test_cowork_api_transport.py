@@ -18,6 +18,8 @@ ev["event"] yields None for every event, which is what made an early spike appea
 to hang for 600 seconds. The parser must track the preceding line.
 """
 
+import base64
+import gzip
 import json
 import shutil
 import tempfile
@@ -87,6 +89,16 @@ SSE = (
 
 
 class TestSseParsing(unittest.TestCase):
+    @staticmethod
+    def _compressed_event(kind, value):
+        encoded = base64.b64encode(
+            gzip.compress(json.dumps(value).encode("utf-8"))
+        ).decode("ascii")
+        return [
+            f"event: {kind}",
+            "data: " + json.dumps({"compressed": True, "data": encoded}),
+        ]
+
     def test_kind_comes_from_the_event_line_not_the_data(self):
         """The bug that made an early spike look like a 600s hang."""
         kinds = [kind for kind, _ in _iter_sse(SSE.splitlines())]
@@ -104,6 +116,66 @@ class TestSseParsing(unittest.TestCase):
     def test_comments_and_ids_do_not_become_events(self):
         lines = [": keepalive", "id: seq:1", "event: rl", 'data: {"st":"ok"}']
         self.assertEqual([k for k, _ in _iter_sse(lines)], ["rl"])
+
+    def test_compressed_tool_approval_yields_inner_event(self):
+        approval_request = {
+            "aid": "mcp-request:jrpc:2",
+            "tn": "SendEmailWithAttachments",
+            "sn": "outlook",
+            "params": {"to": ["phil@example.com"], "subject": "Hi"},
+        }
+        self.assertEqual(
+            list(_iter_sse(self._compressed_event("ta", approval_request))),
+            [("ta", approval_request)],
+        )
+
+    def test_compressed_tool_approval_reaches_exact_approval_gate(self):
+        snapshot = {
+            "draft": "Subject: Hi\n\nExact body",
+            "destination_ref": "phil@example.com",
+        }
+        expected = cr._approved_email_input(
+            snapshot["draft"], snapshot["destination_ref"]
+        )
+        request = {
+            "aid": "mcp-request:jrpc:2",
+            "tn": "SendEmailWithAttachments",
+            "sn": "outlook",
+            "params": expected,
+        }
+        _, decoded = next(iter(_iter_sse(self._compressed_event("ta", request))))
+        self.assertIsNotNone(
+            cr._execution_tool_approval(
+                decoded, "email", snapshot, "tenant:user:conversation"
+            )
+        )
+
+    def test_malformed_compressed_events_are_skipped(self):
+        cases = [
+            "not base64",
+            base64.b64encode(b"not gzip").decode("ascii"),
+            base64.b64encode(gzip.compress(b"not json")).decode("ascii"),
+            base64.b64encode(gzip.compress(b"[]")).decode("ascii"),
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                lines = [
+                    "event: ta",
+                    "data: " + json.dumps({"compressed": True, "data": payload}),
+                ]
+                self.assertEqual(list(_iter_sse(lines)), [])
+
+    def test_oversized_compressed_event_is_skipped(self):
+        oversized = {"body": "x" * (512 * 1024)}
+        self.assertEqual(
+            list(_iter_sse(self._compressed_event("ta", oversized))),
+            [],
+        )
+
+    def test_compressed_flag_must_be_literal_true(self):
+        envelope = {"compressed": 1, "data": "unchanged"}
+        lines = ["event: ta", "data: " + json.dumps(envelope)]
+        self.assertEqual(list(_iter_sse(lines)), [("ta", envelope)])
 
 
 class TestExecutionApprovalAnswer(unittest.TestCase):
@@ -558,7 +630,7 @@ class TestEmailToolApproval(unittest.TestCase):
         self.assertIsNotNone(approval)
         self.assertEqual(approval["edited_input"], self.params)
 
-    def test_rejects_email_recipient_subject_body_or_tool_drift(self):
+    def test_rejects_email_recipient_subject_or_tool_drift(self):
         cases = [
             {**self.ta, "sn": "outlook_calendar"},
             {**self.ta, "tn": "SendMail"},
@@ -568,7 +640,6 @@ class TestEmailToolApproval(unittest.TestCase):
                 "to": ["phil@topness.com", "other@example.com"],
             }},
             {**self.ta, "params": {**self.params, "subject": "Changed"}},
-            {**self.ta, "params": {**self.params, "body": "Changed"}},
             {**self.ta, "params": {**self.params, "content_type": "Text"}},
             {**self.ta, "params": {**self.params, "cc": ["other@example.com"]}},
             {**self.ta, "params": {**self.params, "bcc": ["other@example.com"]}},
@@ -577,6 +648,28 @@ class TestEmailToolApproval(unittest.TestCase):
         for ta in cases:
             with self.subTest(ta=ta):
                 self.assertIsNone(self._approval(ta=ta))
+
+    def test_replaces_model_rendered_body_with_exact_approved_body(self):
+        ta = {
+            **self.ta,
+            "params": {
+                **self.params,
+                "body": "<p>Model-rendered body that was not approved.</p>",
+            },
+        }
+        approval = self._approval(ta=ta)
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval["edited_input"], self.params)
+
+    def test_execution_prompt_requires_the_verifiable_send_tool(self):
+        prompt = cr.compose_execution_prompt({
+            "action_type": "respond-email",
+            "draft": self.snapshot["draft"],
+            "destination_display": "Phil",
+            "destination_ref": self.snapshot["destination_ref"],
+        })
+        self.assertIn("Use SendEmailWithAttachments", prompt)
+        self.assertIn("do not use ReplyToMessage", prompt)
 
     def test_rejects_body_only_approved_draft(self):
         self.assertIsNone(self._approval(snapshot={
