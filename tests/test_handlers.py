@@ -63,7 +63,18 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(task["status"], "active")
 
     def test_create_task_raw_input(self):
-        body = {"raw_input": "Follow up with Sarah about the Q3 report"}
+        teams_url = (
+            "https://teams.microsoft.com/l/chat/"
+            "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
+            "d87be1b4-816c-4eff-9edd-7a5823986db1@unq.gbl.spaces/conversations"
+            "?context=%7B%22contextType%22:%22chat%22%7D"
+        )
+        body = {
+            "raw_input": (
+                "Agenda: https://example.com/meeting-notes "
+                f"Schedule this meeting {teams_url}."
+            )
+        }
         resp = self.fetch(
             "/api/tasks",
             method="POST",
@@ -75,6 +86,19 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         task = data["task"]
         self.assertEqual(task["parse_status"], "unparsed")
         self.assertIsNotNone(task["raw_input"])
+        self.assertEqual(task["source_url"], teams_url)
+
+    def test_create_task_raw_input_does_not_promote_non_teams_url(self):
+        body = {"raw_input": "Review https://example.com/meeting-notes tomorrow"}
+        resp = self.fetch(
+            "/api/tasks",
+            method="POST",
+            body=json.dumps(body),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.code, 201)
+        task = json.loads(resp.body)["task"]
+        self.assertIsNone(task["source_url"])
 
     def test_create_task_no_title_or_raw_input(self):
         body = {"description": "No title"}

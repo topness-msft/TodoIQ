@@ -36,6 +36,7 @@ from urllib.parse import unquote, quote, urlparse
 __all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
+_CHAT_RE = re.compile(r"/l/chat/(?P<conv>[^/?#]+)/conversations(?:[/?#]|$)")
 
 _GUID_RE = re.compile(
     r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$",
@@ -129,7 +130,9 @@ def parse_source_url(url: str | None, me: str | None = None) -> dict:
     if not url or not url.strip():
         return result
 
-    match = _MESSAGE_RE.search(url)
+    message_match = _MESSAGE_RE.search(url)
+    chat_match = _CHAT_RE.search(url)
+    match = message_match or chat_match
     if not match:
         # Outlook items, SharePoint recordings and meeting-details links are valid
         # task sources but are not places a chat reply can be posted.
@@ -141,7 +144,7 @@ def parse_source_url(url: str | None, me: str | None = None) -> dict:
     result["kind"] = kind
     result["is_broadcast"] = kind != "one_to_one"
     result["conversation_id"] = conv
-    result["message_id"] = match.group("msg")
+    result["message_id"] = message_match.group("msg") if message_match else None
     result["audience_label"] = _LABELS[kind]
     if kind == "one_to_one":
         result["counterparty_id"] = _counterparty(conv, me)

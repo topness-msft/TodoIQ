@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
 conn.row_factory = sqlite3.Row
-tasks = conn.execute("SELECT id, raw_input, title, description, key_people, action_type, user_notes, source_type, parse_status FROM tasks WHERE parse_status IN ('unparsed', 'queued') AND status NOT IN ('deleted', 'completed')").fetchall()
+tasks = conn.execute("SELECT id, raw_input, title, description, key_people, action_type, user_notes, source_type, source_url, parse_status FROM tasks WHERE parse_status IN ('unparsed', 'queued') AND status NOT IN ('deleted', 'completed')").fetchall()
 conn.close()
 ```
 
@@ -72,6 +72,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": [], "unresolved": true}]`.
 - **OOO check** (full parse only, not coaching-only re-parse): After resolving key_people, check if any key person is currently out of office. For the **first** (primary) person in key_people, call `ask_work_iq` with: "Check [full name]'s current presence and availability status. Are they showing as Out of Office in Teams or Outlook? Do they have an OOO status, automatic reply, or Out of Office presence set? Also check if I've received any recent automatic reply or OOO email from them. If they are OOO, when are they returning?" If they ARE out of office, set `waiting_activity` to: `{"status": "out_of_office", "return_date": "YYYY-MM-DD", "summary": "[OOO details]", "checked_at": "[now]"}` (use null for return_date if unknown). If they are NOT out of office, leave `waiting_activity` as null. This ensures the OOO badge shows immediately on the dashboard.
 - **source_type**: Do NOT change this field. Tasks entered via the dashboard are always 'manual'. Tasks created by /todo-refresh already have the correct source_type set from WorkIQ. Leave the existing value as-is.
+- **source_url**: Do NOT change or clear this field. A manually pasted Teams link is preserved here so the parsed task still links to the original conversation.
 - **related_meeting**: If a meeting is mentioned, describe it. Use WorkIQ if helpful: call `ask_work_iq` with "What meetings do I have related to [topic]?" **Important:** After resolving people in the key_people step, always use their full resolved names (e.g. "Jane Doe" not "Jane") in all subsequent WorkIQ queries for more precise results.
 - **action_type**: Classify the task into one of these action types based on intent:
 

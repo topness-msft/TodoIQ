@@ -44,6 +44,11 @@ URL_1TO1_UNDASHED_FIRST = (
     "19:02b4cffd3e93446191c40ef3789bcb3e_08b7be88-37ac-4e2b-82af-f8bb67e5f2f7"
     "@unq.gbl.spaces/1772582489267?context=%7B%22contextType%22:%22chat%22%7D"
 )
+URL_1TO1_CHAT = (
+    "https://teams.microsoft.com/l/chat/"
+    "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_d87be1b4-816c-4eff-9edd-7a5823986db1"
+    "@unq.gbl.spaces/conversations?context=%7B%22contextType%22:%22chat%22%7D"
+)
 URL_GROUP = (
     "https://teams.microsoft.com/l/message/"
     "19:723efdcdeef840a983dcc68779914cbb@thread.v2/1771978315725"
@@ -80,7 +85,7 @@ class TestAudienceClassification(unittest.TestCase):
     """kind must never under-report the size of the audience."""
 
     def test_one_to_one_chat(self):
-        for url in (URL_1TO1_2076, URL_1TO1_2057):
+        for url in (URL_1TO1_2076, URL_1TO1_2057, URL_1TO1_CHAT):
             with self.subTest(url=url[:70]):
                 self.assertEqual(parse_source_url(url)["kind"], "one_to_one")
 
@@ -148,6 +153,15 @@ class TestConversationExtraction(unittest.TestCase):
 
     def test_message_id_for_one_to_one(self):
         self.assertEqual(parse_source_url(URL_1TO1_2076)["message_id"], "1785358519108")
+
+    def test_chat_link_has_conversation_but_no_message(self):
+        parsed = parse_source_url(URL_1TO1_CHAT)
+        self.assertEqual(
+            parsed["conversation_id"],
+            "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
+            "d87be1b4-816c-4eff-9edd-7a5823986db1@unq.gbl.spaces",
+        )
+        self.assertIsNone(parsed["message_id"])
 
     def test_no_conversation_id_for_non_chat(self):
         self.assertIsNone(parse_source_url(URL_OUTLOOK)["conversation_id"])

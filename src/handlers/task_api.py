@@ -1,6 +1,9 @@
 """REST API handlers for task CRUD: /api/tasks, /api/tasks/<id>."""
 
 import json
+import re
+from urllib.parse import urlparse
+
 import tornado.web
 
 from ..models import (
@@ -9,6 +12,17 @@ from ..models import (
 )
 from ..services.claude_runner import run_copilot
 from .ws import broadcast
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+
+
+def _extract_teams_url(text: str) -> str | None:
+    for match in _URL_RE.finditer(text):
+        candidate = match.group(0).rstrip(".,;:!?)]}")
+        if urlparse(candidate).hostname == "teams.microsoft.com":
+            return candidate
+    return None
 
 
 class TaskListHandler(tornado.web.RequestHandler):
@@ -44,6 +58,7 @@ class TaskListHandler(tornado.web.RequestHandler):
                 raw_input=raw_input,
                 status="active",
                 parse_status="unparsed",
+                source_url=_extract_teams_url(raw_input),
             )
             # Auto-trigger parsing
             run_copilot("/todo-parse", label="parse")
