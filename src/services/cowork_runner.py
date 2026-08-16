@@ -801,7 +801,8 @@ _DRAFT_CUE_RE = re.compile(
 # Chat-framing questions Cowork appends after a draft. The UI's approve control
 # answers these, so leaving them in makes the draft look like it needs a reply.
 _OFFER_RE = re.compile(
-    r"^\s*(?:want me to|shall i|should i|would you like me to|let me know if)\b.*$",
+    r"^\s*(?:want me to|shall i|should i|would you like me to|let me know if|"
+    r"say the word)\b.*$",
     re.I | re.M,
 )
 

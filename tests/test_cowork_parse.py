@@ -236,7 +236,8 @@ class TestDraftExtraction(unittest.TestCase):
             "**Draft email (not sent)**\n\n"
             "**To:** phil@topness.com\n"
             "**Subject:** Thanks for joining the workshop\n\n"
-            "Hi Phil,\n\nThanks for joining us.\n\nPhil\n\n---"
+            "Hi Phil,\n\nThanks for joining us.\n\nPhil\n\n"
+            "Say the word and I'll send it, or adjust the tone first.\n\n---"
         )
         result = parse_cowork_output(self._text(body))
 
