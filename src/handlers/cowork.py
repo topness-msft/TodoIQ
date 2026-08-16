@@ -37,6 +37,7 @@ from ..models import (
 from ..services.cowork_runner import (
     AlreadyRunning,
     CoworkAnswerRejected,
+    _approved_email_input,
     _calendar_event_matches,
     _looks_like_write,
     answer_interaction,
@@ -263,6 +264,9 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     is_schedule = (
         (task.get("action_type") or "").strip().lower() == "schedule-meeting"
     )
+    is_email = (
+        (task.get("action_type") or "").strip().lower() == "respond-email"
+    )
 
     if is_schedule:
         destination_ref, destination_display = _schedule_destination(people)
@@ -270,6 +274,17 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
             "delivery_channel": None,
             "destination_ref": destination_ref,
             "destination_display": destination_display,
+            "destination_source": (
+                "auto_key_people" if destination_ref else None
+            ),
+        }
+
+    if is_email:
+        destination_ref = person["email"] if person and person["email"] else None
+        return {
+            "delivery_channel": "email",
+            "destination_ref": destination_ref,
+            "destination_display": person["name"] if person else None,
             "destination_source": (
                 "auto_key_people" if destination_ref else None
             ),
@@ -394,9 +409,12 @@ def _enrich(action: dict) -> dict:
     )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
 
-    if action.get("state") in {"previewing", "executing"} and action.get(
-        "conversation_id"
-    ):
+    if action.get("state") == "executing":
+        # Execution-time aq/ta prompts are answered by the runner. The shared
+        # conversation cache can still carry the preview's waiting state.
+        action["waiting_on_user"] = False
+        action["interaction_request"] = None
+    elif action.get("state") == "previewing" and action.get("conversation_id"):
         try:
             status = (HANDOFF_FN or handoff_status)(action["conversation_id"])
         except Exception:  # noqa: BLE001
@@ -788,6 +806,13 @@ def _delivery_evidence_matches(
         action.get("action_type") == "respond-email"
         or action.get("delivery_channel") == "email"
     ):
+        approved_input = tool.get("approved_input")
+        if approved_input is not None:
+            expected_input = _approved_email_input(draft, destination)
+            return (
+                expected_input is not None
+                and approved_input == expected_input
+            )
         lines = draft.splitlines()
         if not lines or not lines[0].lower().startswith("subject:"):
             return False
@@ -1412,8 +1437,25 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
         ref = (body.get("destination_ref") or "").strip()
         display = (body.get("destination_display") or "").strip()
         is_schedule = action.get("action_type") == "schedule-meeting"
-        valid_channel = not channel if is_schedule else channel in DELIVERY_CHANNELS
-        if not valid_channel or not ref or not display:
+        is_email = action.get("action_type") == "respond-email"
+        valid_channel = (
+            not channel
+            if is_schedule
+            else channel == "email"
+            if is_email
+            else channel in DELIVERY_CHANNELS
+        )
+        valid_ref = bool(ref) and (
+            not is_email
+            or (
+                "@" in ref
+                and not ref.startswith("[")
+                and not ref.startswith("19:")
+                and "," not in ref
+                and ";" not in ref
+            )
+        )
+        if not valid_channel or not valid_ref or not display:
             return self._fail(
                 400,
                 (

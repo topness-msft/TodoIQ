@@ -3187,6 +3187,24 @@ function cwCurrentDraft(a) {
     return draft;
 }
 
+function cwDraftDisplay(action, draft) {
+    draft = String(draft || '');
+    var isEmail = action && (
+        action.action_type === 'respond-email'
+        || action.delivery_channel === 'email'
+    );
+    if (!isEmail) return renderCoworkMarkdown(draft);
+    var lines = draft.split(/\r?\n/);
+    if (!lines.length || !/^subject\s*:/i.test(lines[0])) {
+        return renderCoworkMarkdown(draft);
+    }
+    var subject = lines.shift().replace(/^subject\s*:/i, '').trim();
+    var body = lines.join('\n').trim();
+    return '<div class="cw-email-subject"><span>Subject</span><b>'
+        + escapeHtml(subject) + '</b></div>'
+        + '<div class="cw-email-body">' + renderCoworkMarkdown(body) + '</div>';
+}
+
 function cwElapsed(taskId, action) {
     var started = _cwStartedAt[taskId];
     if (!started && action && action.created_at) {
@@ -3483,7 +3501,7 @@ function cwOpenExecuteConfirm(taskId) {
             + destinationHtml + '</div>'
             + '<label class="source-modal-label">'
             + (isMeeting ? 'Meeting details' : 'Final draft') + '</label>'
-            + '<div class="cw-execute-draft">' + renderCoworkMarkdown(approvalDraft) + '</div>'
+            + '<div class="cw-execute-draft">' + cwDraftDisplay(action, approvalDraft) + '</div>'
             + '<div class="cw-execute-warning">'
             + (isMeeting
                 ? 'Review every attendee and the meeting details. Cowork creates the calendar event only after you confirm.'
@@ -3546,6 +3564,7 @@ function cwConfirmExecute(taskId) {
                         _cwActions[taskId]
                     );
                 }
+                cwLoad(taskId);
                 return;
             }
             var modal = document.getElementById('execute-modal');
@@ -3668,7 +3687,8 @@ function cwOpenDestPicker(taskId) {
     cwCloseDestPicker();
 
     var isMeeting = task.action_type === 'schedule-meeting';
-    var channel = a.delivery_channel || 'teams';
+    var isEmail = task.action_type === 'respond-email';
+    var channel = isEmail ? 'email' : (a.delivery_channel || 'teams');
     var ref = a.destination_ref || '';
     var overlay = document.createElement('div');
     overlay.id = 'dest-modal';
@@ -3677,16 +3697,22 @@ function cwOpenDestPicker(taskId) {
         + '<div class="source-modal-header">'
         + (isMeeting ? 'Meeting attendee' : 'Confirm destination') + '</div>'
         + (isMeeting ? ''
+            : isEmail
+              ? '<label class="source-modal-label">Channel</label>'
+                + '<select id="dest-modal-channel" class="source-modal-input" '
+                + 'data-testid="dest-channel" disabled>'
+                + '<option value="email" selected>Email</option></select>'
             : '<label class="source-modal-label">Channel</label>'
               + '<select id="dest-modal-channel" class="source-modal-input" data-testid="dest-channel">'
               + '<option value="teams"' + (channel === 'teams' ? ' selected' : '') + '>Teams</option>'
               + '<option value="email"' + (channel === 'email' ? ' selected' : '') + '>Email</option>'
               + '</select>')
         + '<label class="source-modal-label">'
-        + (isMeeting ? 'Attendee email' : 'Recipient or conversation') + '</label>'
+        + (isMeeting ? 'Attendee email' : isEmail ? 'Recipient email'
+            : 'Recipient or conversation') + '</label>'
         + '<input type="text" id="dest-modal-ref" class="source-modal-input" '
         + 'data-testid="dest-ref" value="' + cwEscapeAttr(ref) + '">'
-        + (ref.indexOf('19:') === 0
+        + (!isEmail && ref.indexOf('19:') === 0
             ? '<div class="cw-dest-hint">Linked Teams conversation \u2014 leave as-is to reply in the original thread.</div>'
             : '')
         + '<label class="source-modal-label">'
@@ -3877,9 +3903,17 @@ function cwRedoBlock(taskId) {
 
 function cwRedoRow(taskId) {
     if (!_cwRedo[taskId]) return '';
+    var action = _cwActions[taskId];
+    var example = action && (
+        action.action_type === 'respond-email'
+        || action.delivery_channel === 'email'
+    ) ? 'e.g. make the subject clearer and the note warmer'
+      : action && action.action_type === 'schedule-meeting'
+        ? 'e.g. look for times next week'
+        : 'e.g. make it shorter and more direct';
     return '<div class="cw-intent">'
         + '<input type="text" class="cw-intent-box" id="cw-redo-' + taskId + '" '
-        + 'placeholder="Tell Cowork what to change\u2026 (e.g. look for times next week)" '
+        + 'placeholder="Tell Cowork what to change\u2026 (' + escapeAttr(example) + ')" '
         + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();cwStart(' + taskId + ',true)}">'
         + '<div class="cw-intent-actions">'
         + '<span class="i-edit" onclick="cwStart(' + taskId + ',true)">Run again</span>'
@@ -3944,12 +3978,18 @@ function cwRefineRow(a, taskId) {
     // area, rather than duplicated into a second box below it — showing the
     // same text twice made it ambiguous which copy was the real one.
     var instr = _cwInstrBuf[taskId] || '';
+    var example = a && (
+        a.action_type === 'respond-email' || a.delivery_channel === 'email'
+    ) ? 'e.g. use a warmer subject and keep the email concise'
+      : a && a.action_type === 'schedule-meeting'
+        ? 'e.g. move it later in the day and shorten the agenda'
+        : 'e.g. make it shorter and aim it just at Greg';
     return '<div class="cw-refine" data-testid="cw-refine-row">'
         + '<div class="cw-refine-label">Change the draft above, or say what to '
         + 'change here. Either is enough.</div>'
         + '<textarea class="cw-refine-box" id="cw-refine-' + taskId + '" rows="2" '
         + 'oninput="cwBufferInstr(' + taskId + ',this.value)" '
-        + 'placeholder="e.g. make it shorter and aim it just at Greg">'
+        + 'placeholder="' + escapeAttr(example) + '">'
         + escapeHtml(instr) + '</textarea>'
         + '<div class="cw-refine-actions">'
         + '<button class="cw-btn cw-btn-go" data-testid="cw-refine-send" '
@@ -4109,25 +4149,6 @@ function renderCoworkCard(task) {
         if (a && a.state === 'executing') {
             if (!_cwPollers[task.id]) startCoworkPoller(task.id);
             var sendProgress = cwExecutionProgress(task, a);
-            var executeInteraction = a.interaction_request;
-            if (a.waiting_on_user && executeInteraction) {
-                return cwShell('is-running is-executing', 'needs approval', task,
-                    '<div class="cw-delivery-target"><span>Acting in</span><b>'
-                    + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'
-                    + '<div class="cw-blocked" data-testid="cw-blocked" data-cw-invocation="'
-                    + escapeAttr(executeInteraction ? executeInteraction.invocation_id : '') + '">'
-                    + '<b>Cowork needs your approval to finish this action.</b>'
-                    + (executeInteraction
-                        ? cwInteractionFields(task.id, executeInteraction)
-                        : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>')
-                    + '</div>',
-                    (executeInteraction
-                        ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
-                          + 'onclick="cwSendAnswer(' + task.id + ')">Answer and continue</button>'
-                        : '')
-                    + '<span class="cw-foot-note">the action is paused until you answer</span>',
-                    a);
-            }
             return cwShell('is-running is-executing', 'sending', task,
                 '<div class="cw-delivery-target"><span>Acting in</span><b>'
                 + escapeHtml(a.destination_display || a.destination_ref || '') + '</b></div>'
@@ -4136,7 +4157,8 @@ function renderCoworkCard(task) {
                 + '<span class="cw-progress-text"><span id="cw-live-' + task.id + '">'
                 + escapeHtml(sendProgress) + '</span><span class="cw-progress-sub" id="cw-hb-'
                 + task.id + '">' + escapeHtml(cwElapsed(task.id, a)) + '</span></span></div>',
-                '<span class="cw-foot-note">approved action in progress</span>',
+                '<span class="cw-foot-note">approved action in progress</span>'
+                + cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }
 
@@ -4147,8 +4169,8 @@ function renderCoworkCard(task) {
                 + '<b>Delivered to ' + escapeHtml(a.destination_display || a.destination_ref || 'the destination')
                 + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
                 + cwTimeline(a, '')
-                + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
-                '',
+                + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
+                cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }
 
@@ -4160,8 +4182,9 @@ function renderCoworkCard(task) {
                 + '<span>Check the destination before retrying. ' + escapeHtml(a.error || '') + '</span>'
                 + '</div></section>'
                 + cwTimeline(a, '')
-                + '<div class="cw-draft cw-markdown">' + renderCoworkMarkdown(cwCurrentDraft(a)) + '</div>',
-                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>',
+                + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
+                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
+                + cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }
         return cwShell('is-running', '', task,
@@ -4218,7 +4241,7 @@ function renderCoworkCard(task) {
               + 'data-testid="cowork-draft-click-edit" title="Click to edit draft" '
               + 'onclick="cwOpenDraftEdit(event,' + task.id + ')" '
               + 'onkeydown="cwOpenDraftEdit(event,' + task.id + ')">'
-              + renderCoworkMarkdown(draft) + '</div>';
+              + cwDraftDisplay(a, draft) + '</div>';
         var editedBadge = (a.draft_edited != null && a.draft_edited !== '')
             ? '<span class="cw-foot-note">edited by you</span>' : '';
         // What this preview actually cost, measured as the change in the user's
@@ -4297,7 +4320,9 @@ function cwLoad(taskId, markSeen) {
             delete _cwLoading[taskId];
             _cwActions[taskId] = data.action || null;
             cwSyncTaskState(taskId, data.action || null);
-            if (data.action && data.action.state === 'previewing') startCoworkPoller(taskId);
+            if (data.action && ['previewing', 'executing'].indexOf(
+                    data.action.state
+                ) !== -1) startCoworkPoller(taskId);
             renderTaskList();
             cwRerender(taskId);
         })
@@ -4408,6 +4433,17 @@ function cwSaveDraft(taskId) {
 
 function cwInteractionFields(taskId, interaction) {
     var buffered = _cwAnswerBuf[taskId] || {};
+    var action = _cwActions[taskId];
+    var isEmail = action && (
+        action.action_type === 'respond-email'
+        || action.delivery_channel === 'email'
+    );
+    var redirectLabel = isEmail
+        ? 'Want a different email direction?'
+        : 'Need a different option?';
+    var redirectExample = isEmail
+        ? 'e.g. make the subject clearer and the tone warmer'
+        : 'e.g. find something later in the day';
     return (interaction.questions || []).map(function(question) {
         var id = String(question.id || '');
         var heading = question.header || question.question || 'Cowork question';
@@ -4444,12 +4480,12 @@ function cwInteractionFields(taskId, interaction) {
                 }).join('') + '</div>'))
                 + '<div class="cw-choice-redirect">'
                 + '<label for="cw-redirect-' + taskId + '-' + escapeAttr(id) + '">'
-                + 'Need a different option?</label>'
+                + escapeHtml(redirectLabel) + '</label>'
                 + '<input id="cw-redirect-' + taskId + '-' + escapeAttr(id) + '" '
                 + 'class="cw-choice-redirect-input" data-testid="cw-answer-redirect" '
                 + 'data-cw-redirect="' + escapeAttr(id) + '" value="'
                 + escapeAttr(usesKnownOptions ? '' : value)
-                + '" placeholder="e.g. find something later in the day" '
+                + '" placeholder="' + escapeAttr(redirectExample) + '" '
                 + 'oninput="cwRedirectAnswer(' + taskId + ', this)">'
                 + '</div>';
         } else {

@@ -332,6 +332,49 @@ class TestStartPreview(CoworkAPITestBase):
         self.assertEqual(action["delivery_channel"], "teams")
         self.assertIn("Sarah Goodwin", action["destination_display"])
 
+    def test_respond_email_action_selects_email_without_source_metadata(self):
+        tid = self.make_task(
+            title="Thank Phil for attending",
+            description="Draft and send a concise thank-you email.",
+            action_type="respond-email",
+            source_type="manual",
+            key_people=json.dumps([{
+                "name": "Phil Topness",
+                "email": "phil@topness.com",
+                "role": "Principal Consultant",
+            }]),
+        )
+
+        action = json.loads(self.start(tid).body)["action"]
+
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_ref"], "phil@topness.com")
+        voice = action["composed_prompt"].split("[VOICE]", 1)[1]
+        self.assertIn("work-email-voice", voice)
+        self.assertNotIn("work-teams-voice", voice)
+
+    def test_respond_email_does_not_reuse_a_teams_conversation(self):
+        tid = self.make_task(
+            title="Email Phil after the Teams discussion",
+            description="Send Phil the follow-up by email.",
+            action_type="respond-email",
+            source_type="chat",
+            source_url=(
+                "https://teams.microsoft.com/l/message/"
+                "19:teams-thread@thread.v2/1234567890"
+            ),
+            key_people=json.dumps([{
+                "name": "Phil Topness",
+                "email": "phil@topness.com",
+            }]),
+        )
+
+        action = json.loads(self.start(tid).body)["action"]
+
+        self.assertEqual(action["delivery_channel"], "email")
+        self.assertEqual(action["destination_ref"], "phil@topness.com")
+        self.assertNotIn("19:teams-thread", action["destination_ref"])
+
     def test_manual_unique_person_prefills_without_choosing_channel(self):
         tid = self.make_task(
             source_type="manual",
@@ -1032,6 +1075,39 @@ class TestConfirmDestination(CoworkAPITestBase):
 
         self.assertEqual(response.code, 400)
 
+    def test_respond_email_rejects_teams_channel_or_conversation_ref(self):
+        tid = self.make_task(action_type="respond-email")
+        action_id = self.make_action(tid, state="ready")
+        from src.db import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET action_type='respond-email' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        teams_response = self._confirm(
+            tid,
+            {
+                "delivery_channel": "teams",
+                "destination_ref": "19:teams-thread@thread.v2",
+                "destination_display": "Phil Topness",
+            },
+        )
+        conversation_as_email = self._confirm(
+            tid,
+            {
+                "delivery_channel": "email",
+                "destination_ref": "19:teams-thread@thread.v2",
+                "destination_display": "Phil Topness",
+            },
+        )
+
+        self.assertEqual(teams_response.code, 400)
+        self.assertEqual(conversation_as_email.code, 400)
+
     def test_rejects_unknown_channel_and_blank_destination(self):
         tid = self.make_task()
         self.make_action(tid, state="ready")
@@ -1454,6 +1530,34 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             }]
         }
         self.assertTrue(_delivery_evidence_matches(email_action, matching_email))
+        approved_email = json.loads(json.dumps(matching_email))
+        approved_email["tools"][0]["approved_input"] = {
+            "to": ["sarah@microsoft.com"],
+            "subject": "Status update",
+            "content_type": "HTML",
+            "body": (
+                "Approved email body<br><br><!-- aether-footer -->"
+                '<span style="font-size:11px;color:#666;">Sent by '
+                '<a href="https://aka.ms/cowork?cw_source=outlook&amp;'
+                'cw_tool=SendEmailWithAttachments">Copilot Cowork</a></span>'
+            ),
+        }
+        self.assertTrue(_delivery_evidence_matches(email_action, approved_email))
+        changed_approved_body = json.loads(json.dumps(approved_email))
+        changed_approved_body["tools"][0]["approved_input"]["body"] = (
+            "Different body<br><br><!-- aether-footer -->"
+            + approved_email["tools"][0]["approved_input"]["body"].split(
+                "<!-- aether-footer -->", 1
+            )[1]
+        )
+        self.assertFalse(
+            _delivery_evidence_matches(email_action, changed_approved_body)
+        )
+        failed_approved_email = json.loads(json.dumps(approved_email))
+        failed_approved_email["tools"][0]["ok"] = False
+        self.assertFalse(_delivery_evidence_matches(
+            email_action, failed_approved_email
+        ))
         duplicate_recipient = json.loads(json.dumps(matching_email))
         duplicate_recipient["tools"][0]["input"]["cc"] = [
             "sarah@microsoft.com"
@@ -2392,6 +2496,78 @@ class TestRefineTurn(CoworkAPITestBase):
         self.assertIn("post", own)
 
 
+class TestEnrichExecutingState(CoworkAPITestBase):
+    def setUp(self):
+        super().setUp()
+        from src.handlers import cowork as handler_mod
+
+        self.handler = handler_mod
+        self._store = handler_mod.BLOCKED_QUESTION_STORE_FN
+        self.store_calls = []
+        handler_mod.HANDOFF_FN = lambda _cid: {
+            "state": "needs_user_input",
+            "waiting_on_user": True,
+        }
+        handler_mod.BLOCKED_QUESTION_FN = lambda _cid: {
+            "invocation_id": "aq-execution",
+            "questions": [{
+                "id": "0",
+                "producer_id": "approval",
+                "header": "",
+                "question": "Send it?",
+                "options": [],
+            }],
+        }
+        handler_mod.BLOCKED_QUESTION_STORE_FN = (
+            lambda *args: self.store_calls.append(args) or True
+        )
+        self.addCleanup(
+            lambda: setattr(
+                handler_mod, "BLOCKED_QUESTION_STORE_FN", self._store
+            )
+        )
+
+    def test_executing_ignores_stale_waiting_handoff_and_question(self):
+        action = {
+            "id": 9001,
+            "state": "executing",
+            "conversation_id": "tenant:user:shared",
+            "destination_kind": "none",
+            "blocked_question": None,
+        }
+        enriched = self.handler._enrich(action)
+        self.assertIs(enriched["waiting_on_user"], False)
+        self.assertIsNone(enriched["interaction_request"])
+        self.assertEqual(self.store_calls, [])
+
+    def test_executing_skips_answered_question_recovery(self):
+        action = {
+            "id": 9002,
+            "state": "executing",
+            "conversation_id": "tenant:user:shared",
+            "destination_kind": "none",
+            "blocked_question": "",
+        }
+        enriched = self.handler._enrich(action)
+        self.assertIs(enriched["waiting_on_user"], False)
+        self.assertEqual(self.store_calls, [])
+
+    def test_previewing_still_surfaces_a_real_question(self):
+        action = {
+            "id": 9003,
+            "state": "previewing",
+            "conversation_id": "tenant:user:preview",
+            "destination_kind": "none",
+            "blocked_question": None,
+        }
+        enriched = self.handler._enrich(action)
+        self.assertIs(enriched["waiting_on_user"], True)
+        self.assertEqual(
+            enriched["interaction_request"]["invocation_id"], "aq-execution"
+        )
+        self.assertEqual(len(self.store_calls), 1)
+
+
 class TestInteractionAnswer(CoworkAPITestBase):
     def setUp(self):
         super().setUp()
@@ -2457,17 +2633,13 @@ class TestInteractionAnswer(CoworkAPITestBase):
         self.assertFalse(body["action"]["waiting_on_user"])
         self.assertEqual(body["action"]["blocked_question"], "")
 
-    def test_it_answers_an_execution_interaction(self):
+    def test_it_rejects_an_execution_interaction(self):
         tid = self._blocked(state="executing")
 
         response = self._answer_request(tid)
 
-        self.assertEqual(response.code, 202)
-        self.assertEqual(
-            self.answers,
-            [("t:u:blocked", "invoke-1", {"0": "Use A"})],
-        )
-        self.assertEqual(json.loads(response.body)["action"]["state"], "executing")
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.answers, [])
 
     def test_empty_answer_is_rejected(self):
         tid = self._blocked()

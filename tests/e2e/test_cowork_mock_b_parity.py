@@ -428,8 +428,11 @@ def test_execution_progress_and_approval_states(page: Page, base_url):
             },
         },
     )
-    expect(page.get_by_text("Cowork needs your approval to finish this action.")).to_be_visible()
-    expect(page.get_by_role("button", name="Answer and continue")).to_be_visible()
+    expect(page.get_by_text("approved action in progress")).to_be_visible()
+    expect(
+        page.get_by_text("Cowork needs your approval to finish this action.")
+    ).not_to_be_visible()
+    expect(page.get_by_role("button", name="Answer and continue")).not_to_be_visible()
     page.screenshot(
         path=os.path.join(TEMP_DIR, "cowork-execution-approval.png"),
         full_page=True,
@@ -451,3 +454,55 @@ def test_answered_no_interaction_run_does_not_claim_no_interruption(
         },
     )
     expect(page.get_by_test_id("session-complete")).to_have_count(0)
+
+
+def test_email_subject_guidance_and_execution_costs(page: Page, base_url):
+    _render(
+        page,
+        base_url,
+        {
+            "state": "ready",
+            "action_type": "respond-email",
+            "delivery_channel": "email",
+            "draft": (
+                "Subject: Workshop follow-up\n\n"
+                "Phil - thanks for joining the workshop."
+            ),
+            "destination_display": "Phil Topness",
+            "destination_ref": "phil@topness.com",
+            "destination_confirmed_at": "2026-08-15T23:25:19Z",
+            "conversation_id": "tenant:user:email",
+        },
+    )
+    expect(page.get_by_text("Workshop follow-up", exact=True)).to_be_visible()
+    page.get_by_test_id("dest-change-btn").click()
+    expect(page.get_by_test_id("dest-channel")).to_be_disabled()
+    expect(page.get_by_test_id("dest-channel")).to_have_value("email")
+    expect(page.get_by_text("Recipient email", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Cancel").click()
+    page.get_by_test_id("cw-refine-btn").click()
+    expect(page.get_by_test_id("cw-refine-row").locator("textarea")).to_have_attribute(
+        "placeholder", "e.g. use a warmer subject and keep the email concise"
+    )
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-email-subject-guidance.png"),
+        full_page=True,
+    )
+
+    _render(
+        page,
+        base_url,
+        {
+            "state": "executing",
+            "action_type": "respond-email",
+            "delivery_channel": "email",
+            "draft": "Subject: Workshop follow-up\n\nPhil - thanks for joining.",
+            "destination_display": "Phil Topness",
+            "credits_cumulative": 407,
+            "cost_credits": 30.2,
+            "progress": ["Sending email to Phil Topness"],
+        },
+    )
+    card = page.locator(".cw-card, .cw-shell").first
+    expect(card).to_contain_text("407 credits total")
+    expect(card).to_contain_text("30.2 credits")

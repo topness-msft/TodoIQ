@@ -444,6 +444,80 @@ class TestExecutionToolApproval(unittest.TestCase):
         self.assertIsNone(approval["json"]["edited_input"])
 
 
+class TestEmailToolApproval(unittest.TestCase):
+    def setUp(self):
+        self.conversation_id = "tenant:user:email"
+        self.snapshot = {
+            "destination_ref": "phil@topness.com",
+            "draft": (
+                "Subject: Thanks for joining the Power of Gen AI & Copilot "
+                "Studio workshop\n\n"
+                "Phil - thanks for coming to the workshop.\n\n"
+                "I'd love your honest read on what landed and what didn't."
+            ),
+        }
+        self.params = {
+            "to": ["phil@topness.com"],
+            "subject": "Thanks for joining the Power of Gen AI & Copilot Studio workshop",
+            "content_type": "HTML",
+            "body": (
+                "Phil - thanks for coming to the workshop.<br><br>"
+                "I'd love your honest read on what landed and what didn't."
+                "<br><br><!-- aether-footer -->"
+                '<span style="font-size:11px;color:#666;">Sent by '
+                '<a href="https://aka.ms/cowork?cw_source=outlook&amp;'
+                'cw_tool=SendEmailWithAttachments">Copilot Cowork</a></span>'
+            ),
+        }
+        self.ta = {
+            "aid": "mcp-outlook:jrpc:3",
+            "rid": "mcp-outlook:jrpc:3",
+            "tn": "SendEmailWithAttachments",
+            "sn": "outlook",
+            "tid": "email-1",
+            "params": self.params,
+        }
+
+    def _approval(self, ta=None, snapshot=None):
+        return cr._execution_tool_approval(
+            ta or self.ta,
+            "email",
+            snapshot or self.snapshot,
+            self.conversation_id,
+        )
+
+    def test_exact_live_email_shape_builds_deterministic_approval(self):
+        approval = self._approval()
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval["edited_input"], self.params)
+
+    def test_rejects_email_recipient_subject_body_or_tool_drift(self):
+        cases = [
+            {**self.ta, "sn": "outlook_calendar"},
+            {**self.ta, "tn": "SendMail"},
+            {**self.ta, "params": {**self.params, "to": ["other@example.com"]}},
+            {**self.ta, "params": {
+                **self.params,
+                "to": ["phil@topness.com", "other@example.com"],
+            }},
+            {**self.ta, "params": {**self.params, "subject": "Changed"}},
+            {**self.ta, "params": {**self.params, "body": "Changed"}},
+            {**self.ta, "params": {**self.params, "content_type": "Text"}},
+            {**self.ta, "params": {**self.params, "cc": ["other@example.com"]}},
+            {**self.ta, "params": {**self.params, "bcc": ["other@example.com"]}},
+            {**self.ta, "params": {**self.params, "attachments": ["secret.pdf"]}},
+        ]
+        for ta in cases:
+            with self.subTest(ta=ta):
+                self.assertIsNone(self._approval(ta=ta))
+
+    def test_rejects_body_only_approved_draft(self):
+        self.assertIsNone(self._approval(snapshot={
+            **self.snapshot,
+            "draft": "Phil - thanks for coming to the workshop.",
+        }))
+
+
 class TestCalendarToolApproval(unittest.TestCase):
     def setUp(self):
         self.conversation_id = "tenant:user:conversation"
@@ -687,6 +761,7 @@ class TestCalendarToolApproval(unittest.TestCase):
                     + "<br><br><!-- aether-footer -->"
                     + cr._AETHER_FOOTERS["calendar"]
                 ),
+                "importance": "normal",
             },
         )
 
@@ -808,6 +883,7 @@ class TestCalendarToolApproval(unittest.TestCase):
         self.assertEqual(approval["tool_name"], "CreateEvent")
         self.assertTrue(approval["approved"])
         self.assertIsInstance(approval["edited_input"], dict)
+        self.assertEqual(approval["edited_input"]["importance"], "normal")
 
     def test_rejects_calendar_request_drift(self):
         cases = [

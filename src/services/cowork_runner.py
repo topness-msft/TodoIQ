@@ -2759,6 +2759,11 @@ def _execution_approval_answer(data, approval_kind):
 
 
 _AETHER_FOOTERS = {
+    "email": (
+        '<span style="font-size:11px;color:#666;">Sent by '
+        '<a href="https://aka.ms/cowork?cw_source=outlook&amp;'
+        'cw_tool=SendEmailWithAttachments">Copilot Cowork</a></span>'
+    ),
     "teams": (
         '<span style="font-size:11px;color:#666;">Sent by '
         '<a href="https://aka.ms/cowork?cw_source=teams&amp;'
@@ -2770,6 +2775,32 @@ _AETHER_FOOTERS = {
         'cw_tool=CreateEvent">Copilot Cowork</a></span>'
     ),
 }
+
+
+def _approved_email_input(reviewed_draft, destination):
+    """Build the exact Outlook input from the email draft reviewed in Riveter."""
+    draft = str(reviewed_draft or "").strip()
+    lines = draft.splitlines()
+    if not lines or not lines[0].lower().startswith("subject:"):
+        return None
+    subject = lines[0].split(":", 1)[1].strip()
+    body = "\n".join(lines[1:]).strip()
+    destination = str(destination or "").strip().lower()
+    if not subject or not body or not destination or "@" not in destination:
+        return None
+    # Outlook's approval payload is HTML even when the initial proposal was text.
+    rendered = html.escape(body, quote=False).replace("\r\n", "\n")
+    rendered = rendered.replace("\r", "\n").replace("\n", "<br>")
+    return {
+        "to": [destination],
+        "subject": subject,
+        "content_type": "HTML",
+        "body": (
+            rendered
+            + "<br><br><!-- aether-footer -->"
+            + _AETHER_FOOTERS["email"]
+        ),
+    }
 
 
 def _render_calendar_event_body(reviewed_draft, subject):
@@ -2840,6 +2871,10 @@ def _calendar_event_identity_matches(actual, expected, *, require_footer=False):
     expected_content_type = str(expected.pop("content_type", "html")).strip().lower()
     if actual_content_type != expected_content_type or expected_content_type != "html":
         return False
+    # Importance is deliberately normalized at approval time, not trusted from
+    # the model's proposal or preview trace.
+    actual.pop("importance", None)
+    expected.pop("importance", None)
     if set(actual) != set(expected):
         return False
 
@@ -2876,6 +2911,10 @@ def _calendar_event_matches(
         except (json.JSONDecodeError, TypeError):
             return False
     if not isinstance(actual, dict):
+        return False
+    if reviewed_draft is not None and str(
+        actual.get("importance", "normal")
+    ).strip().lower() != "normal":
         return False
     if not _calendar_event_identity_matches(
         actual,
@@ -2919,7 +2958,7 @@ def _execution_tool_approval(
     """Build one approval for the exact write action reviewed in Riveter."""
     if (
         not isinstance(data, dict)
-        or approval_kind not in {"teams", "calendar"}
+        or approval_kind not in {"teams", "email", "calendar"}
         or not isinstance(approved_snapshot, dict)
         or not conversation_id
     ):
@@ -2956,6 +2995,7 @@ def _execution_tool_approval(
         if reviewed_body is None:
             return None
         edited_input = dict(expected)
+        edited_input["importance"] = "normal"
         edited_input["body"] = (
             reviewed_body
             + "<br><br><!-- aether-footer -->"
@@ -2968,6 +3008,29 @@ def _execution_tool_approval(
             tool_name,
             conversation_id,
             edited_input=edited_input,
+        )
+
+    if approval_kind == "email":
+        expected = _approved_email_input(
+            approved_snapshot.get("draft"),
+            approved_snapshot.get("destination_ref"),
+        )
+        if (
+            not approval_id
+            or server_name.lower() != "outlook"
+            or re.sub(r"[^a-z0-9]", "", tool_name.lower())
+            != "sendemailwithattachments"
+            or not isinstance(params, dict)
+            or params != expected
+        ):
+            return None
+        return _tool_approval_payload(
+            data,
+            approval_id,
+            server_name,
+            tool_name,
+            conversation_id,
+            edited_input=expected,
         )
 
     if (
