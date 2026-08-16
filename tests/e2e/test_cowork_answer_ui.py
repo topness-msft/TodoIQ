@@ -158,6 +158,86 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     }
 
 
+def test_execution_question_can_be_answered_in_place(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Resolve an execution question"},
+    )
+    task_id = created.json()["task"]["id"]
+    posted = {}
+
+    def answer_route(route):
+        posted.update(json.loads(route.request.post_data))
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps({
+                "action": {
+                    "task_id": task_id,
+                    "state": "executing",
+                    "waiting_on_user": False,
+                    "conversation_id": "t:u:execution-blocked",
+                },
+            }),
+        )
+
+    page.route(f"**/api/tasks/{task_id}/cowork/answer", answer_route)
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                task.action_type = 'respond-email';
+                selectedTaskId = taskId;
+                _cwActions[taskId] = {
+                    id: 135,
+                    task_id: taskId,
+                    state: 'executing',
+                    waiting_on_user: true,
+                    interaction_request: {
+                        invocation_id: 'execution-question',
+                        questions: [{
+                            id: '0',
+                            question: 'Use the earlier draft or cancel?',
+                            options: [
+                                {value: 'earlier', label: 'Use earlier draft'},
+                                {value: 'cancel', label: 'Cancel for now'}
+                            ]
+                        }]
+                    },
+                    blocked_question: '{"invocation_id":"execution-question"}',
+                    conversation_id: 't:u:execution-blocked',
+                    destination_display: 'Phil Topness',
+                    destination_ref: 'phil@topness.com'
+                };
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        blocked = page.get_by_test_id("cw-blocked")
+        expect(blocked).to_be_visible()
+        expect(blocked).to_contain_text("Use the earlier draft or cancel?")
+        expect(page.get_by_test_id("cw-stop")).to_have_count(0)
+        page.get_by_test_id("cw-choice").nth(1).click()
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, "cowork-execution-question-dark.png"),
+            full_page=True,
+        )
+        page.get_by_test_id("cw-answer-submit").click()
+        expect(blocked).to_have_count(0)
+        assert posted == {
+            "invocation_id": "execution-question",
+            "answers": {"0": "cancel"},
+        }
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
 def test_raw_html_and_unsafe_images_stay_inert(page: Page, base_url):
     page.goto(base_url + "/")
     page.evaluate(

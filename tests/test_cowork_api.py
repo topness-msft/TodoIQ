@@ -1249,6 +1249,30 @@ class TestConfirmDestination(CoworkAPITestBase):
 
                 self.assertEqual(response.code, 400)
 
+    def test_email_delivery_channel_rejects_invalid_recipient_for_general_action(self):
+        tid = self.make_task(action_type="follow-up")
+        action_id = self.make_action(tid, state="ready")
+        from src.db import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET delivery_channel='email' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._confirm(
+            tid,
+            {
+                "delivery_channel": "email",
+                "destination_ref": "Phil Topness",
+                "destination_display": "Phil Topness",
+            },
+        )
+
+        self.assertEqual(response.code, 400)
+
     def test_rejects_unknown_channel_and_blank_destination(self):
         tid = self.make_task()
         self.make_action(tid, state="ready")
@@ -1782,7 +1806,11 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
     def test_routes_email_and_calendar_approvals_by_action(self):
         email_tid = self.make_task()
-        self._ready_action(email_tid, delivery_channel="email")
+        self._ready_action(
+            email_tid,
+            delivery_channel="email",
+            draft="Subject: Deck follow-up\n\nHi Sarah - the deck is attached.",
+        )
         self.assertEqual(self._execute(email_tid).code, 202)
         self.assertEqual(self.started[-1][3]["approval_kind"], "email")
 
@@ -1994,6 +2022,74 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         tid2 = self.make_task()
         self._ready_action(tid2, conversation_id=None)
         self.assertEqual(self._execute(tid2).code, 409)
+
+    def test_rejects_subjectless_email_draft(self):
+        tid = self.make_task(action_type="respond-email")
+        self._ready_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            draft="afafsas",
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertIn("subject", json.loads(response.body)["error"].lower())
+        self.assertEqual(self.started, [])
+
+    def test_rejects_email_with_empty_subject_line(self):
+        tid = self.make_task(action_type="respond-email")
+        self._ready_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            draft="Subject:\n\nHi Phil,\n\nThis has no subject.",
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.started, [])
+
+    def test_rejects_email_with_subject_but_no_body(self):
+        tid = self.make_task(action_type="respond-email")
+        self._ready_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            draft="Subject: Hello",
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertIn("body", json.loads(response.body)["error"].lower())
+        self.assertEqual(self.started, [])
+
+    def test_delivery_channel_email_requires_subject_and_body(self):
+        tid = self.make_task(action_type="follow-up")
+        self._ready_action(
+            tid,
+            action_type="follow-up",
+            delivery_channel="email",
+            draft="Subject: Hello",
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.started, [])
+
+    def test_execution_runner_receives_the_execution_action_id(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 202)
+        child = json.loads(response.body)["action"]
+        self.assertEqual(self.started[-1][3]["action_id"], child["id"])
 
     def test_double_submit_creates_only_one_execution(self):
         tid = self.make_task()
@@ -2208,6 +2304,154 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
         self.assertEqual(data["action"]["state"], "execute_unconfirmed")
         self.assertIn("check the destination", data["action"]["error"].lower())
+
+    def test_explicit_cancellation_returns_to_ready_without_delivery_warning(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 0,
+                "stdout": json.dumps({
+                    "terminal_status": "ok",
+                    "conversation_id": "tenant:user:conversation",
+                    "text": (
+                        "Cancelled, nothing was sent. The draft is still here "
+                        "whenever you want to use it."
+                    ),
+                    "tool_trace": [],
+                    "sse_events": [],
+                    "callback_exchanges": [],
+                }),
+                "stderr": "",
+                "error": None,
+                "auth_failed": False,
+                "cost_credits": 1.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "ready")
+        self.assertIsNone(data["action"]["error"])
+        self.assertIsNone(data["action"]["delivery_confirmed_at"])
+
+    def test_cancellation_text_cannot_override_successful_write_evidence(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 0,
+                "stdout": json.dumps({
+                    "terminal_status": "ok",
+                    "conversation_id": "tenant:user:conversation",
+                    "text": "Cancelled, nothing was sent.",
+                    "tool_trace": [{
+                        "tool_name": "mcp__m365_teams__PostMessage",
+                        "ok": True,
+                    }],
+                    "sse_events": [{
+                        "event": "ts",
+                        "tid": "send-1",
+                        "tn": "mcp__m365_teams__PostMessage",
+                        "inp": json.dumps({
+                            "recipient": "sarah@microsoft.com",
+                            "message": "Hi Sarah - the deck is attached.",
+                        }),
+                    }, {
+                        "event": "tx",
+                        "tid": "send-1",
+                        "tn": "mcp__m365_teams__PostMessage",
+                        "ok": True,
+                    }],
+                    "callback_exchanges": [],
+                }),
+                "stderr": "",
+                "error": None,
+                "auth_failed": False,
+                "cost_credits": 1.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "executed")
+        self.assertIsNotNone(data["action"]["delivery_confirmed_at"])
+
+    def test_cancellation_text_cannot_hide_failed_write_attempt(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 1,
+                "stdout": json.dumps({
+                    "terminal_status": "fail",
+                    "conversation_id": "tenant:user:conversation",
+                    "text": "Cancelled, nothing was sent.",
+                    "tool_trace": [{
+                        "tool_name": "mcp__outlook__SendEmailWithAttachments",
+                        "ok": False,
+                    }],
+                    "sse_events": [],
+                    "callback_exchanges": [],
+                }),
+                "stderr": "send failed",
+                "error": "send failed",
+                "auth_failed": False,
+                "cost_credits": 1.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "execute_unconfirmed")
+        self.assertIn("check the destination", data["action"]["error"].lower())
+        self.assertIsNone(data["action"]["delivery_confirmed_at"])
+
+    def test_cancel_terminal_status_cannot_hide_failed_write_attempt(self):
+        tid = self.make_task()
+        self._ready_action(tid)
+        self.assertEqual(self._execute(tid).code, 202)
+        cr._runs[cr.execution_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "exit_code": 0,
+                "stdout": json.dumps({
+                    "terminal_status": "cancel",
+                    "conversation_id": "tenant:user:conversation",
+                    "text": "Cancelled, nothing was sent.",
+                    "tool_trace": [{
+                        "tool_name": "mcp__outlook__SendEmailWithAttachments",
+                        "ok": False,
+                    }],
+                    "sse_events": [],
+                    "callback_exchanges": [],
+                }),
+                "stderr": "",
+                "error": None,
+                "auth_failed": False,
+                "cost_credits": 1.0,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertEqual(data["action"]["state"], "execute_unconfirmed")
+        self.assertIn("check the destination", data["action"]["error"].lower())
+        self.assertIsNone(data["action"]["delivery_confirmed_at"])
 
 
 # ------------------------------------------------------------------- PUT
@@ -2774,13 +3018,19 @@ class TestInteractionAnswer(CoworkAPITestBase):
         self.assertFalse(body["action"]["waiting_on_user"])
         self.assertEqual(body["action"]["blocked_question"], "")
 
-    def test_it_rejects_an_execution_interaction(self):
+    def test_it_answers_an_execution_interaction_in_the_same_conversation(self):
         tid = self._blocked(state="executing")
 
         response = self._answer_request(tid)
 
-        self.assertEqual(response.code, 409)
-        self.assertEqual(self.answers, [])
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.answers,
+            [("t:u:blocked", "invoke-1", {"0": "Use A"})],
+        )
+        body = json.loads(response.body)
+        self.assertEqual(body["action"]["state"], "executing")
+        self.assertFalse(body["action"]["waiting_on_user"])
 
     def test_empty_answer_is_rejected(self):
         tid = self._blocked()

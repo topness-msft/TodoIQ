@@ -266,6 +266,73 @@ class TestExecutionApprovalAnswer(unittest.TestCase):
         self.assertEqual(answer["invocationId"], "approval-1")
         self.assertEqual(answer["answers"], {"0": "send"})
 
+    def test_unmatched_execution_question_is_persisted_without_closing_stream(self):
+        question = {
+            "iid": "question-1",
+            "q": [{
+                "id": "choice",
+                "question": "Use the earlier draft or cancel?",
+                "options": [
+                    {"label": "Use earlier draft", "value": "earlier"},
+                    {"label": "Cancel", "value": "cancel"},
+                ],
+            }],
+        }
+
+        class Response:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                yield "event: aq"
+                yield "data: " + json.dumps(question)
+                yield ""
+                yield "event: rl"
+                yield 'data: {"st":"ok"}'
+
+        class Posted:
+            status_code = 202
+
+        class Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response()
+
+            def post(self, *_args, **_kwargs):
+                return Posted()
+
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=Client()), \
+                mock.patch(
+                    "src.models.set_blocked_question_if_missing"
+                ) as store_question:
+            payload = cr._api_run_default(
+                "send it",
+                None,
+                lambda _text: None,
+                conversation_id="t:u:cw-existing",
+                is_follow_up=True,
+                approval_kind="email",
+                action_id=135,
+            )
+
+        self.assertEqual(payload["terminal_status"], "ok")
+        parsed = cr._parse_aq_interaction(question)
+        store_question.assert_called_once_with(
+            135, json.dumps(parsed, separators=(",", ":"))
+        )
+
 
 class TestExecutionToolApproval(unittest.TestCase):
     def setUp(self):

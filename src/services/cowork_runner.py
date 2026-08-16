@@ -782,11 +782,14 @@ def compose_execution_prompt(action: dict) -> str:
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.S)
 _EMAIL_DRAFT_HEADING_RE = re.compile(
-    r"^\s*\*\*draft(?: email)?(?:\s*\(not sent\))?\*\*\s*$",
+    r"^\s*(?:\*\*draft(?: email| reply)?(?:\s*\(not sent\))?\*\*|"
+    r"#{1,6}\s+draft(?: email| reply)?(?:\s*\(not sent\))?)\s*$",
     re.I,
 )
-_EMAIL_TO_RE = re.compile(r"^\s*\*\*to:\*\*\s+(.+?)\s*$", re.I)
-_EMAIL_SUBJECT_RE = re.compile(r"^\s*\*\*subject:\*\*\s+(.+?)\s*$", re.I)
+_EMAIL_TO_RE = re.compile(r"^\s*(?:\*\*)?to:(?:\*\*)?\s+(.+?)\s*$", re.I)
+_EMAIL_SUBJECT_RE = re.compile(
+    r"^\s*(?:\*\*)?subject:(?:\*\*)?\s+(.+?)\s*$", re.I
+)
 
 # Wording that introduces a proposed message, as opposed to a quoted excerpt of
 # someone else's. Cowork quotes both, and the quoted original is often the longer
@@ -1106,6 +1109,33 @@ def parse_execution_output(stdout: str, stderr: str = "") -> dict:
     result["executed_write_tools"] = [
         name for name in successful_writes if name
     ]
+    write_attempts = [
+        tool.get("name")
+        for tool in tools
+        if _looks_like_write(tool.get("name"))
+    ]
+    write_attempts.extend(
+        tool.get("tool_name")
+        for tool in result.get("tool_trace") or []
+        if _looks_like_write(tool.get("tool_name"))
+    )
+    cancellation_text = " ".join(
+        str(result.get(key) or "")
+        for key in ("finding", "raw_text")
+    )
+    result["cancelled"] = False
+    if (
+        result.get("terminal_status") == "ok"
+        and not result.get("error")
+        and not any(write_attempts)
+        and re.search(r"\b(?:cancelled|canceled)\b", cancellation_text, re.I)
+        and re.search(
+            r"\b(?:nothing was sent|not sent|did not send|didn't send)\b",
+            cancellation_text,
+            re.I,
+        )
+    ):
+        result["cancelled"] = True
     result["delivery_confirmed"] = bool(
         result.get("terminal_status") == "ok"
         and result["executed_write_tools"]
@@ -2006,6 +2036,7 @@ def start_execution(
     approval_kind=None,
     approved_snapshot=None,
     approved_calendar_event=None,
+    action_id=None,
     log_dir=None,
 ) -> str:
     """Run one explicitly approved, unbarriered API follow-up turn."""
@@ -2043,6 +2074,7 @@ def start_execution(
                 "approval_kind": approval_kind,
                 "approved_snapshot": dict(approved_snapshot or {}),
                 "approved_calendar_event": dict(approved_calendar_event or {}),
+                "action_id": action_id,
             },
             daemon=True,
             name=f"cowork-execute-{task_id}",
@@ -3318,7 +3350,7 @@ def _is_auth_failure(exc) -> bool:
 def _collect_api(label, task_id, prompt, config_path, log_dir,
                  conversation_id=None, is_follow_up=None,
                  approval_kind=None, approved_snapshot=None,
-                 approved_calendar_event=None) -> None:
+                 approved_calendar_event=None, action_id=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -3354,6 +3386,8 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
             run_kwargs["approved_snapshot"] = approved_snapshot
         if approved_calendar_event:
             run_kwargs["approved_calendar_event"] = approved_calendar_event
+        if action_id:
+            run_kwargs["action_id"] = action_id
         call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
@@ -3491,7 +3525,8 @@ def new_conversation_id(_auth=None):
 
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
                      is_follow_up=None, approval_kind=None,
-                     approved_snapshot=None, approved_calendar_event=None):
+                     approved_snapshot=None, approved_calendar_event=None,
+                     action_id=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -3582,8 +3617,12 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                 text = _api_progress_text(kind, data)
                 if text:
                     on_progress(text)
-                if kind == "aq" and approval_kind and not ask_user_answered:
-                    approval = _execution_approval_answer(data, approval_kind)
+                if kind == "aq" and approval_kind:
+                    approval = (
+                        None
+                        if ask_user_answered
+                        else _execution_approval_answer(data, approval_kind)
+                    )
                     if approval:
                         invocation_id, answers = approval
                         answer_body = {
@@ -3617,6 +3656,19 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                             approval_kind,
                             conversation_id,
                         )
+                    elif action_id:
+                        from ..models import set_blocked_question_if_missing
+
+                        interaction = _parse_aq_interaction(data)
+                        if not interaction:
+                            continue
+                        encoded = json.dumps(interaction, separators=(",", ":"))
+                        stored = set_blocked_question_if_missing(action_id, encoded)
+                        if stored:
+                            logger.info(
+                                "surfaced execution question for conversation %s",
+                                conversation_id,
+                            )
                 if kind == "ta" and approval_kind and not tool_approval_answered:
                     approval = _execution_tool_approval(
                         data,

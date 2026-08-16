@@ -427,7 +427,9 @@ def _enrich(action: dict) -> dict:
     )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
 
-    if action.get("state") == "executing":
+    if action.get("state") == "executing" and action.get("blocked_question"):
+        action["waiting_on_user"] = True
+    elif action.get("state") == "executing":
         # Execution-time aq/ta prompts are answered by the runner. The shared
         # conversation cache can still carry the preview's waiting state.
         action["waiting_on_user"] = False
@@ -567,6 +569,10 @@ def _finalise(action: dict) -> dict:
             approved_calendar_event = (
                 _preview_calendar_event(parent) if parent else None
             )
+        cancelled = bool(
+            parsed.get("cancelled")
+            and not parsed.get("executed_write_tools")
+        )
         confirmed = (
             bool(parsed.get("delivery_confirmed"))
             and _delivery_evidence_matches(
@@ -574,7 +580,7 @@ def _finalise(action: dict) -> dict:
             )
             and not failed
         )
-        if not confirmed:
+        if not confirmed and not cancelled:
             detail = error or (
                 "Cowork finished without positive delivery evidence."
             )
@@ -583,12 +589,18 @@ def _finalise(action: dict) -> dict:
                 "destination before retrying."
             )
         fields = {
-            "state": "executed" if confirmed else "execute_unconfirmed",
+            "state": (
+                "executed"
+                if confirmed
+                else "ready"
+                if cancelled
+                else "execute_unconfirmed"
+            ),
             "cost_credits": result.get("cost_credits"),
             "finding": parsed.get("finding") or parsed.get("raw_text"),
             "terminal_status": parsed.get("terminal_status"),
             "tool_trace": json.dumps(trace) if trace else None,
-            "error": None if confirmed else error,
+            "error": None if confirmed or cancelled else error,
         }
         if parsed.get("conversation_id"):
             fields["conversation_id"] = parsed["conversation_id"]
@@ -1158,8 +1170,25 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
             return self._fail(409, "This draft has no Cowork conversation.")
         if not parent.get("destination_confirmed_at"):
             return self._fail(409, "Review and confirm the destination first.")
-        if not final_action_draft(parent):
+        final_draft = final_action_draft(parent)
+        if not final_draft:
             return self._fail(409, "The final draft is empty.")
+        is_email = (
+            parent.get("action_type") == "respond-email"
+            or parent.get("delivery_channel") == "email"
+        )
+        if is_email:
+            email_draft = final_draft.lstrip()
+            if not re.match(r"^Subject:[ \t]*\S[^\r\n]*", email_draft, re.I):
+                return self._fail(
+                    409,
+                    "The final email draft must start with a Subject: line.",
+                )
+            if not re.sub(r"^[^\r\n]*(?:\r?\n)?", "", email_draft).strip():
+                return self._fail(
+                    409,
+                    "The final email draft must include a message body.",
+                )
         if parent.get("action_type") == "schedule-meeting":
             unresolved = _unresolved_schedule_people(task)
             current_ref, current_display = _schedule_destination(_people(task))
@@ -1211,6 +1240,7 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                 ),
                 approved_snapshot=approved_snapshot,
                 approved_calendar_event=approved_calendar_event,
+                action_id=action["id"],
                 log_dir=LOG_DIR_OVERRIDE,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1457,7 +1487,10 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
         ref = (body.get("destination_ref") or "").strip()
         display = (body.get("destination_display") or "").strip()
         is_schedule = action.get("action_type") == "schedule-meeting"
-        is_email = action.get("action_type") == "respond-email"
+        is_email = (
+            action.get("action_type") == "respond-email"
+            or channel == "email"
+        )
         valid_channel = (
             not channel
             if is_schedule

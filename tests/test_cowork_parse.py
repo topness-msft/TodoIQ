@@ -252,6 +252,27 @@ class TestDraftExtraction(unittest.TestCase):
         self.assertNotIn("**To:**", result["finding"])
         self.assertNotIn("**Subject:**", result["finding"])
 
+    def test_h2_structured_email_is_extracted_from_live_response_shape(self):
+        body = (
+            "## Findings\n\nVerified the original email.\n\n---\n\n"
+            "## Draft reply (not sent)\n\n"
+            "To: phil@topness.com\n"
+            "Subject: RE: What is Kickstarter\n\n"
+            "Hi Phil,\n\nHere is the overview.\n\nPhil\n\n---"
+        )
+
+        result = parse_cowork_output(self._text(body))
+
+        self.assertEqual(
+            result["draft"],
+            "Subject: RE: What is Kickstarter\n\n"
+            "Hi Phil,\n\nHere is the overview.\n\nPhil",
+        )
+        self.assertIn("Verified the original email", result["finding"])
+        self.assertIn("Draft recipient: phil@topness.com", result["finding"])
+        self.assertNotIn("Draft reply", result["finding"])
+        self.assertNotIn("To: phil@topness.com", result["finding"])
+
     def test_incidental_subject_prose_is_not_treated_as_an_email_draft(self):
         body = (
             "The subject came up in the meeting.\n\n"

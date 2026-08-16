@@ -118,6 +118,191 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+    def test_unconfirmed_email_skips_redundant_picker_and_shows_address(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        posted = {}
+        action = _action(
+            task_id,
+            draft="Subject: Workshop follow-up\n\nHi Phil,\n\nFollowing up.\n\nPhil",
+            destination_ref="phil@topness.com",
+            destination_display="Phil Topness",
+            destination_confirmed_at=None,
+            destination_source="user_picker",
+            delivery_channel="email",
+        )
+
+        def destination_route(route):
+            posted.update(json.loads(route.request.post_data))
+            confirmed = {
+                **action,
+                "destination_confirmed_at": "2026-08-16T12:00:00Z",
+            }
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"action": confirmed}),
+            )
+
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'respond-email';
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+            page.route(
+                f"**/api/tasks/{task_id}/cowork/destination",
+                destination_route,
+            )
+
+            page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
+
+            confirmation = page.get_by_test_id("execute-confirmation")
+            expect(confirmation).to_be_visible()
+            expect(page.get_by_test_id("dest-picker")).to_have_count(0)
+            expect(confirmation).to_contain_text("Phil Topness")
+            expect(confirmation).to_contain_text("phil@topness.com")
+            expect(confirmation).to_contain_text("Workshop follow-up")
+            assert posted == {
+                "destination_ref": "phil@topness.com",
+                "destination_display": "Phil Topness",
+                "delivery_channel": "email",
+            }
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            page.evaluate(
+                "document.documentElement.setAttribute('data-theme','dark')"
+            )
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "email-direct-confirmation-dark.png"
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_delivery_channel_email_skips_redundant_picker(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        posted = {}
+        action = _action(
+            task_id,
+            draft="Subject: Workshop follow-up\n\nFollowing up.",
+            destination_ref="phil@topness.com",
+            destination_display="Phil Topness",
+            destination_confirmed_at=None,
+            delivery_channel="email",
+        )
+
+        def destination_route(route):
+            posted.update(json.loads(route.request.post_data))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "action": {
+                        **action,
+                        "destination_confirmed_at": "2026-08-16T12:00:00Z",
+                    }
+                }),
+            )
+
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'follow-up';
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+            page.route(
+                f"**/api/tasks/{task_id}/cowork/destination",
+                destination_route,
+            )
+
+            page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
+
+            expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
+            expect(page.get_by_test_id("dest-picker")).to_have_count(0)
+            assert posted["delivery_channel"] == "email"
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_subjectless_email_never_opens_send_confirmation(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        dialogs = []
+        action = _action(
+            task_id,
+            draft="afafsas",
+            destination_ref="phil@topness.com",
+            destination_display="Phil Topness",
+            delivery_channel="email",
+        )
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'respond-email';
+                    renderDetailPane(task);
+                    cwOpenExecuteConfirm(taskId);
+                }""",
+                task_id,
+            )
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == [
+                "The final email draft must start with a Subject: line."
+            ]
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_subject_only_email_never_opens_send_confirmation(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        dialogs = []
+        action = _action(
+            task_id,
+            draft="Subject: Workshop follow-up",
+            destination_ref="phil@topness.com",
+            destination_display="Phil Topness",
+            delivery_channel="email",
+        )
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'respond-email';
+                    cwOpenExecuteConfirm(taskId);
+                }""",
+                task_id,
+            )
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == ["The final email draft must include a message body."]
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_dashboard_broadcast_warns_but_never_gates_open_link(
         self, page: Page, base_url
     ):

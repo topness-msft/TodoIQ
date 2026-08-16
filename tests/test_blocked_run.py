@@ -119,6 +119,36 @@ class BlockedRunTest(unittest.TestCase):
         })
         self.assertEqual(out["interaction_request"]["invocation_id"], "stored")
 
+    def test_an_executing_run_surfaces_a_persisted_question(self):
+        interaction = {
+            "invocation_id": "execution-question",
+            "questions": [{
+                "id": "0",
+                "question": "Use the earlier draft or cancel?",
+                "options": [],
+            }],
+        }
+
+        out = handler._enrich({
+            "id": 1,
+            "task_id": 2,
+            "state": "executing",
+            "conversation_id": "t:u:abc",
+            "blocked_question": json.dumps(interaction),
+        })
+
+        self.assertTrue(out["waiting_on_user"])
+        self.assertEqual(out["interaction_request"], interaction)
+
+    def test_an_executing_run_without_a_persisted_question_stays_running(self):
+        out = self._enrich("executing", {
+            "state": "needs_user_input",
+            "waiting_on_user": True,
+        })
+
+        self.assertFalse(out["waiting_on_user"])
+        self.assertIsNone(out["interaction_request"])
+
     def test_question_replay_failure_does_not_break_the_card(self):
         def boom(cid):
             raise RuntimeError("replay unavailable")

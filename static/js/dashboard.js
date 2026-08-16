@@ -3446,6 +3446,25 @@ function cwOpenExecuteConfirm(taskId) {
         var task = tasks.find(function(item) { return item.id === taskId; });
         if (!action || !task || action.state !== 'ready') return;
         var isMeeting = task.action_type === 'schedule-meeting';
+        var isEmail = task.action_type === 'respond-email'
+            || action.delivery_channel === 'email';
+        var approvalDraft = cwCurrentDraft(action).trim();
+        if (isMeeting && !approvalDraft && action.finding) {
+            approvalDraft = action.finding.trim();
+        }
+        if (!approvalDraft) {
+            window.alert('The final draft is empty. Add the draft before continuing.');
+            return;
+        }
+        if (isEmail
+                && !/^Subject:[ \t]*\S[^\r\n]*/i.test(approvalDraft.split(/\r?\n/)[0])) {
+            window.alert('The final email draft must start with a Subject: line.');
+            return;
+        }
+        if (isEmail && !approvalDraft.split(/\r?\n/).slice(1).join('\n').trim()) {
+            window.alert('The final email draft must include a message body.');
+            return;
+        }
         if (isMeeting) {
             var unresolved = cwUnresolvedMeetingPeople(task);
             if (unresolved.length) {
@@ -3472,6 +3491,11 @@ function cwOpenExecuteConfirm(taskId) {
             cwConfirmDest(taskId, true);
             return;
         }
+        if (!action.destination_confirmed_at && isEmail
+                && action.destination_ref && action.destination_display) {
+            cwConfirmDest(taskId, true);
+            return;
+        }
         if (!action.destination_confirmed_at) {
             cwOpenDestPicker(taskId);
             return;
@@ -3484,16 +3508,16 @@ function cwOpenExecuteConfirm(taskId) {
         var destinationHtml = attendeePills
             ? '<div class="cw-meeting-attendees">' + attendeePills + '</div>'
             : '<b>' + escapeHtml(destination) + '</b>';
+        if (isEmail) {
+            destinationHtml = '<b>' + escapeHtml(destination) + '</b>'
+                + '<small>' + escapeHtml(action.destination_ref || '') + '</small>';
+        }
         if (action.delivery_channel === 'teams' && task.source_url
                 && action.destination_source === 'auto_source_url') {
             destinationHtml = '<a class="cw-execute-destination-link" href="'
                 + escapeHtml(task.source_url)
                 + '" target="_blank" rel="noopener noreferrer">Open '
                 + escapeHtml(destination) + ' conversation</a>';
-        }
-        var approvalDraft = cwCurrentDraft(action).trim();
-        if (isMeeting && !approvalDraft && action.finding) {
-            approvalDraft = action.finding.trim();
         }
         _cwExecuteApprovals[taskId] = {
             parent_action_id: action.id,
@@ -3704,7 +3728,8 @@ function cwOpenDestPicker(taskId) {
     cwCloseDestPicker();
 
     var isMeeting = task.action_type === 'schedule-meeting';
-    var isEmail = task.action_type === 'respond-email';
+    var isEmail = task.action_type === 'respond-email'
+        || a.delivery_channel === 'email';
     var channel = isEmail ? 'email' : (a.delivery_channel || 'teams');
     var ref = a.destination_ref || '';
     var overlay = document.createElement('div');
@@ -3759,19 +3784,21 @@ function cwConfirmDest(taskId, continueToExecute) {
     var task = tasks.find(function(item) { return item.id === taskId; });
     if (!action || !task) return;
     var isMeeting = task.action_type === 'schedule-meeting';
+    var isEmail = task.action_type === 'respond-email'
+        || action.delivery_channel === 'email';
     var channel = document.getElementById('dest-modal-channel');
     var ref = document.getElementById('dest-modal-ref');
     var display = document.getElementById('dest-modal-display');
     var refValue = ref ? ref.value.trim() : (action.destination_ref || '').trim();
     var displayValue = display
         ? display.value.trim() : (action.destination_display || '').trim();
-    if ((!isMeeting && !channel) || !refValue || !displayValue) return;
+    if ((!isMeeting && !isEmail && !channel) || !refValue || !displayValue) return;
 
     var body = {
         destination_ref: refValue,
         destination_display: displayValue
     };
-    if (!isMeeting) body.delivery_channel = channel.value;
+    if (!isMeeting) body.delivery_channel = isEmail ? 'email' : channel.value;
 
     fetch('/api/tasks/' + taskId + '/cowork/destination', {
         method: 'POST',
@@ -4137,7 +4164,8 @@ function renderCoworkCard(task) {
         // it is answered nothing else happens. A spinner here reads as "still
         // working", which told Phil to keep waiting through 13 minutes of a run
         // that was blocked on him the whole time.
-        if (a.waiting_on_user && a.state === 'previewing') {
+        if (a.waiting_on_user
+                && ['previewing', 'executing'].indexOf(a.state) >= 0) {
             var interaction = a.interaction_request;
             var question = interaction
                 ? cwInteractionFields(task.id, interaction)
@@ -4157,8 +4185,10 @@ function renderCoworkCard(task) {
                 + question
                 + '</div>',
                 answerButton
-                + '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
-                + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+                + (a.state === 'previewing'
+                    ? '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+                        + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+                    : '')
                 + cwCumulativeCostBadge(a),
                 a);
         }
