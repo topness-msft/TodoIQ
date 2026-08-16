@@ -651,6 +651,15 @@ def _clean(action: dict) -> dict:
     return action
 
 
+def _credits_cumulative(task_id: int) -> float | None:
+    credited_runs = [
+        row["cost_credits"]
+        for row in list_task_actions(task_id)
+        if row.get("cost_credits") is not None
+    ]
+    return sum(credited_runs) if credited_runs else None
+
+
 def _delivery_tool_matches_action(action: dict, name: str) -> bool:
     name = re.sub(r"[^a-z0-9]", "", str(name).lower())
     action_type = action.get("action_type")
@@ -1020,14 +1029,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             action = mark_task_action_seen(action["id"])
 
         payload = _enrich(_clean(action))
-        credited_runs = [
-            row["cost_credits"]
-            for row in list_task_actions(tid)
-            if row.get("cost_credits") is not None
-        ]
-        payload["credits_cumulative"] = (
-            sum(credited_runs) if credited_runs else None
-        )
+        payload["credits_cumulative"] = _credits_cumulative(tid)
         # Live liveness from the CLI's stderr. A preview runs for a median of
         # 119s, so the card needs something to say while it waits.
         label = (
@@ -1258,7 +1260,9 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
             return self._fail(502, message)
 
         self.set_status(202)
-        self.write(json.dumps({"action": _enrich(_clean(action))}))
+        payload = _enrich(_clean(action))
+        payload["credits_cumulative"] = _credits_cumulative(tid)
+        self.write(json.dumps({"action": payload}))
 
 
 class CoworkRefineHandler(tornado.web.RequestHandler):

@@ -1410,6 +1410,36 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             },
         )
 
+    def test_execute_response_keeps_completed_credit_total(self):
+        from src.db import get_connection
+
+        tid = self.make_task(action_type="respond-email")
+        first_id = self._ready_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            draft="Subject: Earlier draft\n\nEarlier body",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET cost_credits=? WHERE id=?",
+            (42.5, first_id),
+        )
+        conn.commit()
+        conn.close()
+        self._ready_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            draft="Subject: Final draft\n\nApproved body",
+        )
+
+        response = self._execute(tid)
+        data = json.loads(response.body)
+
+        self.assertEqual(response.code, 202)
+        self.assertAlmostEqual(data["action"]["credits_cumulative"], 42.5)
+
     def test_schedule_execution_rejects_attendee_drift_after_preview(self):
         from src.db import get_connection
 

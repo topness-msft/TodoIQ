@@ -787,8 +787,11 @@ def compose_execution_prompt(action: dict) -> str:
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.S)
 _EMAIL_DRAFT_HEADING_RE = re.compile(
-    r"^\s*(?:\*\*draft(?: email| reply)?(?:\s*\(not sent\))?\*\*|"
-    r"#{1,6}\s+draft(?: email| reply)?(?:\s*\(not sent\))?)\s*$",
+    r"^\s*(?:\*\*draft(?: email| reply)?"
+    r"(?:\s*(?:\(not sent\)|for review))?\*\*|"
+    r"#{1,6}\s+draft(?: email| reply)?"
+    r"(?:\s*(?:\(not sent\)|for review))?)"
+    r"(?:\s+\([^)]*\))?\s*$",
     re.I,
 )
 _EMAIL_TO_RE = re.compile(r"^\s*(?:\*\*)?to:(?:\*\*)?\s+(.+?)\s*$", re.I)
@@ -859,14 +862,18 @@ def _extract_structured_email_draft(text: str) -> tuple[str, str] | None:
             for index in range(heading_index + 1, min(len(lines), heading_index + 7))
             if lines[index].strip()
         ]
-        if len(markers) < 2:
+        if not markers:
             continue
-        to_index, subject_index = markers[:2]
-        to_match = _EMAIL_TO_RE.fullmatch(lines[to_index])
-        if (
-            not to_match
-            or not (subject_match := _EMAIL_SUBJECT_RE.fullmatch(lines[subject_index]))
-        ):
+        first_index = markers[0]
+        to_match = _EMAIL_TO_RE.fullmatch(lines[first_index])
+        if to_match:
+            if len(markers) < 2:
+                continue
+            subject_index = markers[1]
+        else:
+            subject_index = first_index
+        subject_match = _EMAIL_SUBJECT_RE.fullmatch(lines[subject_index])
+        if not subject_match:
             continue
 
         end_index = next(
@@ -892,7 +899,8 @@ def _extract_structured_email_draft(text: str) -> tuple[str, str] | None:
         findings = lines[:start_index]
         if end_index < len(lines):
             findings.extend(lines[end_index + 1:])
-        findings.extend(["", f"Draft recipient: {to_match.group(1).strip()}"])
+        if to_match:
+            findings.extend(["", f"Draft recipient: {to_match.group(1).strip()}"])
         draft = f"Subject: {subject}\n\n{body}"
         return draft, "\n".join(findings)
     return None

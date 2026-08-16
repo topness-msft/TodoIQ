@@ -156,6 +156,23 @@ class TestDashboardCost:
         finally:
             _delete(page, base_url, tid)
 
+    def test_sending_action_shows_completed_credit_total(
+        self, page: Page, base_url
+    ):
+        tid = _seed(page, base_url)
+        try:
+            _stub(page, tid, None, cumulative=407.0, state="executing")
+            _open_dashboard(page, base_url, tid)
+            card = page.locator(".cw-card, .cw-shell").first
+            assert "407 credits total" in card.inner_text()
+            assert "Sending" in card.inner_text()
+            page.screenshot(
+                path=os.path.join(TEMP_DIR, "cowork-cost-sending-total.png"),
+                full_page=True,
+            )
+        finally:
+            _delete(page, base_url, tid)
+
 
 class TestTodoCost:
     """The second surface. Four divergences say check both."""
