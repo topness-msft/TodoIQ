@@ -230,6 +230,50 @@ class TestDraftExtraction(unittest.TestCase):
         self.assertIn("Subject: Hello", draft)
         self.assertNotIn("```", draft)
 
+    def test_structured_markdown_email_is_extracted_from_live_response_shape(self):
+        body = (
+            "**Findings**\n\n- Verified context.\n\n---\n\n"
+            "**Draft email (not sent)**\n\n"
+            "**To:** phil@topness.com\n"
+            "**Subject:** Thanks for joining the workshop\n\n"
+            "Hi Phil,\n\nThanks for joining us.\n\nPhil\n\n---"
+        )
+        result = parse_cowork_output(self._text(body))
+
+        self.assertEqual(
+            result["draft"],
+            "Subject: Thanks for joining the workshop\n\n"
+            "Hi Phil,\n\nThanks for joining us.\n\nPhil",
+        )
+        self.assertIn("Verified context", result["finding"])
+        self.assertIn("Draft recipient: phil@topness.com", result["finding"])
+        self.assertNotIn("Draft email", result["finding"])
+        self.assertNotIn("**To:**", result["finding"])
+        self.assertNotIn("**Subject:**", result["finding"])
+
+    def test_incidental_subject_prose_is_not_treated_as_an_email_draft(self):
+        body = (
+            "The subject came up in the meeting.\n\n"
+            "**Subject:** This is a finding, not a draft."
+        )
+        result = parse_cowork_output(self._text(body))
+
+        self.assertIsNone(result["draft"])
+        self.assertIn("This is a finding", result["finding"])
+
+    def test_structured_email_beats_a_quoted_source_message(self):
+        body = (
+            "Original note:\n\n> This was the source message.\n\n"
+            "**Draft email (not sent)**\n\n"
+            "**To:** phil@topness.com\n"
+            "**Subject:** Follow-up\n\n"
+            "Hi Phil,\n\nHere is the reply.\n\nPhil\n\n---"
+        )
+        result = parse_cowork_output(self._text(body))
+
+        self.assertTrue(result["draft"].startswith("Subject: Follow-up"))
+        self.assertIn("source message", result["finding"])
+
     def test_empty_text_yields_no_draft(self):
         res = parse_cowork_output(self._text(""))
         self.assertIsNone(res["draft"])

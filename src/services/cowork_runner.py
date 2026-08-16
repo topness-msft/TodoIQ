@@ -781,6 +781,12 @@ def compose_execution_prompt(action: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.S)
+_EMAIL_DRAFT_HEADING_RE = re.compile(
+    r"^\s*\*\*draft(?: email)?(?:\s*\(not sent\))?\*\*\s*$",
+    re.I,
+)
+_EMAIL_TO_RE = re.compile(r"^\s*\*\*to:\*\*\s+(.+?)\s*$", re.I)
+_EMAIL_SUBJECT_RE = re.compile(r"^\s*\*\*subject:\*\*\s+(.+?)\s*$", re.I)
 
 # Wording that introduces a proposed message, as opposed to a quoted excerpt of
 # someone else's. Cowork quotes both, and the quoted original is often the longer
@@ -833,6 +839,56 @@ def _blockquote_blocks(text: str) -> list[tuple[str, bool]]:
     return blocks
 
 
+def _extract_structured_email_draft(text: str) -> tuple[str, str] | None:
+    """Extract Cowork's bold To/Subject email block without guessing from prose."""
+    lines = text.splitlines()
+    for heading_index, line in enumerate(lines):
+        if not _EMAIL_DRAFT_HEADING_RE.fullmatch(line):
+            continue
+        markers = [
+            index
+            for index in range(heading_index + 1, min(len(lines), heading_index + 7))
+            if lines[index].strip()
+        ]
+        if len(markers) < 2:
+            continue
+        to_index, subject_index = markers[:2]
+        to_match = _EMAIL_TO_RE.fullmatch(lines[to_index])
+        if (
+            not to_match
+            or not (subject_match := _EMAIL_SUBJECT_RE.fullmatch(lines[subject_index]))
+        ):
+            continue
+
+        end_index = next(
+            (
+                index
+                for index in range(subject_index + 1, len(lines))
+                if lines[index].strip() == "---"
+            ),
+            len(lines),
+        )
+        body = "\n".join(lines[subject_index + 1:end_index]).strip()
+        subject = subject_match.group(1).strip()
+        if not subject or not body:
+            continue
+
+        start_index = heading_index
+        previous = heading_index - 1
+        while previous >= 0 and not lines[previous].strip():
+            previous -= 1
+        if previous >= 0 and lines[previous].strip() == "---":
+            start_index = previous
+
+        findings = lines[:start_index]
+        if end_index < len(lines):
+            findings.extend(lines[end_index + 1:])
+        findings.extend(["", f"Draft recipient: {to_match.group(1).strip()}"])
+        draft = f"Subject: {subject}\n\n{body}"
+        return draft, "\n".join(findings)
+    return None
+
+
 def _extract_draft(text: str) -> tuple[str | None, str]:
     """Split Cowork's reply into (draft, findings).
 
@@ -848,6 +904,10 @@ def _extract_draft(text: str) -> tuple[str | None, str]:
     if fences:
         draft = max(fences, key=len).strip()
         return draft, _FENCE_RE.sub("", text)
+
+    structured_email = _extract_structured_email_draft(text)
+    if structured_email:
+        return structured_email
 
     blocks = _blockquote_blocks(text)
     if not blocks:
