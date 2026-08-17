@@ -25,6 +25,12 @@ def _render(page: Page, base_url, action):
         """({taskId, action}) => {
             const task = tasks.find(t => t.id === taskId);
             task.action_type = (action && action.action_type) || 'follow-up';
+            if (task.action_type === 'schedule-meeting') {
+                task.key_people = JSON.stringify([{
+                    name: 'Mehdi Slaoui Andaloussi',
+                    email: 'mehdi@microsoft.com'
+                }]);
+            }
             task.coaching_text = 'Check the current position and draft the follow-up.';
             task.parse_status = 'parsed';
             selectedTaskId = taskId;
@@ -321,7 +327,7 @@ def test_action_labels_and_terminal_states(page: Page, base_url):
             "destination_confirmed_at": "2026-08-11T12:00:00Z",
         },
     )
-    expect(page.get_by_role("button", name="Create meeting")).to_be_visible()
+    expect(page.get_by_role("button", name="Review meeting")).to_be_visible()
 
     unconfirmed_task_id = _render(
         page,

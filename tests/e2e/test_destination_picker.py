@@ -231,6 +231,11 @@ class TestDestinationBinding:
             page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
 
             expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
+            expect(
+                page.get_by_test_id("execute-confirmation").get_by_role(
+                    "button", name="Create meeting"
+                )
+            ).to_be_visible()
             expect(page.get_by_test_id("dest-picker")).to_have_count(0)
             assert posted["delivery_channel"] == "email"
         finally:
@@ -504,7 +509,7 @@ class TestDestinationBinding:
                 destination_route,
             )
 
-            page.get_by_role("button", name="Create meeting").click()
+            page.get_by_role("button", name="Review meeting").click()
 
             expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
             expect(page.get_by_test_id("dest-picker")).to_have_count(0)
@@ -619,7 +624,7 @@ class TestDestinationBinding:
             )
             assert refine_calls == 0
 
-            page.get_by_role("button", name="Create meeting").click()
+            page.get_by_role("button", name="Review meeting").click()
 
             confirmation = page.get_by_test_id("execute-confirmation")
             expect(confirmation).to_be_visible()
@@ -695,7 +700,7 @@ class TestDestinationBinding:
                 destination_route,
             )
 
-            page.get_by_role("button", name="Create meeting").click()
+            page.get_by_role("button", name="Review meeting").click()
 
             confirmation = page.get_by_test_id("execute-confirmation")
             expect(confirmation).to_be_visible()
@@ -758,7 +763,7 @@ class TestDestinationBinding:
                 lambda request: request.method == "POST"
                 and request.url.endswith(f"/api/tasks/{task_id}/refresh")
             ):
-                page.get_by_role("button", name="Create meeting").click()
+                page.get_by_role("button", name="Review meeting").click()
 
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
@@ -800,7 +805,7 @@ class TestDestinationBinding:
                 task_id,
             )
 
-            page.get_by_role("button", name="Create meeting").click()
+            page.get_by_role("button", name="Review meeting").click()
 
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
@@ -841,7 +846,7 @@ class TestDestinationBinding:
                 task_id,
             )
 
-            page.get_by_role("button", name="Create meeting").click()
+            page.get_by_role("button", name="Review meeting").click()
 
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [

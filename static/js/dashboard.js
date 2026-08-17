@@ -3396,6 +3396,11 @@ function cwExecutionLabel(task, action) {
         return 'Send Teams message';
 }
 
+function cwReviewLabel(task, action) {
+        if (task.action_type === 'schedule-meeting') return 'Review meeting';
+        return cwExecutionLabel(task, action);
+}
+
 function cwExecutionProgress(task, action) {
         var destination = String(
             (action && (action.destination_display || action.destination_ref)) || ''
@@ -4418,7 +4423,7 @@ function renderCoworkCard(task) {
               + '<button class="cw-btn cw-btn-ghost" onclick="cwToggleEdit(' + task.id + ',false)">Cancel</button>'
             : '<button class="cw-btn cw-btn-go" data-testid="cw-execute-action" '
               + 'onclick="cwOpenExecuteConfirm(' + task.id + ')">'
-              + escapeHtml(cwExecutionLabel(task, a)) + '</button>'
+              + escapeHtml(cwReviewLabel(task, a)) + '</button>'
               + '<button class="cw-btn cw-btn-sec" onclick="cwCopyDraft(' + task.id + ')">Copy draft</button>'
               + cwRefineBlock(a, task.id)
               + (a.conversation_id ? '' : cwRedoBlock(task.id))
