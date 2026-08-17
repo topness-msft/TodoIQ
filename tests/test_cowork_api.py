@@ -502,6 +502,21 @@ class TestStartPreview(CoworkAPITestBase):
             "Resolve the identity for Henry Jammes before scheduling.",
         )
 
+    def test_schedule_meeting_rejects_empty_attendee_list(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            source_type="manual",
+            key_people="[]",
+        )
+
+        response = self.start(tid)
+
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Add and confirm at least one attendee before scheduling.",
+        )
+
     def test_schedule_meeting_rejects_unconfirmed_directory_match(self):
         tid = self.make_task(
             action_type="schedule-meeting",
@@ -536,7 +551,7 @@ class TestStartPreview(CoworkAPITestBase):
             "Resolve the identities for Rima Reyes, Henry James before scheduling.",
         )
 
-    def test_schedule_meeting_deduplicates_normalized_attendee_emails(self):
+    def test_schedule_meeting_rejects_duplicate_normalized_attendee_emails(self):
         tid = self.make_task(
             action_type="schedule-meeting",
             key_people=json.dumps([
@@ -545,10 +560,13 @@ class TestStartPreview(CoworkAPITestBase):
             ]),
         )
 
-        action = json.loads(self.start(tid).body)["action"]
+        response = self.start(tid)
 
-        self.assertEqual(action["destination_ref"], "rima@microsoft.com")
-        self.assertEqual(action["destination_display"], "Rima Reyes")
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Resolve the identity for Rima Reyes duplicate before scheduling.",
+        )
 
     def test_broadcast_destination_recorded(self):
         tid = self.make_task(

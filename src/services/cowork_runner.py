@@ -33,7 +33,12 @@ import uuid
 import zlib
 from urllib.parse import unquote, quote, urlparse
 
-__all__ = ["parse_source_url", "compose_prompt", "parse_cowork_output"]
+__all__ = [
+    "parse_source_url",
+    "schedule_attendees",
+    "compose_prompt",
+    "parse_cowork_output",
+]
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
 _CHAT_RE = re.compile(r"/l/chat/(?P<conv>[^/?#]+)/conversations(?:[/?#]|$)")
@@ -472,6 +477,39 @@ def _selected_people_for_prompt(value) -> str:
     return json.dumps(selected, ensure_ascii=False)
 
 
+def schedule_attendees(task) -> list[dict]:
+    """Return one exact, confirmed attendee set or an empty fail-closed result."""
+    text = _clean(_get(task, "key_people")).strip()
+    if not text:
+        return []
+    try:
+        people = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(people, dict):
+        people = [people]
+    if not isinstance(people, list) or not people:
+        return []
+
+    selected = []
+    seen = set()
+    for person in people:
+        if not isinstance(person, dict) or person.get("unresolved") is True:
+            return []
+        name = _clean(person.get("name")).strip()
+        email = _clean(person.get("email")).strip().lower()
+        if not name or not email or email in seen:
+            return []
+        seen.add(email)
+        selected_person = {"name": name, "email": email}
+        for field in ("role", "timezone"):
+            value = _clean(person.get(field)).strip()
+            if value:
+                selected_person[field] = value
+        selected.append(selected_person)
+    return selected
+
+
 def _source_reference_lines(task) -> list[str]:
     primary = _clean(_get(task, "source_url")).strip()
     if primary and not _HTTP_URL_RE.fullmatch(primary):
@@ -508,9 +546,25 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
     if description:
         lines.append(description)
     lines.extend(_source_reference_lines(task))
-    people = _selected_people_for_prompt(_get(task, "key_people"))
-    if people:
-        lines.append("Selected attendees: " + people)
+    people = schedule_attendees(task)
+    if not people:
+        raise ValueError(
+            "Scheduling requires at least one confirmed attendee with an email."
+        )
+    lines.append(
+        "Selected attendees: " + "; ".join(
+            f"{person['name']} <{person['email']}>"
+            + (
+                f" ({person['timezone']})"
+                if person.get("timezone")
+                else ""
+            )
+            for person in people
+        )
+    )
+    notes = _clean(_strip_workiq(_clean(_get(task, "user_notes")))).strip()
+    if notes:
+        lines.append("User agenda/context: " + notes)
     prefs = meeting_preferences()
     if prefs:
         defaults = []
@@ -528,18 +582,18 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
             defaults.append(prefs["notes"])
         lines.append("Meeting preferences: " + "; ".join(defaults) + ".")
     lines.extend([
+        "Before searching availability, try to verify each attendee's working-hours "
+        "timezone from calendar or profile data. If unavailable, say the attendee's "
+        "timezone is unknown; never guess. Show organizer and attendee local time.",
         "Use the native calendar scheduling flow. Call FindMeetingTimes to check "
-        "both calendars' free/busy, then invoke ask_user with three exact available "
-        "times.",
-        "Do not call CreateEvent before the user selects one. After the answer, "
-        "resume this conversation and call CreateEvent for only the selected time.",
-        "Honor any explicit duration in the task, include a short purpose or agenda, "
-        "and never replace ask_user with a Teams message, email draft, or prose "
-        "request. If an invitee's availability is not visible, say so rather than "
-        "guessing.",
-        'For each ask_user option description, append [avail:{"attendee@email":'
-        '"free"}] with every selected attendee keyed by email. Use only free, '
-        "tentative, busy, or unknown from calendar data; never guess.",
+        "both calendars' free/busy (the organizer plus every selected attendee), "
+        "then ask_user with three exact available times.",
+        "Do not call CreateEvent before the user selects one. Create only the "
+        "selected time.",
+        "Honor the requested duration and agenda. If a calendar is not visible, say "
+        "so; never guess or replace ask_user with a message.",
+        'End each option description with [avail:{"attendee@email":"free"}] for '
+        "every attendee; use only free, tentative, busy, or unknown.",
     ])
     correction = _clean(redirect_text)
     if correction:

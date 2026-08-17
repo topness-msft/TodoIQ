@@ -810,6 +810,47 @@ class TestDestinationBinding:
         finally:
             _delete_task(page, base_url, task_id)
 
+    def test_create_meeting_restarts_when_preview_snapshot_had_no_attendees(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            draft="**Title:** Project Whale\n\n**When:** Monday at 10:05 AM",
+            destination_ref=None,
+            destination_display=None,
+            destination_confirmed_at=None,
+            delivery_channel=None,
+        )
+        dialogs = []
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.key_people = JSON.stringify([
+                        {name: 'Azharullah Meer', email: 'ameer@microsoft.com'}
+                    ]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+
+            page.get_by_role("button", name="Create meeting").click()
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == [
+                "The attendee list changed after this preview. Start over so "
+                "Cowork can check availability for the exact people shown in Key People."
+            ]
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_todoiq_shows_destination_and_keeps_open_link(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)

@@ -3429,9 +3429,15 @@ function cwMeetingPeople(task) {
 
 function cwUnresolvedMeetingPeople(task) {
         if (!task) return [];
-        return parsePeople(task.key_people).filter(function(person) {
-            return String(person.name || '').trim()
-                && (person.unresolved === true || !String(person.email || '').trim());
+        var people = parsePeople(task.key_people);
+        if (!people.length) return [{name: '', missing: true}];
+        var seen = {};
+        return people.filter(function(person) {
+            var name = String(person.name || '').trim();
+            var email = String(person.email || '').trim().toLowerCase();
+            var duplicate = email && seen[email];
+            if (email) seen[email] = true;
+            return !name || person.unresolved === true || !email || duplicate;
         });
 }
 
@@ -4199,6 +4205,9 @@ function renderCoworkCard(task) {
         ? cwUnresolvedMeetingPeople(task)
         : [];
     if (!liveAction && unresolvedPeople.length) {
+        var missingAttendees = unresolvedPeople.some(function(person) {
+            return person.missing === true;
+        });
         var unresolvedNames = unresolvedPeople.map(function(person) {
             return '<b>' + escapeHtml(String(person.name || '').trim()) + '</b>';
         }).join(', ');
@@ -4207,11 +4216,15 @@ function renderCoworkCard(task) {
         });
         return cwShell('', 'needs you', task,
             '<div class="cw-blocked" data-testid="cw-identity-pending">'
-            + '<b>' + (matchesReady
+            + '<b>' + (missingAttendees
+                ? 'Add and confirm at least one attendee.'
+                : matchesReady
                 ? 'Confirm the attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.')
                 : 'Riveter is resolving attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.'))
             + '</b><div class="cw-blocked-sub">'
-            + (matchesReady
+            + (missingAttendees
+                ? 'Riveter is resolving the linked Teams participants now.'
+                : matchesReady
                 ? 'Choose the correct match for ' + unresolvedNames
                     + ' from the primary or alternate-name dropdown in Key People. '
                     + 'Cowork will be ready after every attendee is confirmed.'
@@ -4466,6 +4479,12 @@ function cwStart(taskId, isRedo) {
     var unresolved = task && task.action_type === 'schedule-meeting'
         ? cwUnresolvedMeetingPeople(task) : [];
     if (unresolved.length) {
+        if (unresolved.some(function(person) { return person.missing === true; })) {
+            window.alert('Add and confirm at least one attendee before scheduling. '
+                + 'Riveter is resolving the linked Teams participants now.');
+            refreshTask(taskId);
+            return;
+        }
         window.alert('Resolve ' + unresolved.map(function(person) {
             return person.name;
         }).join(', ') + ' in Key People before scheduling. '

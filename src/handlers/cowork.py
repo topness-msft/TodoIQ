@@ -60,6 +60,7 @@ from ..services.cowork_runner import (
     parse_source_url,
     preview_label,
     read_blocked_question,
+    schedule_attendees,
     start_preview,
     start_execution,
 )
@@ -197,7 +198,7 @@ def _unresolved_schedule_people(task: dict) -> list[str]:
     """Names that cannot be bound to calendar attendees."""
     raw = (task.get("key_people") or "").strip()
     if not raw:
-        return []
+        return ["selected attendees"]
     if not raw.startswith("[") and not raw.startswith("{"):
         return [
             name.strip()
@@ -210,21 +211,26 @@ def _unresolved_schedule_people(task: dict) -> list[str]:
         return ["selected attendees"]
     if isinstance(data, dict):
         data = [data]
-    if not isinstance(data, list):
+    if not isinstance(data, list) or not data:
         return ["selected attendees"]
 
     unresolved = []
+    seen = set()
     for person in data:
         if not isinstance(person, dict):
             value = str(person).strip()
             if value:
                 unresolved.append(value)
             continue
+        email = (person.get("email") or "").strip().lower()
         if (
             person.get("unresolved") is True
-            or not (person.get("email") or "").strip()
+            or not email
+            or email in seen
         ):
             unresolved.append((person.get("name") or "selected attendee").strip())
+        if email:
+            seen.add(email)
     return unresolved
 
 
@@ -270,7 +276,9 @@ def _resolve_destination(task: dict, destination: dict) -> dict:
     )
 
     if is_schedule:
-        destination_ref, destination_display = _schedule_destination(people)
+        destination_ref, destination_display = _schedule_destination(
+            schedule_attendees(task)
+        )
         return {
             "delivery_channel": None,
             "destination_ref": destination_ref,
@@ -930,7 +938,13 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(400, "Invalid interaction mode")
         interaction_mode = "interaction"
         if task.get("action_type") == "schedule-meeting":
+            confirmed = schedule_attendees(task)
             unresolved = _unresolved_schedule_people(task)
+            if not confirmed and unresolved == ["selected attendees"]:
+                return self._fail(
+                    400,
+                    "Add and confirm at least one attendee before scheduling.",
+                )
             if unresolved:
                 names = ", ".join(unresolved)
                 noun = "identity" if len(unresolved) == 1 else "identities"
@@ -1193,7 +1207,9 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                 )
         if parent.get("action_type") == "schedule-meeting":
             unresolved = _unresolved_schedule_people(task)
-            current_ref, current_display = _schedule_destination(_people(task))
+            current_ref, current_display = _schedule_destination(
+                schedule_attendees(task)
+            )
             if (
                 unresolved
                 or not current_ref

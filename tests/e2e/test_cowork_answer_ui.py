@@ -672,6 +672,42 @@ def test_start_over_blocks_and_refreshes_unresolved_attendee(page: Page, base_ur
         page.request.delete(f"{base_url}/api/tasks/{task_id}")
 
 
+def test_start_blocks_and_refreshes_empty_attendee_list(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule from linked chat", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    dialogs = []
+    page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.accept()))
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.action_type = 'schedule-meeting';
+                task.key_people = '[]';
+            }""",
+            task_id,
+        )
+
+        with page.expect_request(
+            lambda request: request.method == "POST"
+            and request.url.endswith(f"/api/tasks/{task_id}/refresh")
+        ):
+            page.evaluate("taskId => cwStart(taskId, true)", task_id)
+
+        assert dialogs == [
+            "Add and confirm at least one attendee before scheduling. "
+            "Riveter is resolving the linked Teams participants now."
+        ]
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
 def test_unresolved_person_pill_explains_identity_resolution(page: Page, base_url):
     created = page.request.post(
         base_url + "/api/tasks",

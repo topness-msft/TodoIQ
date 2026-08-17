@@ -44,7 +44,10 @@ def make_task(**over):
         "user_notes": "",
         "source_type": "chat",
         "source_snippet": "Brandon: any update on that list?",
-        "key_people": "Brandon Knoertzer",
+        "key_people": (
+            '[{"name":"Brandon Knoertzer",'
+            '"email":"brandon.knoertzer@microsoft.com"}]'
+        ),
         "source_url": URL_1TO1,
     }
     task.update(over)

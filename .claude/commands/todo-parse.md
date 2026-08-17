@@ -32,7 +32,7 @@ conn.close()
 
 A task needs **coaching-only** re-parse if it already has `title`, `description`, and `key_people` populated (i.e. it was previously fully parsed). This happens when the user changes the `action_type` or edits the description from the dashboard.
 
-For coaching-only tasks, **skip Step 3** but first do **Step 2c** (incremental name resolution), then jump to **Step 3b** to re-generate `coaching_text`.
+For coaching-only tasks, **skip Step 3** but first do **Step 2c** (incremental name resolution) and **Step 2d** (exact Teams-link participant resolution), then jump to **Step 3b** to re-generate `coaching_text`.
 
 ## Step 2c: Incremental name resolution for coaching-only re-parse
 
@@ -46,6 +46,43 @@ Before regenerating coaching, resolve both name-only entries already in `key_peo
 6. Update the `key_people` column before proceeding to Step 3b.
 
 Existing email-backed people without an `unresolved` marker must be preserved unchanged. Name-only people are upgraded in place so the existing alternate-name dropdown becomes the required explicit identity choice before scheduling.
+
+## Step 2d: Resolve exact Teams-link participants
+
+Run this step for full and coaching-only parses whenever `source_url` is a
+`teams.microsoft.com/l/chat/.../conversations` or `/l/message/...` link. Complete
+it before any Cowork scheduling preview. The Teams conversation is authoritative;
+Never substitute a recent chat or recent contact when exact lookup fails.
+
+1. Fetch the signed-in profile with WorkIQ (`/me?$select=id,displayName,mail,userPrincipalName`)
+   and parse the decoded conversation ID from `source_url`.
+2. Fetch exact membership with
+   `/users/{self_id}/chats/{encoded_conversation_id}/members`. Do not add `$top`;
+   chat membership does not support it.
+3. From the exact membership response, exclude the signed-in user. For a 1:1 link, also use
+   `parse_source_url(source_url, me=self_id)["counterparty_id"]` as the exact member
+   object ID. If a membership row exposes only its base64 `id`, decode it and
+   extract the final validated Entra GUID; do not guess from display name.
+4. Fetch each exact directory profile from
+   `/users/{member_object_id}?$select=id,displayName,mail,userPrincipalName,jobTitle,officeLocation`.
+   Use `mail`, falling back to `userPrincipalName`, only from that exact profile.
+5. Fetch recent messages only from the same conversation with
+   `/users/{self_id}/chats/{encoded_conversation_id}/messages?$select=id,createdDateTime,from,body&$top=20`.
+   If the meeting request explicitly names additional attendees, directory-search
+   those names with the exact chat participants and topic as context. Store those
+   matches with `unresolved: true` and alternatives; never silently select one.
+6. Persist exact 1:1 counterpart profiles in `key_people` as
+   `{name,email,role}`. For a group chat or additional mentioned attendees, persist
+   candidate entries with `unresolved: true` so the user can remove or confirm each
+   person in Key People before scheduling.
+7. If exact membership/profile lookup fails, lacks an email, or is ambiguous, leave
+   the person unresolved and record the failure in the task description. Never
+   continue scheduling with an empty `key_people` list.
+
+When several confirmed attendees remain, Cowork's existing availability matrix
+shows the time choices across every person. Before proposing times, use calendar
+working-hours data to try to verify each attendee's timezone; disclose unknown
+timezones rather than guessing.
 
 ## Step 3: Full parse — reason about the raw_input
 

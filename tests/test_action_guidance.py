@@ -33,6 +33,7 @@ def _task(**over):
         "coaching_text": "Propose a recurring 25-minute 1:1 with Rima Reyes.",
         "action_type": "schedule-meeting",
         "source_type": "chat",
+        "user_notes": "",
         "key_people": '[{"name": "Rima Reyes", "email": "rima.reyes@microsoft.com"}]',
     }
     task.update(over)
@@ -106,6 +107,42 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
 
     def test_it_does_not_reuse_stale_enrichment_slots(self):
         self.assertNotIn("Monday, August 17, 10:00-10:30 AM ET", self.prompt)
+
+    def test_it_carries_user_agenda_notes(self):
+        prompt = compose_prompt(_task(
+            user_notes="Topic: Sync up on Project Whale",
+        ))
+        self.assertIn("Sync up on Project Whale", prompt)
+
+    def test_it_requires_timezone_checks_before_availability_search(self):
+        prompt = compose_prompt(_task(
+            key_people=json.dumps([
+                {
+                    "name": "Chris Garty",
+                    "email": "chris.garty@microsoft.com",
+                    "timezone": "Central Standard Time",
+                },
+                {
+                    "name": "Doug Bellingeri",
+                    "email": "dbellingeri@microsoft.com",
+                    "timezone": "Eastern Standard Time",
+                },
+            ])
+        ))
+        self.assertLess(
+            prompt.index("working-hours timezone"),
+            prompt.index("FindMeetingTimes"),
+        )
+        self.assertIn("Chris Garty", prompt)
+        self.assertIn("Central Standard Time", prompt)
+        self.assertIn("Doug Bellingeri", prompt)
+        self.assertIn("Eastern Standard Time", prompt)
+        self.assertIn("local time", prompt)
+        self.assertIn("timezone is unknown", prompt)
+
+    def test_it_rejects_an_empty_attendee_list(self):
+        with self.assertRaisesRegex(ValueError, "confirmed attendee"):
+            compose_prompt(_task(key_people="[]"))
 
 
 class TestSchedulingUsesCalendarVoice(unittest.TestCase):
