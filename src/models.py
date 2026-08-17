@@ -220,9 +220,15 @@ def list_tasks(
             f"""
             SELECT t.*,
               (SELECT state FROM task_actions
-               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_state,
+               WHERE task_id = t.id
+                 AND cowork_revision = t.cowork_revision
+                 AND action_type = t.action_type
+               ORDER BY id DESC LIMIT 1) AS cw_state,
               (SELECT seen_at FROM task_actions
-               WHERE task_id = t.id ORDER BY id DESC LIMIT 1) AS cw_seen_at
+               WHERE task_id = t.id
+                 AND cowork_revision = t.cowork_revision
+                 AND action_type = t.action_type
+               ORDER BY id DESC LIMIT 1) AS cw_seen_at
             FROM tasks t {where}
             ORDER BY priority ASC, created_at DESC LIMIT ? OFFSET ?
             """,
@@ -245,6 +251,60 @@ def update_task(task_id: int, **fields) -> dict | None:
         conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
         conn.commit()
         return get_task(task_id, conn)
+    finally:
+        conn.close()
+
+
+def update_task_for_action_type(task_id: int, **fields) -> dict | None:
+    """Update task fields and retire prior Cowork generations on a real type change."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        task = dict(row)
+        requested_type = fields.get("action_type", task.get("action_type"))
+        changed = requested_type != task.get("action_type")
+        if changed:
+            in_flight = conn.execute(
+                """
+                SELECT state FROM task_actions
+                WHERE task_id = ?
+                  AND cowork_revision = ?
+                  AND action_type = ?
+                  AND state IN ('executing','execute_unconfirmed')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    task_id,
+                    task.get("cowork_revision", 0),
+                    task.get("action_type"),
+                ),
+            ).fetchone()
+            if in_flight:
+                conn.rollback()
+                raise ValueError(
+                    "Cannot change action type while an approved action may be delivering."
+                )
+            fields["cowork_revision"] = task.get("cowork_revision", 0) + 1
+        fields["updated_at"] = _now()
+        set_clause = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE tasks SET {set_clause} WHERE id = ?",
+            (*fields.values(), task_id),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return _row_to_dict(updated)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -472,16 +532,25 @@ _ACTION_RESULT_FIELDS = frozenset({
 
 def create_task_action(task_id: int, **fields) -> dict:
     """Insert a new task_actions row in state 'previewing'."""
-    cols = ["task_id"]
-    vals = [task_id]
-    for name in _ACTION_INSERT_FIELDS:
-        if fields.get(name) is not None:
-            cols.append(name)
-            vals.append(fields[name])
-
-    placeholders = ",".join("?" * len(cols))
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        task = conn.execute(
+            "SELECT action_type, cowork_revision FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not task:
+            conn.rollback()
+            raise ValueError("Task not found")
+        cols = ["task_id", "action_type", "cowork_revision"]
+        vals = [task_id, task["action_type"], task["cowork_revision"]]
+        for name in _ACTION_INSERT_FIELDS:
+            if name == "action_type":
+                continue
+            if fields.get(name) is not None:
+                cols.append(name)
+                vals.append(fields[name])
+        placeholders = ",".join("?" * len(cols))
         cursor = conn.execute(
             f"INSERT INTO task_actions ({','.join(cols)}) VALUES ({placeholders})",
             vals,
@@ -540,7 +609,7 @@ def create_execution_action(
         cursor = conn.execute(
             """
             INSERT INTO task_actions (
-                task_id, action_type, state, intent, notes_snapshot,
+                task_id, action_type, cowork_revision, state, intent, notes_snapshot,
                 redirect_text, composed_prompt, finding, draft, draft_edited,
                 destination_kind, destination_ref, conversation_id,
                 island_url, delivery_channel, destination_display,
@@ -548,7 +617,7 @@ def create_execution_action(
                 interaction_mode, execution_requested_at
             )
             SELECT
-                task_id, action_type, 'executing', intent, notes_snapshot,
+                task_id, action_type, cowork_revision, 'executing', intent, notes_snapshot,
                 redirect_text, NULL, finding,
                 ?, ?,
                 destination_kind, destination_ref, conversation_id,
@@ -558,6 +627,12 @@ def create_execution_action(
             FROM task_actions parent
             WHERE parent.id = ?
               AND parent.state = 'ready'
+              AND EXISTS (
+                  SELECT 1 FROM tasks current
+                  WHERE current.id = parent.task_id
+                    AND current.cowork_revision = parent.cowork_revision
+                    AND current.action_type = parent.action_type
+              )
               AND parent.id = (
                   SELECT MAX(latest.id)
                   FROM task_actions latest
@@ -604,7 +679,14 @@ def get_latest_task_action(task_id: int) -> dict | None:
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT * FROM task_actions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            """
+            SELECT a.* FROM task_actions a
+            JOIN tasks t ON t.id = a.task_id
+            WHERE a.task_id = ?
+              AND a.cowork_revision = t.cowork_revision
+              AND a.action_type = t.action_type
+            ORDER BY a.id DESC LIMIT 1
+            """,
             (task_id,),
         ).fetchone()
         return _row_to_dict(row)
@@ -618,7 +700,10 @@ def mark_task_action_seen(action_id: int) -> dict | None:
     try:
         conn.execute(
             "UPDATE task_actions SET seen_at = ?, updated_at = ? "
-            "WHERE id = ? AND state = 'ready' AND seen_at IS NULL",
+            "WHERE id = ? AND state = 'ready' AND seen_at IS NULL "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_actions.task_id "
+            "AND t.cowork_revision = task_actions.cowork_revision "
+            "AND t.action_type = task_actions.action_type)",
             (_now(), _now(), action_id),
         )
         conn.commit()
@@ -657,6 +742,9 @@ def confirm_destination(
             "destination_display = ?, destination_source = ?, "
             "destination_confirmed_at = ?, updated_at = ? "
             "WHERE id = ? AND state = 'ready' "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_actions.task_id "
+            "AND t.cowork_revision = task_actions.cowork_revision "
+            "AND t.action_type = task_actions.action_type) "
             "AND (? IS NOT NULL OR action_type = 'schedule-meeting')",
             (
                 delivery_channel, ref, display, destination_source,

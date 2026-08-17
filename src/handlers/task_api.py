@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 import tornado.web
 
 from ..models import (
-    create_task, get_task, list_tasks, update_task, delete_task,
+    create_task, get_task, list_tasks, update_task, update_task_for_action_type,
+    delete_task,
     get_contexts, get_stats, get_last_sync,
 )
 from ..services.claude_runner import run_copilot
@@ -138,7 +139,16 @@ class TaskDetailHandler(tornado.web.RequestHandler):
             self.write(json.dumps({"task": task}))
             return
 
-        updated = update_task(int(task_id), **updates)
+        try:
+            updated = (
+                update_task_for_action_type(int(task_id), **updates)
+                if "action_type" in updates
+                else update_task(int(task_id), **updates)
+            )
+        except ValueError as exc:
+            self.set_status(409)
+            self.write(json.dumps({"error": str(exc)}))
+            return
         self.write(json.dumps({"task": updated}))
         broadcast({"type": "task_updated", "task": updated})
 

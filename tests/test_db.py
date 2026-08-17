@@ -47,6 +47,7 @@ class TestDatabaseSchema(unittest.TestCase):
             "suggestion_refreshed_at", "created_at", "updated_at",
             "action_type", "is_quick_hit", "error_message", "cowork_prompt",
             "snoozed_until", "skill_output", "waiting_activity",
+            "cowork_revision",
         }
         self.assertEqual(cols, expected)
 
@@ -188,6 +189,7 @@ class TestLegacyTaskActionMigration(unittest.TestCase):
         }
         self.assertIn("parent_action_id", columns)
         self.assertIn("delivery_confirmed_at", columns)
+        self.assertIn("cowork_revision", columns)
         self.assertIsNotNone(
             conn.execute(
                 "SELECT 1 FROM sqlite_master "
@@ -207,7 +209,10 @@ class TestTaskActionsSchema(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         init_db(self.conn)
-        self.conn.execute("INSERT INTO tasks (id, title) VALUES (1, 'Target task')")
+        self.conn.execute(
+            "INSERT INTO tasks (id, title, action_type) "
+            "VALUES (1, 'Target task', 'follow-up')"
+        )
 
     def tearDown(self):
         self.conn.close()
@@ -226,7 +231,7 @@ class TestTaskActionsSchema(unittest.TestCase):
         rows = self.conn.execute("PRAGMA table_info(task_actions)").fetchall()
         cols = {r["name"] for r in rows}
         expected = {
-            "id", "task_id", "action_type", "state",
+            "id", "task_id", "action_type", "cowork_revision", "state",
             "intent", "notes_snapshot", "redirect_text", "composed_prompt",
             "finding", "draft", "draft_edited",
             "destination_kind", "destination_ref", "conversation_id",

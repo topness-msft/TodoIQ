@@ -1596,16 +1596,30 @@ function actionTypeSelector(task) {
 }
 
 function updateActionType(taskId, value) {
+    var previous = tasks.find(function(task) { return task.id === taskId; });
     fetch('/api/tasks/' + taskId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action_type: value })
     })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
+    .then(function(res) {
+        return res.json().then(function(data) {
+            return {ok: res.ok, data: data};
+        });
+    })
+    .then(function(result) {
+        var data = result.data;
+        if (!result.ok) {
+            window.alert(data.error || 'Failed to update action type.');
+            if (previous) renderDetailPane(previous);
+            return;
+        }
         if (data.task) {
             var idx = tasks.findIndex(function(t) { return t.id === data.task.id; });
             if (idx >= 0) tasks[idx] = data.task;
+            delete _cwActions[taskId];
+            delete _cwLoading[taskId];
+            stopCoworkPoller(taskId);
             renderTaskList();
             renderDetailPane(data.task);
             // Queue coaching re-parse since action type changed
@@ -4449,8 +4463,20 @@ function cwSyncTaskState(taskId, action) {
     task.cw_seen_at = action ? action.seen_at : null;
 }
 
+function cwActionMatchesTask(taskId, action) {
+    if (!action) return true;
+    var task = tasks.find(function(item) { return item.id === taskId; });
+    if (!task) return false;
+    return Number(action.cowork_revision || 0)
+            === Number(task.cowork_revision || 0)
+        && action.action_type === task.action_type;
+}
+
 function cwLoad(taskId, markSeen) {
     if (_cwLoading[taskId]) return;
+    var taskAtStart = tasks.find(function(item) { return item.id === taskId; });
+    var revisionAtStart = taskAtStart ? Number(taskAtStart.cowork_revision || 0) : 0;
+    var typeAtStart = taskAtStart ? taskAtStart.action_type : null;
     _cwLoading[taskId] = true;
     fetch('/api/tasks/' + taskId + '/cowork' + (markSeen ? '?mark_seen=1' : ''))
         .then(function(res) {
@@ -4459,6 +4485,15 @@ function cwLoad(taskId, markSeen) {
         })
         .then(function(data) {
             delete _cwLoading[taskId];
+            var currentTask = tasks.find(function(item) { return item.id === taskId; });
+            if (!currentTask
+                    || Number(currentTask.cowork_revision || 0) !== revisionAtStart
+                    || currentTask.action_type !== typeAtStart) {
+                return;
+            }
+            if (data.action && !cwActionMatchesTask(taskId, data.action)) {
+                data.action = null;
+            }
             _cwActions[taskId] = data.action || null;
             cwSyncTaskState(taskId, data.action || null);
             if (data.action && ['previewing', 'executing'].indexOf(
@@ -4951,7 +4986,8 @@ function pollCoworkHandoffStatus(taskId) {
             var latestPoller = _cwHandoffPollers[taskId];
             var action = data.action || null;
             if (!latestPoller || selectedTaskId !== taskId || !action
-                    || action.id !== latestPoller.actionId) {
+                    || action.id !== latestPoller.actionId
+                    || !cwActionMatchesTask(taskId, action)) {
                 stopCoworkHandoffPoller(taskId);
                 return;
             }
@@ -4985,7 +5021,7 @@ function pollCoworkStatus(taskId) {
         })
         .then(function(data) {
             var action = data.action || null;
-            if (!action) return;
+            if (!action || !cwActionMatchesTask(taskId, action)) return;
             var wasWaiting = !!(_cwActions[taskId] && _cwActions[taskId].waiting_on_user);
             var previousQuestion = _cwActions[taskId]
                 ? _cwActions[taskId].blocked_question : null;

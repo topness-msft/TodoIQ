@@ -1018,6 +1018,41 @@ class TestGetPreview(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertEqual(data["action"]["redirect_text"], "third")
 
+    def test_action_type_change_retires_current_card_but_preserves_history(self):
+        from src.models import update_task_for_action_type
+
+        tid = self.make_task(action_type="prepare")
+        self.start(tid)
+        update_task_for_action_type(tid, action_type="schedule-meeting")
+
+        current, _ = self.get_preview(tid)
+        history = self.fetch(f"/api/tasks/{tid}/cowork?history=1")
+
+        self.assertEqual(current.code, 404)
+        actions = json.loads(history.body)["actions"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action_type"], "prepare")
+        self.assertEqual(actions[0]["cowork_revision"], 0)
+
+    def test_fresh_preview_snapshots_new_action_type_revision(self):
+        from src.models import update_task_for_action_type
+
+        tid = self.make_task(
+            action_type="prepare",
+            key_people=json.dumps([{
+                "name": "Freada Sylvester",
+                "email": "freadas@microsoft.com",
+            }]),
+        )
+        self.start(tid)
+        update_task_for_action_type(tid, action_type="schedule-meeting")
+
+        response = self.start(tid)
+        action = json.loads(response.body)["action"]
+
+        self.assertEqual(action["action_type"], "schedule-meeting")
+        self.assertEqual(action["cowork_revision"], 1)
+
     def test_failure_recorded_as_failed(self):
         tid = self.make_task()
         self.start(tid, proc=FakeProc(stdout="", stderr="boom", returncode=1))

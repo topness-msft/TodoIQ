@@ -20,6 +20,12 @@ def get_connection() -> sqlite3.Connection:
 def _migrate(conn: sqlite3.Connection):
     """Add columns that may be missing from older databases."""
     cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "cowork_revision" not in cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN cowork_revision INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        cols.append("cowork_revision")
     if "action_type" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN action_type TEXT DEFAULT 'general'")
         conn.commit()
@@ -67,6 +73,7 @@ def _migrate(conn: sqlite3.Connection):
                 user_notes      TEXT DEFAULT '',
                 waiting_activity TEXT,
                 suggestion_refreshed_at TEXT,
+                cowork_revision INTEGER NOT NULL DEFAULT 0,
                 created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                 updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
@@ -74,11 +81,13 @@ def _migrate(conn: sqlite3.Connection):
                 raw_input, priority, due_date, committed_date, source_type, source_id,
                 source_url, source_snippet, coaching_text, action_type, skill_output,
                 key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
+                cowork_revision,
                 created_at, updated_at)
             SELECT id, title, description, status, snoozed_until, parse_status,
                 raw_input, priority, due_date, committed_date, source_type, source_id,
                 source_url, source_snippet, coaching_text, action_type, skill_output,
                 key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
+                cowork_revision,
                 created_at, updated_at
             FROM tasks;
             DROP TABLE tasks;
@@ -128,6 +137,7 @@ def _migrate(conn: sqlite3.Connection):
                     user_notes      TEXT DEFAULT '',
                     waiting_activity TEXT,
                     suggestion_refreshed_at TEXT,
+                    cowork_revision INTEGER NOT NULL DEFAULT 0,
                     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
@@ -135,11 +145,13 @@ def _migrate(conn: sqlite3.Connection):
                     raw_input, priority, due_date, committed_date, source_type, source_id,
                     source_url, source_snippet, coaching_text, action_type, skill_output,
                     key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
+                    cowork_revision,
                     created_at, updated_at)
                 SELECT id, title, description, status, snoozed_until, parse_status,
                     raw_input, priority, due_date, committed_date, source_type, source_id,
                     source_url, source_snippet, coaching_text, action_type, skill_output,
                     key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
+                    cowork_revision,
                     created_at, updated_at
                 FROM tasks;
                 DROP TABLE tasks;
@@ -170,6 +182,12 @@ def _migrate(conn: sqlite3.Connection):
     action_cols = [
         r[1] for r in conn.execute("PRAGMA table_info(task_actions)").fetchall()
     ]
+    if "cowork_revision" not in action_cols:
+        conn.execute(
+            "ALTER TABLE task_actions ADD COLUMN cowork_revision INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        action_cols.append("cowork_revision")
     if "cost_credits" not in action_cols:
         # Credits consumed by one preview, measured as the difference in the
         # user's month-to-date counter (GET /v1/cost) across the run. REAL, not
@@ -284,6 +302,7 @@ def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                 action_type      TEXT DEFAULT 'general',
+                cowork_revision  INTEGER NOT NULL DEFAULT 0,
                 state            TEXT NOT NULL DEFAULT 'previewing'
                                      CHECK (state IN (
                                          'previewing','ready','failed',
@@ -400,6 +419,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     user_notes      TEXT DEFAULT '',
     waiting_activity TEXT,
     suggestion_refreshed_at TEXT,
+    cowork_revision INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -436,6 +456,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     action_type      TEXT DEFAULT 'general',
+    cowork_revision  INTEGER NOT NULL DEFAULT 0,
     state            TEXT NOT NULL DEFAULT 'previewing'
                          CHECK (state IN (
                              'previewing','ready','failed',

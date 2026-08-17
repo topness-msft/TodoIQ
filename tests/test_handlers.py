@@ -148,6 +148,47 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(data["task"]["title"], "Updated")
         self.assertEqual(data["task"]["priority"], 1)
 
+    def test_action_type_change_increments_cowork_revision_and_retires_preview(self):
+        create_resp = self._create_task(
+            title="Prepare meeting",
+            action_type="prepare",
+            key_people='[{"name":"Freada","email":"freada@example.com"}]',
+            user_notes="Keep this note",
+        )
+        task = json.loads(create_resp.body)["task"]
+        import src.models as models
+        old_action = models.create_task_action(
+            task["id"], action_type="prepare", intent="Prepare"
+        )
+
+        resp = self.fetch(
+            f"/api/tasks/{task['id']}",
+            method="PUT",
+            body=json.dumps({"action_type": "schedule-meeting"}),
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(resp.code, 200)
+        updated = json.loads(resp.body)["task"]
+        self.assertEqual(updated["cowork_revision"], 1)
+        self.assertEqual(updated["user_notes"], "Keep this note")
+        self.assertEqual(updated["key_people"], task["key_people"])
+        self.assertIsNone(models.get_latest_task_action(task["id"]))
+        history = models.list_task_actions(task["id"])
+        self.assertEqual(history[-1]["id"], old_action["id"])
+
+    def test_same_action_type_does_not_increment_cowork_revision(self):
+        task = json.loads(self._create_task(
+            title="Meeting", action_type="prepare"
+        ).body)["task"]
+        resp = self.fetch(
+            f"/api/tasks/{task['id']}",
+            method="PUT",
+            body=json.dumps({"action_type": "prepare"}),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(json.loads(resp.body)["task"]["cowork_revision"], 0)
+
     def test_update_task_not_found(self):
         resp = self.fetch(
             "/api/tasks/99999",
