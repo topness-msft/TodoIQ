@@ -1103,6 +1103,92 @@ class TestGetPreview(CoworkAPITestBase):
         self.assertIsNone(data["action"]["destination_confirmed_at"])
         self.assertTrue(data["action"]["is_broadcast"])
 
+    def test_ready_schedule_exposes_invite_only_calendar_preview(self):
+        from src.db import get_connection
+        from src.models import create_task_action
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Rima Reyes",
+                "email": "rima.reyes@microsoft.com",
+            }]),
+        )
+        reviewed = (
+            "Timezone reasoning and availability notes.\n\n"
+            "**Phil / Rima 1:1**\n"
+            "- **When:** Monday, August 17, 3:05-3:30 PM ET\n"
+            "- **Attendee:** Rima Reyes - shown free\n"
+            "- **Format:** Teams meeting\n\n"
+            "**Agenda**\n"
+            "- Current priorities\n"
+            "- Next steps\n\n"
+            "Just say the word."
+        )
+        event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-17T15:05:00",
+            "end": "2026-08-17T15:30:00",
+            "time_zone": "America/New_York",
+            "attendees": ["rima.reyes@microsoft.com"],
+            "body": "model proposal",
+            "is_online_meeting": True,
+        }
+        action = create_task_action(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='ready', draft=?, tool_trace=? WHERE id=?",
+            (
+                reviewed,
+                json.dumps([{
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "input": json.dumps(event),
+                }]),
+                action["id"],
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        _, data = self.get_preview(tid)
+        preview = data["action"]["calendar_preview"]
+
+        self.assertEqual(
+            set(preview), {"attendees", "date_time", "body_html"}
+        )
+        self.assertEqual(preview["attendees"], ["rima.reyes@microsoft.com"])
+        self.assertEqual(
+            preview["date_time"],
+            "Monday, August 17, 2026 · 3:05 PM–3:30 PM · America/New_York",
+        )
+        self.assertIn("Current priorities", preview["body_html"])
+        self.assertNotIn("When:", preview["body_html"])
+        self.assertNotIn("Timezone reasoning", preview["body_html"])
+
+    def test_ready_schedule_omits_incomplete_calendar_preview(self):
+        from src.models import create_task_action
+        from src.db import get_connection
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Rima Reyes",
+                "email": "rima.reyes@microsoft.com",
+            }]),
+        )
+        action = create_task_action(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='ready', draft='No structured event' "
+            "WHERE id=?",
+            (action["id"],),
+        )
+        conn.commit()
+        conn.close()
+
+        _, data = self.get_preview(tid)
+        self.assertNotIn("calendar_preview", data["action"])
+
 
 # ------------------------------------------------------------- mark seen
 

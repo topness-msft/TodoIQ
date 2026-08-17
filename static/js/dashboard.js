@@ -3460,8 +3460,14 @@ function cwUnresolvedMeetingPeople(task) {
         });
 }
 
-function cwMeetingAttendeePills(task) {
-        return cwMeetingPeople(task).map(function(person) {
+function cwMeetingAttendeePills(task, attendeeEmails) {
+        var allowed = {};
+        (attendeeEmails || []).forEach(function(email) {
+            allowed[String(email || '').trim().toLowerCase()] = true;
+        });
+        return cwMeetingPeople(task).filter(function(person) {
+            return !attendeeEmails || allowed[person.email];
+        }).map(function(person) {
             return '<span class="person-pill cw-meeting-attendee-pill" '
                 + 'data-testid="meeting-attendee-pill" title="' + escapeAttr(person.email) + '">'
                 + '<span class="person-pill-avatar">' + escapeHtml(getInitials(person.name))
@@ -3591,6 +3597,15 @@ function cwOpenExecuteConfirm(taskId) {
                     + 'people shown in Key People.');
                 return;
             }
+            if (!action.calendar_preview
+                    || !Array.isArray(action.calendar_preview.attendees)
+                    || !action.calendar_preview.attendees.length
+                    || !action.calendar_preview.date_time
+                    || !action.calendar_preview.body_html) {
+                window.alert('This meeting preview is incomplete. Start over and '
+                    + 'review a fresh calendar preview before creating the meeting.');
+                return;
+            }
         }
         if (!action.destination_confirmed_at && isMeeting
                 && action.destination_ref && action.destination_display) {
@@ -3610,7 +3625,8 @@ function cwOpenExecuteConfirm(taskId) {
         if (old) old.remove();
         var label = cwExecutionLabel(task, action);
         var destination = action.destination_display || action.destination_ref || '';
-        var attendeePills = isMeeting ? cwMeetingAttendeePills(task) : '';
+        var attendeePills = isMeeting
+            ? cwMeetingAttendeePills(task, action.calendar_preview.attendees) : '';
         var destinationHtml = attendeePills
             ? '<div class="cw-meeting-attendees">' + attendeePills + '</div>'
             : '<b>' + escapeHtml(destination) + '</b>';
@@ -3624,6 +3640,22 @@ function cwOpenExecuteConfirm(taskId) {
                 + escapeHtml(task.source_url)
                 + '" target="_blank" rel="noopener noreferrer">Open '
                 + escapeHtml(destination) + ' conversation</a>';
+        }
+        var meetingConfirmationHtml = '';
+        if (isMeeting) {
+            meetingConfirmationHtml = '<div class="cw-meeting-confirm">'
+                + '<section class="cw-meeting-confirm-section" '
+                + 'data-testid="meeting-confirm-attendees">'
+                + '<span>Attendees</span><div class="cw-meeting-attendees">'
+                + attendeePills + '</div></section>'
+                + '<section class="cw-meeting-confirm-section" '
+                + 'data-testid="meeting-confirm-date-time">'
+                + '<span>Date &amp; time</span><b>'
+                + escapeHtml(action.calendar_preview.date_time) + '</b></section>'
+                + '<section class="cw-meeting-confirm-section" '
+                + 'data-testid="meeting-confirm-body">'
+                + '<span>Meeting body</span><div class="cw-meeting-confirm-body">'
+                + action.calendar_preview.body_html + '</div></section></div>';
         }
         _cwExecuteApprovals[taskId] = {
             parent_action_id: action.id,
@@ -3643,17 +3675,14 @@ function cwOpenExecuteConfirm(taskId) {
             + (isMeeting ? 'Calendar action' : 'Approved action') + '</div>'
             + '<div class="source-modal-header" id="execute-modal-title">'
             + escapeHtml(label) + '?</div>'
-            + '<div class="cw-execute-destination"><span>'
+            + (isMeeting ? meetingConfirmationHtml
+                : '<div class="cw-execute-destination"><span>'
             + (isMeeting ? 'Attendees' : 'Destination') + '</span>'
             + destinationHtml + '</div>'
-            + '<label class="source-modal-label">'
-            + (isMeeting ? 'Meeting details' : 'Final draft') + '</label>'
+            + '<label class="source-modal-label">Final draft</label>'
             + '<div class="cw-execute-draft">' + cwDraftDisplay(action, approvalDraft) + '</div>'
-            + '<div class="cw-execute-warning">'
-            + (isMeeting
-                ? 'Review every attendee and the meeting details. Cowork creates the calendar event only after you confirm.'
-                : 'This performs the action through Cowork. The destination and draft cannot be changed after confirmation.')
-            + '</div>'
+            + '<div class="cw-execute-warning">This performs the action through Cowork. '
+            + 'The destination and draft cannot be changed after confirmation.</div>')
             + '<div class="cw-execute-error" id="execute-modal-error" role="alert"></div>'
             + '<div class="source-modal-buttons">'
             + '<button class="btn-source-modal btn-source-cancel" '

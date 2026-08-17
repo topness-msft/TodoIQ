@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 import asyncio
+from datetime import datetime
 
 import tornado.web
 
@@ -39,6 +40,7 @@ from ..services.cowork_runner import (
     CoworkAnswerRejected,
     _approved_email_input,
     _calendar_event_matches,
+    _render_calendar_event_body,
     _looks_like_write,
     _normalize_single_email,
     answer_interaction,
@@ -434,6 +436,10 @@ def _enrich(action: dict) -> dict:
         action.get("blocked_question")
     )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
+    if action.get("state") == "ready" and action.get("action_type") == "schedule-meeting":
+        calendar_preview = _calendar_confirmation_preview(action)
+        if calendar_preview:
+            action["calendar_preview"] = calendar_preview
 
     if action.get("state") == "executing" and action.get("blocked_question"):
         action["waiting_on_user"] = True
@@ -802,6 +808,49 @@ def _preview_calendar_event(action: dict) -> dict | None:
         else:
             return None
     return approved
+
+
+def _calendar_confirmation_preview(action: dict) -> dict | None:
+    """Project the exact invite-bound fields for the final confirmation modal."""
+    event = _preview_calendar_event(action)
+    if not event:
+        return None
+    attendees = event.get("attendees")
+    if not isinstance(attendees, list) or not attendees:
+        return None
+    body_html = _render_calendar_event_body(
+        final_action_draft(action),
+        str(event.get("subject") or ""),
+    )
+    if not body_html:
+        return None
+    try:
+        start = datetime.fromisoformat(str(event["start"]).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(event["end"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+
+    def clock(value):
+        return value.strftime("%I:%M %p").lstrip("0")
+
+    date_label = start.strftime("%A, %B %d, %Y").replace(" 0", " ")
+    if end.date() == start.date():
+        time_label = f"{clock(start)}–{clock(end)}"
+    else:
+        time_label = (
+            f"{clock(start)}–{end.strftime('%A, %B %d, %Y').replace(' 0', ' ')} "
+            f"{clock(end)}"
+        )
+    timezone = str(event.get("time_zone") or "").strip()
+    if not timezone:
+        return None
+    return {
+        "attendees": [str(value).strip().lower() for value in attendees],
+        "date_time": f"{date_label} · {time_label} · {timezone}",
+        "body_html": body_html,
+    }
 
 
 def _delivery_evidence_matches(

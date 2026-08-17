@@ -231,11 +231,6 @@ class TestDestinationBinding:
             page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
 
             expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
-            expect(
-                page.get_by_test_id("execute-confirmation").get_by_role(
-                    "button", name="Create meeting"
-                )
-            ).to_be_visible()
             expect(page.get_by_test_id("dest-picker")).to_have_count(0)
             assert posted["delivery_channel"] == "email"
         finally:
@@ -479,6 +474,17 @@ class TestDestinationBinding:
             destination_confirmed_at=None,
             destination_source="auto_key_people",
             delivery_channel=None,
+            calendar_preview={
+                "attendees": ["rima.reyes@microsoft.com"],
+                "date_time": (
+                    "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
+                    "America/New_York"
+                ),
+                "body_html": (
+                    "<p><strong>Agenda</strong></p><ul>"
+                    "<li>Review current priorities</li></ul>"
+                ),
+            },
         )
         confirmed = {**action, "destination_confirmed_at": "2026-08-13T19:00:00Z"}
         posted = {}
@@ -514,15 +520,20 @@ class TestDestinationBinding:
             expect(page.get_by_test_id("execute-confirmation")).to_be_visible()
             expect(page.get_by_test_id("dest-picker")).to_have_count(0)
             expect(page.get_by_test_id("dest-channel")).to_have_count(0)
-            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
-                "Meeting details"
-            )
-            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
-                "Monday, August 17 at 10:05 AM"
-            )
-            expect(page.get_by_test_id("execute-confirmation")).to_contain_text(
+            modal = page.get_by_test_id("execute-confirmation")
+            expect(modal.get_by_test_id("meeting-confirm-attendees")).to_contain_text(
                 "Rima Reyes"
             )
+            expect(modal.get_by_test_id("meeting-confirm-date-time")).to_have_text(
+                "Date & timeMonday, August 17, 2026 · 10:05 AM–10:35 AM · "
+                "America/New_York"
+            )
+            expect(modal.get_by_test_id("meeting-confirm-body")).to_contain_text(
+                "Review current priorities"
+            )
+            expect(modal).not_to_contain_text("Meeting details")
+            expect(modal).not_to_contain_text("Availability")
+            expect(modal).not_to_contain_text("Teams meeting")
             assert posted == {
                 "destination_ref": "rima.reyes@microsoft.com",
                 "destination_display": "Rima Reyes",
@@ -539,6 +550,15 @@ class TestDestinationBinding:
             page.screenshot(
                 path=os.path.join(
                     SCREENSHOTS_DIR, "schedule-meeting-details-dark.png"
+                ),
+                full_page=True,
+            )
+            page.set_viewport_size({"width": 375, "height": 812})
+            expect(modal).to_be_visible()
+            expect(modal.get_by_test_id("meeting-confirm-date-time")).to_be_visible()
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR, "schedule-meeting-details-mobile.png"
                 ),
                 full_page=True,
             )
@@ -566,6 +586,17 @@ class TestDestinationBinding:
             destination_confirmed_at="2026-08-13T19:00:00Z",
             destination_source="auto_key_people",
             delivery_channel=None,
+            calendar_preview={
+                "attendees": ["rima.reyes@microsoft.com"],
+                "date_time": (
+                    "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
+                    "America/New_York"
+                ),
+                "body_html": (
+                    "<p><strong>Agenda</strong></p><ul>"
+                    "<li>Review current priorities</li></ul>"
+                ),
+            },
         )
         try:
             _load_dashboard(page, base_url, task_id, action)
@@ -628,7 +659,13 @@ class TestDestinationBinding:
 
             confirmation = page.get_by_test_id("execute-confirmation")
             expect(confirmation).to_be_visible()
-            expect(confirmation.locator(".cw-execute-draft")).to_contain_text(
+            expect(confirmation.get_by_test_id("meeting-confirm-date-time")).to_contain_text(
+                "Monday, August 17, 2026"
+            )
+            expect(confirmation.get_by_test_id("meeting-confirm-body")).to_contain_text(
+                "Review current priorities"
+            )
+            expect(confirmation).not_to_contain_text(
                 "Monday, August 17, 3:05–3:30 PM ET"
             )
             approval_draft = page.evaluate(
@@ -641,6 +678,49 @@ class TestDestinationBinding:
                 ),
                 full_page=True,
             )
+        finally:
+            _delete_task(page, base_url, task_id)
+
+    def test_create_meeting_fails_closed_without_canonical_calendar_preview(
+        self, page: Page, base_url
+    ):
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            action_type="schedule-meeting",
+            draft="**Planning review**\n\n**Agenda**\n- Next steps",
+            destination_ref="rima.reyes@microsoft.com",
+            destination_display="Rima Reyes",
+            destination_confirmed_at="2026-08-13T19:00:00Z",
+            delivery_channel=None,
+        )
+        dialogs = []
+        page.on(
+            "dialog",
+            lambda dialog: (dialogs.append(dialog.message), dialog.accept()),
+        )
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.key_people = JSON.stringify([{
+                        name: 'Rima Reyes',
+                        email: 'rima.reyes@microsoft.com'
+                    }]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+
+            page.get_by_role("button", name="Review meeting").click()
+
+            expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
+            assert dialogs == [
+                "This meeting preview is incomplete. Start over and review a fresh "
+                "calendar preview before creating the meeting."
+            ]
         finally:
             _delete_task(page, base_url, task_id)
 
@@ -660,6 +740,21 @@ class TestDestinationBinding:
             destination_confirmed_at=None,
             destination_source=None,
             delivery_channel=None,
+            calendar_preview={
+                "attendees": [
+                    "kanika@microsoft.com",
+                    "rima@microsoft.com",
+                    "henry@microsoft.com",
+                ],
+                "date_time": (
+                    "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
+                    "America/New_York"
+                ),
+                "body_html": (
+                    "<p><strong>Agenda</strong></p><ul>"
+                    "<li>Planning review</li></ul>"
+                ),
+            },
         )
         confirmed = {
             **action,
@@ -763,7 +858,7 @@ class TestDestinationBinding:
                 lambda request: request.method == "POST"
                 and request.url.endswith(f"/api/tasks/{task_id}/refresh")
             ):
-                page.get_by_role("button", name="Review meeting").click()
+                page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
 
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
