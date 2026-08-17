@@ -853,28 +853,51 @@ class TestCalendarToolApproval(unittest.TestCase):
             snapshot["draft"], "Phil / Rima 1:1"
         )
         self.assertIsNotNone(body)
-        self.assertIn("<strong>Phil / Rima 1:1</strong>", body)
         self.assertIn("<strong>Agenda</strong>", body)
         self.assertIn("<li>Open items and blockers</li>", body)
-        self.assertNotIn("calendar showed free", body)
+        self.assertNotIn("Phil / Rima 1:1", body)
+        self.assertNotIn("When:", body)
+        self.assertNotIn("Attendee:", body)
+        self.assertNotIn("Teams meeting:", body)
         self.assertNotIn("&lt;p&gt;", body)
 
-    def test_reviewed_draft_html_is_escaped_and_busy_warning_is_preserved(self):
+    def test_reviewed_draft_excludes_review_metadata_and_escapes_agenda(self):
         _, _, snapshot = self._action_118_fixture(
             draft=(
                 "**Phil / Rima 1:1**\n"
                 "- **When:** Monday, August 17, 3:05-3:30 PM ET (25 min)\n"
                 "- **Attendee:** <script>alert(1)</script> - calendar showed BUSY at this time\n\n"
                 "**Agenda:**\n"
-                "- Open items and blockers"
+                "- Open <script>alert(2)</script> items and blockers"
             )
         )
         body = cr._render_calendar_event_body(
             snapshot["draft"], "Phil / Rima 1:1"
         )
-        self.assertIn("calendar showed BUSY", body)
+        self.assertNotIn("calendar showed BUSY", body)
+        self.assertNotIn("Attendee:", body)
         self.assertNotIn("<script>", body)
         self.assertIn("&lt;script&gt;", body)
+
+    def test_task_2386_style_review_renders_only_edited_agenda(self):
+        reviewed = (
+            "Azharullah's working-hours timezone isn't visible, so I won't guess.\n\n"
+            "**1:1 — Phil / Azharullah: Project Whale**\n"
+            "- **When:** Wednesday, Aug 19, 2:05–2:30 PM ET (18:05–18:30 UTC)\n"
+            "- **Attendee:** Azharullah Meer (ameer@microsoft.com) — shown free\n"
+            "- **Format:** Teams online meeting\n\n"
+            "**Agenda**\n"
+            "- Sync up on Project Whale between FT and CAPE\n\n"
+            "Just say the word and I'll create it."
+        )
+        body = cr._render_calendar_event_body(
+            reviewed, "1:1 — Phil / Azharullah: Project Whale"
+        )
+        self.assertEqual(
+            body,
+            "<p><strong>Agenda</strong></p><ul>"
+            "<li>Sync up on Project Whale between FT and CAPE</li></ul>",
+        )
 
     def test_rejects_malformed_reviewed_drafts(self):
         cases = [
@@ -882,7 +905,6 @@ class TestCalendarToolApproval(unittest.TestCase):
             "",
             "**Wrong subject**\n- **When:** Tomorrow\n\n**Agenda**\n- Sync",
             "**Phil / Rima 1:1**\n- **When:** Tomorrow",
-            "**Phil / Rima 1:1**\n\n**Agenda**\n- Sync",
             "**Phil / Rima 1:1**\n- **When:** Tomorrow\n\n**Agenda**",
         ]
         for draft in cases:

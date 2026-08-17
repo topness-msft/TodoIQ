@@ -3075,7 +3075,7 @@ def _approved_email_input(reviewed_draft, destination):
 
 
 def _render_calendar_event_body(reviewed_draft, subject):
-    """Render the reviewed meeting card as deterministic, safe event HTML."""
+    """Render only the approved agenda as deterministic, safe event HTML."""
     lines = [line.strip() for line in str(reviewed_draft or "").splitlines()]
     title = f"**{subject}**"
     try:
@@ -3083,29 +3083,20 @@ def _render_calendar_event_body(reviewed_draft, subject):
     except ValueError:
         return None
 
-    detail_lines = []
     agenda_lines = []
-    section = "details"
+    in_agenda = False
     for line in lines[start + 1:]:
         if not line:
             continue
         if line in {"**Agenda**", "**Agenda:**"}:
-            section = "agenda"
+            in_agenda = True
+            continue
+        if not in_agenda:
             continue
         if not line.startswith("- "):
             break
-        value = line[2:]
-        if section == "details":
-            value = re.sub(
-                r"\s+(?:-|—|\ufffd)\s+calendar show(?:s|ed) free at this time$",
-                "",
-                value,
-                flags=re.I,
-            )
-            detail_lines.append(value)
-        else:
-            agenda_lines.append(value)
-    if not detail_lines or not agenda_lines:
+        agenda_lines.append(line[2:])
+    if not agenda_lines:
         return None
 
     def render_line(value):
@@ -3118,10 +3109,7 @@ def _render_calendar_event_body(reviewed_draft, subject):
         )
 
     return (
-        f"<p><strong>{html.escape(subject, quote=False)}</strong></p>"
-        "<ul>"
-        + "".join(f"<li>{render_line(line)}</li>" for line in detail_lines)
-        + "</ul><p><strong>Agenda</strong></p><ul>"
+        "<p><strong>Agenda</strong></p><ul>"
         + "".join(f"<li>{render_line(line)}</li>" for line in agenda_lines)
         + "</ul>"
     )
