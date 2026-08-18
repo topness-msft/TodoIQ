@@ -96,4 +96,8 @@ stale task, mismatched response, or ambiguous/missing exact identifier fails
 closed. The historical address is stored as a user-confirmed alias with
 provenance; it never becomes the canonical primary email.
 When confirming a row from `person_backfill_deferred`, pass its `deferred_id`;
-the service verifies the task slot/fingerprint and marks that row resolved.
+call `person_backfill.resolve_deferred_identity(...)`. The service verifies the
+task slot/fingerprint, display name, and exact historical identity, then marks
+that row resolved. When the selected exact profile differs from the historical
+email, pass that historical email as `confirmed_alias`; omission or mismatch
+fails closed.

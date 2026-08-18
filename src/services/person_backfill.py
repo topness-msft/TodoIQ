@@ -612,3 +612,84 @@ def confirm_candidate(
     except Exception:
         conn.rollback()
         raise
+
+
+def resolve_deferred_identity(
+    conn: sqlite3.Connection,
+    *,
+    deferred_id: int,
+    profile: dict,
+) -> int:
+    """Resolve one deferred sender/key-person slot after explicit confirmation."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        deferred = conn.execute(
+            "SELECT * FROM person_backfill_deferred WHERE id=?",
+            (deferred_id,),
+        ).fetchone()
+        if not deferred or deferred["status"] != "pending":
+            raise BackfillConflict("Deferred identity is not pending")
+        task = conn.execute(
+            "SELECT id,key_people,source_id,updated_at FROM tasks WHERE id=?",
+            (deferred["task_id"],),
+        ).fetchone()
+        if task is None or _fingerprint(_row_dict(task)) != deferred[
+            "task_fingerprint"
+        ]:
+            conn.execute(
+                "UPDATE person_backfill_deferred SET status='stale',updated_at=? "
+                "WHERE id=?",
+                (_now(), deferred_id),
+            )
+            conn.commit()
+            raise BackfillConflict("Task changed before deferred resolution")
+        if deferred["display_name"] and person_identity.normalize_name(
+            profile.get("display_name")
+        ) != person_identity.normalize_name(deferred["display_name"]):
+            raise ValueError("Confirmed candidate name does not match deferred name")
+        historical_kind = deferred["lookup_kind"]
+        historical_query = (
+            person_identity.normalize_aad(deferred["query_value"])
+            if historical_kind == "aad_exact"
+            else person_identity.normalize_email(deferred["query_value"])
+        )
+        selected_kind = profile.get("lookup_kind")
+        selected_query = (
+            person_identity.normalize_aad(profile.get("query_value"))
+            if selected_kind == "aad_exact"
+            else person_identity.normalize_email(profile.get("query_value"))
+        )
+        supplied_alias = person_identity.normalize_email(
+            profile.get("confirmed_alias")
+        )
+        if supplied_alias and supplied_alias != historical_query:
+            raise ValueError(
+                "Confirmed alias does not match the historical identity"
+            )
+        if historical_kind == "aad_exact":
+            if selected_kind != "aad_exact" or selected_query != historical_query:
+                raise ValueError(
+                    "Confirmed candidate does not match the historical identity"
+                )
+        elif selected_query != historical_query and supplied_alias != historical_query:
+            raise ValueError(
+                "Confirmed candidate does not replace the historical identity"
+            )
+        confirmed = {
+            **profile,
+            "person_index": deferred["person_index"],
+            "role": deferred["role"],
+            "confirmed_alias": supplied_alias,
+            "confirmation_mode": "user",
+        }
+        person_id = _apply_profile(conn, deferred["task_id"], confirmed)
+        conn.execute(
+            "UPDATE person_backfill_deferred "
+            "SET status='resolved',resolved_at=?,updated_at=? WHERE id=?",
+            (_now(), _now(), deferred_id),
+        )
+        conn.commit()
+        return person_id
+    except Exception:
+        conn.rollback()
+        raise

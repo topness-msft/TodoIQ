@@ -607,3 +607,221 @@ def test_confirm_candidate_marks_deferred_row_stale_after_task_change():
     assert conn.execute(
         "SELECT status FROM person_backfill_deferred WHERE id=?", (row["id"],)
     ).fetchone()[0] == "stale"
+
+
+def test_resolve_deferred_identity_supports_sender_slots():
+    conn = connection()
+    plan = person_backfill.plan_batch(conn, batch_size=1)
+    profiles = {
+        1: [{
+            "person_index": 0,
+            "role": "key_people",
+            "display_name": "Alex Example",
+            "email": "alex@example.test",
+            "upn": "alex@example.test",
+            "aad_object_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "lookup_kind": "email_exact",
+            "query_value": "alex@example.test",
+        }]
+    }
+    deferred = {
+        1: [{
+            "person_index": None,
+            "role": "sender",
+            "lookup_kind": "email_exact",
+            "query_value": "sender@example.test",
+            "defer_reason": "not_found",
+        }]
+    }
+    person_backfill.apply_exact_batch(conn, plan, profiles, deferred)
+    row = conn.execute("SELECT * FROM person_backfill_deferred").fetchone()
+    person_id = person_backfill.resolve_deferred_identity(
+        conn,
+        deferred_id=row["id"],
+        profile={
+            "display_name": None,
+            "email": "canonical-sender@example.test",
+            "upn": "canonical-sender@example.test",
+            "aad_object_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "lookup_kind": "aad_exact",
+            "query_value": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "confirmed_alias": "sender@example.test",
+        },
+    )
+    assert person_id
+    resolved = conn.execute(
+        "SELECT * FROM person_backfill_deferred WHERE id=?", (row["id"],)
+    ).fetchone()
+    assert resolved["status"] == "resolved"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM task_person "
+        "WHERE task_id=1 AND person_id=? AND role='sender'",
+        (person_id,),
+    ).fetchone()[0] == 1
+    alias = conn.execute(
+        "SELECT * FROM person_alias WHERE person_id=? AND alias_value=?",
+        (person_id, "sender@example.test"),
+    ).fetchone()
+    assert alias["confidence"] == "user"
+    assert alias["evidence_kind"] == "user_confirmed_name"
+
+
+@pytest.mark.parametrize("confirmed_alias", [None, "different@example.test"])
+def test_resolve_deferred_identity_rejects_unrelated_profile(confirmed_alias):
+    conn = connection()
+    plan = person_backfill.plan_batch(conn, batch_size=1)
+    profiles = {
+        1: [{
+            "person_index": 0,
+            "role": "key_people",
+            "display_name": "Alex Example",
+            "email": "alex@example.test",
+            "upn": "alex@example.test",
+            "aad_object_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "lookup_kind": "email_exact",
+            "query_value": "alex@example.test",
+        }]
+    }
+    deferred = {
+        1: [{
+            "person_index": None,
+            "role": "sender",
+            "lookup_kind": "email_exact",
+            "query_value": "sender@example.test",
+            "defer_reason": "not_found",
+        }]
+    }
+    person_backfill.apply_exact_batch(conn, plan, profiles, deferred)
+    row = conn.execute("SELECT * FROM person_backfill_deferred").fetchone()
+
+    with pytest.raises(ValueError, match="historical identity"):
+        person_backfill.resolve_deferred_identity(
+            conn,
+            deferred_id=row["id"],
+            profile={
+                "display_name": None,
+                "email": "wrong@example.test",
+                "upn": "wrong@example.test",
+                "aad_object_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "lookup_kind": "aad_exact",
+                "query_value": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "confirmed_alias": confirmed_alias,
+            },
+        )
+
+    assert conn.execute(
+        "SELECT status FROM person_backfill_deferred WHERE id=?", (row["id"],)
+    ).fetchone()[0] == "pending"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM task_person WHERE task_id=1 AND role='sender'"
+    ).fetchone()[0] == 0
+
+
+def test_resolve_deferred_identity_rejects_stale_task():
+    conn = connection()
+    plan = person_backfill.plan_batch(conn, batch_size=1)
+    profiles = {
+        1: [{
+            "person_index": 0,
+            "role": "key_people",
+            "display_name": "Alex Example",
+            "email": "alex@example.test",
+            "upn": "alex@example.test",
+            "aad_object_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "lookup_kind": "email_exact",
+            "query_value": "alex@example.test",
+        }]
+    }
+    deferred = {
+        1: [{
+            "person_index": None,
+            "role": "sender",
+            "lookup_kind": "email_exact",
+            "query_value": "sender@example.test",
+            "defer_reason": "not_found",
+        }]
+    }
+    person_backfill.apply_exact_batch(conn, plan, profiles, deferred)
+    row = conn.execute("SELECT * FROM person_backfill_deferred").fetchone()
+    conn.execute(
+        "UPDATE tasks SET source_id='chat::changed@example.test::topic' WHERE id=1"
+    )
+    conn.commit()
+
+    with pytest.raises(person_backfill.BackfillConflict, match="Task changed"):
+        person_backfill.resolve_deferred_identity(
+            conn,
+            deferred_id=row["id"],
+            profile={
+                "display_name": None,
+                "email": "sender@example.test",
+                "upn": "sender@example.test",
+                "aad_object_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "lookup_kind": "email_exact",
+                "query_value": "sender@example.test",
+            },
+        )
+
+    assert conn.execute(
+        "SELECT status FROM person_backfill_deferred WHERE id=?", (row["id"],)
+    ).fetchone()[0] == "stale"
+
+
+def test_resolve_deferred_identity_validates_aad_and_display_name():
+    conn = connection()
+    aad = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    conn.execute(
+        "UPDATE tasks SET key_people=?,updated_at=? WHERE id=1",
+        (
+            json.dumps([{"name": "Dana Example", "aad_object_id": aad}]),
+            "2026-08-02T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    plan = person_backfill.plan_batch(conn, batch_size=1)
+    profiles = {
+        1: [{
+            "person_index": None,
+            "role": "sender",
+            "display_name": "Sender Example",
+            "email": "sender@example.test",
+            "upn": "sender@example.test",
+            "aad_object_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "lookup_kind": "email_exact",
+            "query_value": "sender@example.test",
+        }]
+    }
+    deferred = {
+        1: [{
+            "person_index": 0,
+            "role": "key_people",
+            "lookup_kind": "aad_exact",
+            "query_value": aad,
+            "display_name": "Dana Example",
+            "defer_reason": "ambiguous",
+        }]
+    }
+    person_backfill.apply_exact_batch(conn, plan, profiles, deferred)
+    row = conn.execute("SELECT * FROM person_backfill_deferred").fetchone()
+    profile = {
+        "display_name": "Wrong Person",
+        "email": "dana@example.test",
+        "upn": "dana@example.test",
+        "aad_object_id": aad,
+        "lookup_kind": "aad_exact",
+        "query_value": aad,
+    }
+
+    with pytest.raises(ValueError, match="name"):
+        person_backfill.resolve_deferred_identity(
+            conn, deferred_id=row["id"], profile=profile
+        )
+    profile["display_name"] = "Dana Example"
+    person_id = person_backfill.resolve_deferred_identity(
+        conn, deferred_id=row["id"], profile=profile
+    )
+
+    assert person_id
+    assert conn.execute(
+        "SELECT status FROM person_backfill_deferred WHERE id=?", (row["id"],)
+    ).fetchone()[0] == "resolved"
