@@ -36,7 +36,7 @@ class TestDatabaseSchema(unittest.TestCase):
         expected = {
             "tasks", "task_context", "refresh_schedule", "sync_log",
             "task_actions", "person", "person_alias", "person_merge_history",
-            "task_person", "person_backfill_state",
+            "task_person", "person_backfill_state", "person_backfill_deferred",
         }
         self.assertEqual(tables, expected)
 
@@ -129,7 +129,7 @@ class TestDatabaseSchema(unittest.TestCase):
         expected = {
             "tasks", "task_context", "refresh_schedule", "sync_log",
             "task_actions", "person", "person_alias", "person_merge_history",
-            "task_person", "person_backfill_state",
+            "task_person", "person_backfill_state", "person_backfill_deferred",
         }
         self.assertEqual(tables, expected)
 

@@ -7,7 +7,8 @@ COMMAND = (ROOT / ".claude" / "commands" / "users.md")
 
 def test_users_command_is_the_only_workiq_identity_boundary():
     text = COMMAND.read_text(encoding="utf-8")
-    assert "/users/{exact_id_or_email}" in text
+    assert "/users/{exact_aad_id}" in text
+    assert "mail eq '{email}' or userPrincipalName eq '{email}'" in text
     assert "displayName eq" in text
     assert "Name candidates are never persisted" in text
     assert "person_backfill" in text

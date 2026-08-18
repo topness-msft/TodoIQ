@@ -21,7 +21,18 @@ def _now() -> str:
 
 def normalize_email(value: str | None) -> str | None:
     normalized = (value or "").strip().lower()
-    return normalized or None
+    if (
+        not normalized
+        or normalized.count("@") != 1
+        or normalized.startswith("@")
+        or normalized.endswith("@")
+        or any(character.isspace() for character in normalized)
+    ):
+        return None
+    local, domain = normalized.rsplit("@", 1)
+    if not local or "." not in domain:
+        return None
+    return normalized
 
 
 def normalize_name(value: str | None) -> str | None:
@@ -161,6 +172,11 @@ def resolve_person(
         email_roots = _roots_by_alias(
             conn, "email", email, allowed_confidences=("email", "user")
         )
+        email_roots.update(
+            _roots_by_alias(
+                conn, "upn", email, allowed_confidences=("email", "user")
+            )
+        )
         email_roots.update(_roots_by_primary_email(conn, email))
         if len(email_roots) > 1:
             return None
@@ -169,6 +185,12 @@ def resolve_person(
         upn_roots = _roots_by_alias(
             conn, "upn", upn, allowed_confidences=("email", "user")
         )
+        upn_roots.update(
+            _roots_by_alias(
+                conn, "email", upn, allowed_confidences=("email", "user")
+            )
+        )
+        upn_roots.update(_roots_by_primary_email(conn, upn))
         if len(upn_roots) > 1:
             return None
         exact_matches.update(upn_roots)
@@ -274,6 +296,101 @@ def enrich_confirmed_person(
                 confirmed_at=_now(),
             )
     return root
+
+
+def reconcile_exact_profile(
+    conn: sqlite3.Connection,
+    *,
+    display_name: str | None,
+    email: str | None,
+    aad_object_id: str,
+    upn: str | None,
+    evidence_ref: str,
+    lookup_kind: str,
+) -> int:
+    """Collapse legacy roots proven equivalent by one exact AAD profile."""
+    aad = normalize_aad(aad_object_id)
+    if not aad:
+        raise ValueError("Exact profile reconciliation requires an AAD ID")
+    email = normalize_email(email)
+    upn = normalize_email(upn)
+    aad_root = _find_by_aad(conn, aad)
+    if aad_root is not None:
+        aad_root = canonical_root(conn, aad_root)
+    exact_roots = set()
+    if email:
+        exact_roots.update(
+            _roots_by_alias(
+                conn,
+                "email",
+                email,
+                allowed_confidences=("email", "user"),
+            )
+        )
+        exact_roots.update(_roots_by_primary_email(conn, email))
+    if upn:
+        exact_roots.update(
+            _roots_by_alias(
+                conn,
+                "upn",
+                upn,
+                allowed_confidences=("email", "user"),
+            )
+        )
+        exact_roots.update(
+            _roots_by_alias(
+                conn,
+                "email",
+                upn,
+                allowed_confidences=("email", "user"),
+            )
+        )
+        exact_roots.update(_roots_by_primary_email(conn, upn))
+
+    if aad_root is None:
+        if len(exact_roots) == 1:
+            aad_root = next(iter(exact_roots))
+        else:
+            aad_root = create_person(
+                conn,
+                display_name=display_name or email or upn or aad,
+                aad_object_id=aad,
+                evidence_kind="aad_exact",
+                evidence_ref=evidence_ref,
+                lookup_kind=lookup_kind,
+                confirmation_mode="exact",
+            )
+    for root in exact_roots:
+        row = conn.execute(
+            "SELECT aad_object_id FROM person WHERE id=?",
+            (canonical_root(conn, root),),
+        ).fetchone()
+        root_aad = normalize_aad(row["aad_object_id"]) if row else None
+        if root_aad and root_aad != aad:
+            raise ValueError(
+                "Exact profile conflicts with an existing AAD identity"
+            )
+    for root in sorted(exact_roots):
+        root = canonical_root(conn, root)
+        if root != aad_root:
+            merge_persons(
+                conn,
+                losing_id=root,
+                winning_id=aad_root,
+                reason=f"exact directory profile {aad}",
+            )
+    return enrich_confirmed_person(
+        conn,
+        aad_root,
+        display_name=display_name,
+        email=email,
+        aad_object_id=aad,
+        upn=upn,
+        evidence_kind="aad_exact",
+        evidence_ref=evidence_ref,
+        lookup_kind=lookup_kind,
+        confirmation_mode="exact",
+    )
 
 
 def create_person(
@@ -441,6 +558,135 @@ def merge_persons(
         """,
         (losing_root, winning_root, reason, _now()),
     )
+
+
+def confirm_alias(
+    conn: sqlite3.Connection,
+    person_id: int,
+    kind: str,
+    value: str,
+    *,
+    evidence_ref: str,
+    lookup_kind: str,
+) -> int:
+    """Bind a historical alias to one exact user-confirmed canonical person."""
+    root = canonical_root(conn, person_id)
+    normalized = (
+        normalize_email(value)
+        if kind in {"email", "upn"}
+        else normalize_aad(value)
+        if kind == "aad"
+        else normalize_name(value)
+    )
+    if not normalized:
+        raise ValueError("Confirmed alias is invalid")
+    confidence_set = (
+        ("aad", "email", "user")
+        if kind in {"aad", "email", "upn"}
+        else ("user",)
+    )
+    existing_roots = _roots_by_alias(
+        conn,
+        kind,
+        normalized,
+        allowed_confidences=confidence_set,
+    )
+    if kind in {"email", "upn"}:
+        existing_roots.update(_roots_by_primary_email(conn, normalized))
+    if existing_roots:
+        target_row = conn.execute(
+            "SELECT aad_object_id FROM person WHERE id=?", (root,)
+        ).fetchone()
+        target_aad = normalize_aad(target_row["aad_object_id"]) if target_row else None
+        authoritative_person_ids = sorted(existing_roots)
+        for existing_root in authoritative_person_ids:
+            if existing_root == root:
+                continue
+            existing_row = conn.execute(
+                "SELECT aad_object_id FROM person WHERE id=?",
+                (canonical_root(conn, existing_root),),
+            ).fetchone()
+            existing_aad = (
+                normalize_aad(existing_row["aad_object_id"])
+                if existing_row else None
+            )
+            if existing_aad and target_aad and existing_aad != target_aad:
+                raise ValueError(
+                    "Confirmed alias conflicts with an existing AAD identity"
+                )
+            merge_persons(
+                conn,
+                losing_id=existing_root,
+                winning_id=root,
+                reason=f"user-confirmed alias {kind}:{normalized}",
+            )
+        placeholders = ",".join("?" for _ in authoritative_person_ids)
+        cursor = conn.execute(
+            f"""
+            UPDATE person_alias
+            SET confidence='user', evidence_kind='user_confirmed_name',
+                evidence_ref=?, observed_at=?, confirmation_mode='user',
+                confirmed_at=?, lookup_kind=?
+            WHERE alias_kind=? AND alias_value=?
+              AND confidence IN ('aad','email','user')
+              AND person_id IN ({placeholders})
+            """,
+            (
+                evidence_ref,
+                _now(),
+                _now(),
+                lookup_kind,
+                kind,
+                normalized,
+                *authoritative_person_ids,
+            ),
+        )
+        if cursor.rowcount == 0:
+            add_alias(
+                conn,
+                root,
+                kind,
+                normalized,
+                "user",
+                evidence_kind="user_confirmed_name",
+                evidence_ref=evidence_ref,
+                lookup_kind=lookup_kind,
+                confirmation_mode="user",
+                confirmed_at=_now(),
+            )
+        return root
+    cursor = conn.execute(
+        """
+        UPDATE person_alias
+        SET confidence='user', evidence_kind='user_confirmed_name',
+            evidence_ref=?, observed_at=?, confirmation_mode='user',
+            confirmed_at=?, lookup_kind=?
+        WHERE person_id=? AND alias_kind=? AND alias_value=?
+        """,
+        (
+            evidence_ref,
+            _now(),
+            _now(),
+            lookup_kind,
+            root,
+            kind,
+            normalized,
+        ),
+    )
+    if cursor.rowcount == 0:
+        add_alias(
+            conn,
+            root,
+            kind,
+            normalized,
+            "user",
+            evidence_kind="user_confirmed_name",
+            evidence_ref=evidence_ref,
+            lookup_kind=lookup_kind,
+            confirmation_mode="user",
+            confirmed_at=_now(),
+        )
+    return root
 
 
 def unmerge_persons(conn: sqlite3.Connection, losing_id: int) -> None:

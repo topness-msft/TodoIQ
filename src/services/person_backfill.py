@@ -99,11 +99,22 @@ def backfill_status(conn: sqlite3.Connection) -> dict:
                 for key in ("email", "upn", "aad_object_id", "aadObjectId")
             ):
                 deferred += 1
+    deferred_queue = {
+        row["status"]: row["count"]
+        for row in conn.execute(
+            "SELECT status,COUNT(*) AS count FROM person_backfill_deferred "
+            "GROUP BY status"
+        ).fetchall()
+    }
     return {
         **marker,
         "max_eligible_task_id": max_task_id,
         "pending": max_task_id > marker["last_task_id"],
         "deferred_count": deferred,
+        "deferred_queue": {
+            key: deferred_queue.get(key, 0)
+            for key in ("pending", "resolved", "stale")
+        },
     }
 
 
@@ -198,7 +209,42 @@ def _apply_profile(
     if lookup_kind == "email_exact" and person_identity.normalize_email(
         query_value
     ) not in {email, upn}:
-        raise ValueError("Email profile does not match the exact query")
+        query_person = person_identity.resolve_person(
+            conn, email=query_value, create_if_missing=False
+        )
+        profile_person = person_identity.resolve_person(
+            conn,
+            email=email,
+            upn=upn,
+            aad_object_id=aad,
+            create_if_missing=False,
+        )
+        if (
+            query_person is None
+            or profile_person is None
+            or query_person != profile_person
+        ):
+            raise ValueError(
+                f"Email profile does not match the exact query: {query_value}"
+            )
+    confirmed_alias = person_identity.normalize_email(
+        profile.get("confirmed_alias")
+    )
+    evidence_ref = (
+        f"task:{task_id}:person:{profile.get('person_index')}"
+        if profile.get("person_index") is not None
+        else f"task:{task_id}:sender"
+    )
+    if aad:
+        person_identity.reconcile_exact_profile(
+            conn,
+            display_name=profile.get("display_name"),
+            email=email,
+            upn=upn,
+            aad_object_id=aad,
+            evidence_ref=evidence_ref,
+            lookup_kind=lookup_kind,
+        )
     person_id = person_identity.resolve_person(
         conn,
         display_name=profile.get("display_name"),
@@ -210,16 +256,16 @@ def _apply_profile(
             if profile.get("confirmation_mode") == "user"
             else lookup_kind
         ),
-        evidence_ref=(
-            f"task:{task_id}:person:{profile.get('person_index')}"
-            if profile.get("person_index") is not None
-            else f"task:{task_id}:sender"
-        ),
+        evidence_ref=evidence_ref,
         lookup_kind=lookup_kind,
         confirmation_mode=profile.get("confirmation_mode") or "exact",
+        create_if_missing=False,
     )
     if person_id is None:
-        raise ValueError("Exact profile could not be resolved")
+        raise ValueError(
+            "Exact profile could not be resolved: "
+            f"{profile.get('query_value')}"
+        )
     person_id = person_identity.enrich_confirmed_person(
         conn,
         person_id,
@@ -229,18 +275,12 @@ def _apply_profile(
         aad_object_id=aad,
         evidence_kind=(
             "user_confirmed_name"
-            if lookup_kind == "user_confirmed_name"
+            if profile.get("confirmation_mode") == "user"
             else lookup_kind
         ),
-        evidence_ref=(
-            f"task:{task_id}:person:{profile.get('person_index')}"
-            if profile.get("person_index") is not None
-            else f"task:{task_id}:sender"
-        ),
+        evidence_ref=evidence_ref,
         lookup_kind=lookup_kind,
-        confirmation_mode=(
-            "user" if lookup_kind == "user_confirmed_name" else "exact"
-        ),
+        confirmation_mode=profile.get("confirmation_mode") or "exact",
     )
     person_identity.link_task_person(
         conn,
@@ -252,15 +292,20 @@ def _apply_profile(
             if profile.get("confirmation_mode") == "user"
             else lookup_kind
         ),
-        evidence_ref=(
-            f"task:{task_id}:person:{profile.get('person_index')}"
-            if profile.get("person_index") is not None
-            else f"task:{task_id}:sender"
-        ),
+        evidence_ref=evidence_ref,
         lookup_kind=lookup_kind,
         confirmation_mode=profile.get("confirmation_mode") or "exact",
         confirmed_at=_now(),
     )
+    if confirmed_alias:
+        person_identity.confirm_alias(
+            conn,
+            person_id,
+            "email",
+            confirmed_alias,
+            evidence_ref=evidence_ref,
+            lookup_kind=lookup_kind,
+        )
     return person_id
 
 
@@ -268,7 +313,9 @@ def apply_exact_batch(
     conn: sqlite3.Connection,
     plan: dict,
     profiles_by_task: dict[int, list[dict]],
+    deferred_by_task: dict[int, list[dict]] | None = None,
 ) -> dict:
+    deferred_by_task = deferred_by_task or {}
     conn.execute("BEGIN IMMEDIATE")
     try:
         marker = _marker(conn)
@@ -291,8 +338,8 @@ def apply_exact_batch(
             raise BackfillConflict("Backfill marker changed after planning")
         tasks = plan["tasks"]
         planned_task_ids = {task["task_id"] for task in tasks}
-        if set(profiles_by_task) - planned_task_ids:
-            raise BackfillConflict("Profiles contain an unplanned task")
+        if (set(profiles_by_task) | set(deferred_by_task)) - planned_task_ids:
+            raise BackfillConflict("Resolution data contains an unplanned task")
         for planned in tasks:
             row = conn.execute(
                 "SELECT id,key_people,source_id,updated_at FROM tasks WHERE id=?",
@@ -314,21 +361,121 @@ def apply_exact_batch(
             }
             if len(profile_map) != len(profiles):
                 raise BackfillConflict("Profiles contain duplicate task roles")
-            if set(profile_map) != set(lookup_map):
+            deferred = deferred_by_task.get(planned["task_id"], [])
+            deferred_map = {
+                (item.get("role"), item.get("person_index")): item
+                for item in deferred
+            }
+            if len(deferred_map) != len(deferred):
+                raise BackfillConflict("Deferred lookups contain duplicate slots")
+            if set(profile_map) & set(deferred_map):
+                raise BackfillConflict("A lookup cannot be resolved and deferred")
+            if set(profile_map) | set(deferred_map) != set(lookup_map):
                 raise BackfillConflict(
-                    f"Task {planned['task_id']} exact lookups are incomplete"
+                    f"Task {planned['task_id']} lookup outcomes are incomplete"
                 )
             for key, profile in profile_map.items():
                 lookup = lookup_map[key]
-                if profile.get("lookup_kind") != lookup["lookup_kind"]:
+                if profile.get("confirmation_mode") == "user":
+                    if person_identity.normalize_name(
+                        profile.get("display_name")
+                    ) != person_identity.normalize_name(
+                        lookup.get("display_name")
+                    ):
+                        raise BackfillConflict(
+                            "Confirmed candidate name does not match the planned person"
+                        )
+                    confirmed_alias = person_identity.normalize_email(
+                        profile.get("confirmed_alias")
+                    )
+                    if confirmed_alias:
+                        if confirmed_alias != lookup["query_value"]:
+                            raise BackfillConflict(
+                                "Confirmed alias does not match the planned lookup"
+                            )
+                    elif (
+                        profile.get("lookup_kind") != lookup["lookup_kind"]
+                        or profile.get("query_value") != lookup["query_value"]
+                    ):
+                        raise BackfillConflict(
+                            "Confirmed profile does not satisfy the planned lookup"
+                        )
+                elif profile.get("lookup_kind") != lookup["lookup_kind"]:
                     raise BackfillConflict("Profile lookup kind changed")
-                if (
-                    person_identity.normalize_email(profile.get("query_value"))
-                    if lookup["lookup_kind"] == "email_exact"
-                    else person_identity.normalize_aad(profile.get("query_value"))
-                ) != lookup["query_value"]:
-                    raise BackfillConflict("Profile query value changed")
+                if profile.get("confirmation_mode") != "user" or not profile.get(
+                    "confirmed_alias"
+                ):
+                    if (
+                        person_identity.normalize_email(profile.get("query_value"))
+                        if lookup["lookup_kind"] == "email_exact"
+                        else person_identity.normalize_aad(profile.get("query_value"))
+                    ) != lookup["query_value"]:
+                        raise BackfillConflict("Profile query value changed")
                 _apply_profile(conn, planned["task_id"], profile)
+            for key, item in deferred_map.items():
+                lookup = lookup_map[key]
+                if (
+                    item.get("lookup_kind") != lookup["lookup_kind"]
+                    or item.get("query_value") != lookup["query_value"]
+                ):
+                    raise BackfillConflict("Deferred lookup changed after planning")
+                reason = item.get("defer_reason")
+                if reason not in {
+                    "not_found",
+                    "ambiguous",
+                    "external_unresolved",
+                    "mcp_unavailable",
+                }:
+                    raise ValueError("Unsupported defer reason")
+                existing = conn.execute(
+                    """
+                    SELECT id FROM person_backfill_deferred
+                    WHERE task_id=? AND role=? AND ifnull(person_index,-1)=?
+                      AND lookup_kind=? AND query_value=? AND task_fingerprint=?
+                    """,
+                    (
+                        planned["task_id"],
+                        lookup["role"],
+                        lookup["person_index"]
+                        if lookup["person_index"] is not None
+                        else -1,
+                        lookup["lookup_kind"],
+                        lookup["query_value"],
+                        planned["fingerprint"],
+                    ),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE person_backfill_deferred
+                        SET defer_reason=?, status='pending',
+                            attempts=attempts+1, last_attempt_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (reason, _now(), _now(), existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO person_backfill_deferred (
+                            task_id,person_index,role,lookup_kind,query_value,
+                            display_name,task_fingerprint,defer_reason,
+                            last_attempt_at,updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            planned["task_id"],
+                            lookup["person_index"],
+                            lookup["role"],
+                            lookup["lookup_kind"],
+                            lookup["query_value"],
+                            lookup.get("display_name"),
+                            planned["fingerprint"],
+                            reason,
+                            _now(),
+                            _now(),
+                        ),
+                    )
 
         now = _now()
         if tasks:
@@ -382,6 +529,7 @@ def confirm_candidate(
     person_index: int,
     expected_fingerprint: str,
     profile: dict,
+    deferred_id: int | None = None,
 ) -> int:
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -390,7 +538,27 @@ def confirm_candidate(
             (task_id,),
         ).fetchone()
         if row is None or _fingerprint(_row_dict(row)) != expected_fingerprint:
+            if deferred_id is not None:
+                conn.execute(
+                    "UPDATE person_backfill_deferred SET status='stale', "
+                    "updated_at=? WHERE id=? AND status='pending'",
+                    (_now(), deferred_id),
+                )
+                conn.commit()
             raise BackfillConflict("Task changed before identity confirmation")
+        people = _people(row["key_people"])
+        if person_index < 0 or person_index >= len(people):
+            raise ValueError("Person index is no longer valid")
+        original = people[person_index]
+        original_query = (
+            person_identity.normalize_aad(
+                original.get("aad_object_id") or original.get("aadObjectId")
+            )
+            or person_identity.normalize_email(original.get("email"))
+            or person_identity.normalize_email(original.get("upn"))
+        )
+        if not original_query:
+            raise ValueError("Task person has no historical exact identifier")
         lookup_kind = profile.get("lookup_kind")
         query_value = profile.get("query_value")
         if lookup_kind not in {"aad_exact", "email_exact"} or not query_value:
@@ -401,9 +569,44 @@ def confirm_candidate(
             "role": "key_people",
             "lookup_kind": lookup_kind,
             "query_value": query_value,
+            "confirmed_alias": profile.get("confirmed_alias"),
             "confirmation_mode": "user",
         }
+        supplied_alias = person_identity.normalize_email(
+            profile.get("confirmed_alias")
+        )
+        if supplied_alias and supplied_alias != original_query:
+            raise ValueError(
+                "Confirmed alias does not match the historical identity"
+            )
+        if (
+            person_identity.normalize_aad(query_value)
+            if lookup_kind == "aad_exact"
+            else person_identity.normalize_email(query_value)
+        ) != original_query:
+            if supplied_alias != original_query:
+                raise ValueError(
+                    "Confirmed candidate does not replace the historical identity"
+                )
         person_id = _apply_profile(conn, task_id, confirmed)
+        if deferred_id is not None:
+            deferred = conn.execute(
+                "SELECT * FROM person_backfill_deferred WHERE id=?",
+                (deferred_id,),
+            ).fetchone()
+            if (
+                not deferred
+                or deferred["status"] != "pending"
+                or deferred["task_id"] != task_id
+                or deferred["person_index"] != person_index
+                or deferred["task_fingerprint"] != expected_fingerprint
+            ):
+                raise BackfillConflict("Deferred identity no longer matches")
+            conn.execute(
+                "UPDATE person_backfill_deferred "
+                "SET status='resolved',resolved_at=?,updated_at=? WHERE id=?",
+                (_now(), _now(), deferred_id),
+            )
         conn.commit()
         return person_id
     except Exception:

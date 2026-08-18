@@ -617,6 +617,29 @@ CREATE TABLE IF NOT EXISTS person_backfill_state (
     updated_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS person_backfill_deferred (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    person_index     INTEGER,
+    role             TEXT NOT NULL CHECK (role IN ('sender','key_people')),
+    lookup_kind      TEXT NOT NULL CHECK (lookup_kind IN ('aad_exact','email_exact')),
+    query_value      TEXT NOT NULL,
+    display_name     TEXT,
+    task_fingerprint TEXT NOT NULL,
+    defer_reason     TEXT NOT NULL
+                         CHECK (defer_reason IN (
+                             'not_found','ambiguous','external_unresolved',
+                             'mcp_unavailable'
+                         )),
+    status           TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','resolved','stale')),
+    attempts         INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+    last_attempt_at  TEXT NOT NULL,
+    resolved_at      TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
@@ -631,4 +654,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_alias_exact_identity
     WHERE alias_kind IN ('aad','email','upn')
       AND confidence IN ('aad','email','user');
 CREATE INDEX IF NOT EXISTS idx_task_person_person ON task_person(person_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_backfill_deferred_slot
+    ON person_backfill_deferred (
+        task_id, role, ifnull(person_index,-1), lookup_kind, query_value,
+        task_fingerprint
+    );
+CREATE INDEX IF NOT EXISTS idx_person_backfill_deferred_status
+    ON person_backfill_deferred(status, task_id);
 """

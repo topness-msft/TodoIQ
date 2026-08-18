@@ -33,6 +33,13 @@ def test_exact_email_and_aad_resolution_are_canonical():
     ) == person_id
 
 
+def test_invalid_legacy_email_values_are_not_exact_identities():
+    assert identity.normalize_email("unknown") is None
+    assert identity.normalize_email("name only") is None
+    assert identity.normalize_email("@example.test") is None
+    assert identity.normalize_email("name@example") is None
+
+
 def test_equal_email_and_upn_resolve_through_both_alias_kinds():
     conn = connection()
     person_id = identity.create_person(
@@ -47,6 +54,23 @@ def test_equal_email_and_upn_resolve_through_both_alias_kinds():
     assert identity.resolve_person(
         conn, upn="alex@example.test", create_if_missing=False
     ) == person_id
+
+
+def test_email_and_upn_resolution_cross_check_authoritative_forms():
+    conn = connection()
+    upn_only = identity.create_person(
+        conn, display_name="UPN only", upn="upnonly@example.test"
+    )
+    assert identity.resolve_person(
+        conn, email="upnonly@example.test", create_if_missing=False
+    ) == upn_only
+    primary_only = conn.execute(
+        "INSERT INTO person (display_name,primary_email) VALUES (?,?)",
+        ("Primary only", "primary@example.test"),
+    ).lastrowid
+    assert identity.resolve_person(
+        conn, upn="primary@example.test", create_if_missing=False
+    ) == primary_only
 
 
 def test_alias_collision_with_multiple_roots_fails_closed():
@@ -251,6 +275,175 @@ def test_audited_alias_seed_never_creates_missing_person():
     assert alias["evidence_kind"] == "audited_alias_seed"
 
 
+def test_exact_profile_refuses_legacy_root_with_conflicting_aad():
+    conn = connection()
+    selected = identity.create_person(
+        conn,
+        display_name="Selected",
+        email="selected@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    conflicting = identity.create_person(
+        conn,
+        display_name="Conflicting",
+        email="shared@example.test",
+        aad_object_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    )
+    identity.add_alias(
+        conn, selected, "upn", "shared@example.test", "email"
+    )
+    with pytest.raises(ValueError, match="conflicts"):
+        identity.reconcile_exact_profile(
+            conn,
+            display_name="Selected",
+            email="selected@example.test",
+            upn="shared@example.test",
+            aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            evidence_ref="task:1:person:0",
+            lookup_kind="aad_exact",
+        )
+    assert identity.canonical_root(conn, conflicting) == conflicting
+
+
+def test_user_confirmed_alias_merges_primary_email_only_legacy_root():
+    conn = connection()
+    legacy = conn.execute(
+        "INSERT INTO person (display_name,primary_email) VALUES (?,?)",
+        ("Legacy", "old@example.test"),
+    ).lastrowid
+    canonical = identity.create_person(
+        conn,
+        display_name="Canonical",
+        email="canonical@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    identity.confirm_alias(
+        conn,
+        canonical,
+        "email",
+        "old@example.test",
+        evidence_ref="task:1:person:0",
+        lookup_kind="aad_exact",
+    )
+    assert identity.canonical_root(conn, legacy) == canonical
+    assert identity.resolve_person(
+        conn, email="old@example.test", create_if_missing=False
+    ) == canonical
+
+
+def test_user_confirmation_merges_multiple_primary_email_legacy_roots():
+    conn = connection()
+    legacy_ids = [
+        conn.execute(
+            "INSERT INTO person (display_name,primary_email) VALUES (?,?)",
+            (f"Legacy {index}", "old@example.test"),
+        ).lastrowid
+        for index in range(2)
+    ]
+    canonical = identity.create_person(
+        conn,
+        display_name="Canonical",
+        email="canonical@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    identity.confirm_alias(
+        conn,
+        canonical,
+        "email",
+        "old@example.test",
+        evidence_ref="task:1:person:0",
+        lookup_kind="aad_exact",
+    )
+    assert {
+        identity.canonical_root(conn, person_id) for person_id in legacy_ids
+    } == {canonical}
+
+
+def test_confirm_alias_does_not_promote_unrelated_inferred_alias():
+    conn = connection()
+    unrelated = identity.create_person(conn, display_name="Unrelated")
+    identity.add_alias(
+        conn, unrelated, "email", "old@example.test", "inferred"
+    )
+    canonical = identity.create_person(
+        conn,
+        display_name="Canonical",
+        email="canonical@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    identity.confirm_alias(
+        conn,
+        canonical,
+        "email",
+        "old@example.test",
+        evidence_ref="task:1:person:0",
+        lookup_kind="aad_exact",
+    )
+    inferred = conn.execute(
+        "SELECT * FROM person_alias WHERE person_id=? AND alias_value=?",
+        (unrelated, "old@example.test"),
+    ).fetchone()
+    assert inferred["confidence"] == "inferred"
+    confirmed = conn.execute(
+        "SELECT * FROM person_alias WHERE person_id=? AND alias_value=?",
+        (canonical, "old@example.test"),
+    ).fetchone()
+    assert confirmed["confidence"] == "user"
+
+
+def test_confirm_alias_refuses_root_with_different_aad():
+    conn = connection()
+    legacy = identity.create_person(
+        conn,
+        display_name="Legacy",
+        email="old@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    target = identity.create_person(
+        conn,
+        display_name="Target",
+        email="target@example.test",
+        aad_object_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    )
+    with pytest.raises(ValueError, match="conflicts"):
+        identity.confirm_alias(
+            conn,
+            target,
+            "email",
+            "old@example.test",
+            evidence_ref="task:1:person:0",
+            lookup_kind="aad_exact",
+        )
+    assert identity.canonical_root(conn, legacy) == legacy
+
+
+def test_confirm_alias_promotes_inferred_alias_on_target_root():
+    conn = connection()
+    target = identity.create_person(
+        conn,
+        display_name="Target",
+        email="target@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    identity.add_alias(
+        conn, target, "email", "old@example.test", "inferred"
+    )
+    identity.confirm_alias(
+        conn,
+        target,
+        "email",
+        "old@example.test",
+        evidence_ref="task:1:person:0",
+        lookup_kind="aad_exact",
+    )
+    alias = conn.execute(
+        "SELECT * FROM person_alias WHERE person_id=? AND alias_value=?",
+        (target, "old@example.test"),
+    ).fetchone()
+    assert alias["confidence"] == "user"
+    assert alias["evidence_kind"] == "user_confirmed_name"
+
+
 def test_authoritative_email_alias_is_unique_across_people():
     conn = connection()
     first = identity.create_person(
@@ -265,3 +458,69 @@ def test_authoritative_email_alias_is_unique_across_people():
     assert identity.resolve_person(
         conn, email="same@example.test", create_if_missing=False
     ) == first
+
+
+def test_user_confirmed_alias_merges_legacy_root_non_destructively():
+    conn = connection()
+    legacy = identity.create_person(
+        conn, display_name="Pauline", email="old@example.test"
+    )
+    canonical = identity.create_person(
+        conn,
+        display_name="Pauline",
+        email="canonical@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    identity.confirm_alias(
+        conn,
+        canonical,
+        "email",
+        "old@example.test",
+        evidence_ref="task:1:person:0",
+        lookup_kind="aad_exact",
+    )
+    assert identity.canonical_root(conn, legacy) == canonical
+    assert conn.execute(
+        "SELECT COUNT(*) FROM person WHERE id IN (?,?)", (legacy, canonical)
+    ).fetchone()[0] == 2
+    alias = conn.execute(
+        "SELECT * FROM person_alias WHERE alias_value='old@example.test'"
+    ).fetchone()
+    assert alias["confidence"] == "user"
+    assert alias["evidence_kind"] == "user_confirmed_name"
+    history = conn.execute(
+        "SELECT * FROM person_merge_history WHERE losing_id=? AND winning_id=?",
+        (legacy, canonical),
+    ).fetchone()
+    assert history is not None
+
+
+def test_exact_aad_profile_merges_legacy_mail_and_upn_roots():
+    conn = connection()
+    canonical = identity.create_person(
+        conn,
+        display_name="Steve Example",
+        email="steve@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        upn="stexample@example.test",
+    )
+    legacy = identity.create_person(
+        conn,
+        display_name="Steve Example",
+        email="stexample@example.test",
+    )
+    reconciled = identity.reconcile_exact_profile(
+        conn,
+        display_name="Steve Example",
+        email="steve@example.test",
+        upn="stexample@example.test",
+        aad_object_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        evidence_ref="task:1:person:0",
+        lookup_kind="email_exact",
+    )
+    assert reconciled == canonical
+    assert identity.canonical_root(conn, legacy) == canonical
+    assert conn.execute(
+        "SELECT COUNT(*) FROM person_merge_history "
+        "WHERE reason LIKE 'exact directory profile %'"
+    ).fetchone()[0] == 1

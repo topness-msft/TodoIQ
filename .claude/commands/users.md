@@ -38,24 +38,29 @@ conn.close()
 Call `plan_batch(conn, batch_size=N)`. For every lookup in the returned plan:
 
 1. When `aad_object_id` is present, fetch the exact profile:
-   `/users/{exact_id_or_email}?$select=id,displayName,mail,userPrincipalName`
-2. Otherwise fetch the exact email/UPN using the same endpoint.
+   `/users/{exact_aad_id}?$select=id,displayName,mail,userPrincipalName`
+2. For email/UPN, use an exact collection filter because Graph addresses a user
+   resource by object ID or UPN, not every valid mail alias:
+   `/users?$filter=mail eq '{email}' or userPrincipalName eq '{email}'&$select=id,displayName,mail,userPrincipalName&$top=2`
+   Zero or multiple results fail closed.
 3. Record only `display_name`, `email`, `upn`, `aad_object_id`, `lookup_kind`,
    the exact `query_value`, `person_index`, and `role` in the in-memory proposal.
-   Every planned exact lookup must resolve before `--apply`; otherwise do not
-   advance the marker and retry the same batch later.
+   Every planned lookup must have one explicit outcome before `--apply`: an exact
+   profile or a deferred entry with `not_found`, `ambiguous`,
+   `external_unresolved`, or `mcp_unavailable`.
 
 Print task count, exact lookup count, deferred count, marker revision, and last
 task ID. Do not call `apply_exact_batch`.
 
 ## `backfill --apply`
 
-Build the same plan and exact profile proposal without holding a DB transaction.
+Build the same plan, exact profile proposal, and explicit deferred outcomes
+without holding a DB transaction.
 Then call:
 
 ```python
 from src.services.person_backfill import apply_exact_batch
-result = apply_exact_batch(conn, plan, profiles_by_task)
+result = apply_exact_batch(conn, plan, profiles_by_task, deferred_by_task)
 ```
 
 `--resume` uses the persisted marker. Continue bounded batches until the requested
@@ -76,11 +81,19 @@ result and do not select the first result automatically.
 
 ## `confirm`
 
-Require exactly one `--aad` or `--email` argument. Resolve it through:
+Require exactly one `--aad` or `--email` argument. Resolve an AAD ID through:
 
-`/users/{exact_id_or_email}?$select=id,displayName,mail,userPrincipalName`
+`/users/{exact_aad_id}?$select=id,displayName,mail,userPrincipalName`
+
+Resolve email through the same exact `mail OR userPrincipalName` filter used by
+backfill. Zero or multiple results fail closed.
 
 Read the task fingerprint from `plan_batch`, then call
 `person_backfill.confirm_candidate(...)` with the exact profile, exact
-`lookup_kind`, and exact `query_value` used for the MCP request. A stale task,
-mismatched response, or ambiguous/missing exact identifier fails closed.
+`lookup_kind`, exact `query_value` used for the selected candidate's MCP request,
+and `confirmed_alias` set to the stale historical address being replaced. A
+stale task, mismatched response, or ambiguous/missing exact identifier fails
+closed. The historical address is stored as a user-confirmed alias with
+provenance; it never becomes the canonical primary email.
+When confirming a row from `person_backfill_deferred`, pass its `deferred_id`;
+the service verifies the task slot/fingerprint and marks that row resolved.
