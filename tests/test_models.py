@@ -46,6 +46,42 @@ class TestModels(unittest.TestCase):
         self.assertIsNotNone(task["updated_at"])
         self.assertIsNotNone(task["id"])
 
+    def test_create_task_derives_confirmed_identity_links(self):
+        from src.models import create_task
+
+        task = create_task(
+            title="Known person",
+            key_people='[{"name":"Alex Example","email":"alex@example.test"}]',
+            source_id="chat::sender@example.test::topic",
+        )
+        conn = self.db_module.get_connection()
+        links = conn.execute(
+            "SELECT role FROM task_person WHERE task_id=? ORDER BY role",
+            (task["id"],),
+        ).fetchall()
+        conn.close()
+        self.assertEqual([row["role"] for row in links], ["key_people", "sender"])
+
+    def test_update_task_identity_failure_rolls_back_task_and_links(self):
+        from unittest import mock
+        import src.models as models
+
+        task = models.create_task(title="Original")
+        with mock.patch.object(
+            models._person_identity,
+            "derive_task_persons",
+            side_effect=RuntimeError("identity failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "identity failure"):
+                models.update_task(
+                    task["id"],
+                    title="Changed",
+                    key_people='[{"name":"Alex","email":"alex@example.test"}]',
+                )
+        current = models.get_task(task["id"])
+        self.assertEqual(current["title"], "Original")
+        self.assertIsNone(current["key_people"])
+
     def test_list_tasks(self):
         from src.models import create_task, list_tasks
         create_task(title="Task A", status="active")

@@ -6,6 +6,130 @@ from pathlib import Path
 DB_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DB_DIR / "claudetodo.db"
 
+_STATUS_CHECK = (
+    "CHECK (status IN ('suggested','active','in_progress','waiting','snoozed',"
+    "'completed','dismissed','deleted'))"
+)
+_PARSE_STATUS_CHECK = (
+    "CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error'))"
+)
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _value(row, key: str, index: int):
+    return row[key] if isinstance(row, sqlite3.Row) else row[index]
+
+
+def _task_column_definition(row) -> str:
+    name = _value(row, "name", 1)
+    quoted = _quote_identifier(name)
+    if name == "id":
+        return f"{quoted} INTEGER PRIMARY KEY AUTOINCREMENT"
+    if name == "status":
+        return f"{quoted} TEXT NOT NULL DEFAULT 'active' {_STATUS_CHECK}"
+    if name == "parse_status":
+        return f"{quoted} TEXT NOT NULL DEFAULT 'parsed' {_PARSE_STATUS_CHECK}"
+    if name == "priority":
+        return f"{quoted} INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5)"
+    if name == "source_type":
+        return (
+            f"{quoted} TEXT DEFAULT 'manual' "
+            "CHECK (source_type IN ('email','meeting','chat','manual'))"
+        )
+    if name == "action_type":
+        return (
+            f"{quoted} TEXT DEFAULT 'general' CHECK (action_type IN "
+            "('schedule-meeting','respond-email','review-document','follow-up',"
+            "'awaiting-response','prepare','general'))"
+        )
+
+    definition = f"{quoted} {_value(row, 'type', 2) or 'TEXT'}"
+    if _value(row, "notnull", 3):
+        definition += " NOT NULL"
+    default = _value(row, "dflt_value", 4)
+    if default is not None:
+        definition += f" DEFAULT {default}"
+    if _value(row, "pk", 5):
+        definition += " PRIMARY KEY"
+    return definition
+
+
+def _tables_referencing_tasks(conn: sqlite3.Connection) -> dict[str, int]:
+    counts = {}
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    for table in tables:
+        name = _value(table, "name", 0)
+        foreign_keys = conn.execute(
+            f"PRAGMA foreign_key_list({_quote_identifier(name)})"
+        ).fetchall()
+        if any(_value(key, "table", 2) == "tasks" for key in foreign_keys):
+            counts[name] = conn.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(name)}"
+            ).fetchone()[0]
+    return counts
+
+
+def _rebuild_tasks_constraints(conn: sqlite3.Connection) -> None:
+    """Widen task CHECK constraints without dropping columns or child rows."""
+    columns = conn.execute("PRAGMA table_info(tasks)").fetchall()
+    names = [_value(row, "name", 1) for row in columns]
+    task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    child_counts = _tables_referencing_tasks(conn)
+    indexes = [
+        _value(row, "sql", 0)
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='tasks' AND sql IS NOT NULL"
+        ).fetchall()
+    ]
+    triggers = [
+        _value(row, "sql", 0)
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='trigger' AND tbl_name='tasks' AND sql IS NOT NULL"
+        ).fetchall()
+    ]
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        definitions = ", ".join(
+            _task_column_definition(row) for row in columns
+        )
+        conn.execute(f"CREATE TABLE tasks_new ({definitions})")
+        quoted_names = ", ".join(_quote_identifier(name) for name in names)
+        conn.execute(
+            f"INSERT INTO tasks_new ({quoted_names}) "
+            f"SELECT {quoted_names} FROM tasks"
+        )
+        conn.execute("DROP TABLE tasks")
+        conn.execute("ALTER TABLE tasks_new RENAME TO tasks")
+        for statement in indexes + triggers:
+            conn.execute(statement)
+
+        if conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] != task_count:
+            raise RuntimeError("Task migration row-count mismatch")
+        for table, expected in child_counts.items():
+            actual = conn.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table)}"
+            ).fetchone()[0]
+            if actual != expected:
+                raise RuntimeError(f"Task migration changed {table} row count")
+        if conn.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("Task migration failed foreign-key validation")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
 
 def get_connection() -> sqlite3.Connection:
     """Get a SQLite connection with WAL mode and foreign keys enabled."""
@@ -38,146 +162,25 @@ def _migrate(conn: sqlite3.Connection):
     if "waiting_activity" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN waiting_activity TEXT")
         conn.commit()
+    for column, definition in (
+        ("source_date", "TEXT"),
+        ("error_message", "TEXT"),
+        ("cowork_prompt", "TEXT"),
+        ("is_quick_hit", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in cols:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+            conn.commit()
+            cols.append(column)
 
-    # Migrate tasks table to support 'snoozed' status
+    # SQLite cannot widen CHECK constraints in place. Rebuild once, preserving
+    # every existing/unknown column and all child rows.
     task_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
     ).fetchone()
-    if task_sql and "'snoozed'" not in (task_sql[0] or ""):
-        conn.executescript("""
-            CREATE TABLE tasks_new (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                title           TEXT NOT NULL,
-                description     TEXT DEFAULT '',
-                status          TEXT NOT NULL DEFAULT 'active'
-                                    CHECK (status IN ('suggested','active','in_progress','waiting','snoozed','completed','dismissed','deleted')),
-                snoozed_until   TEXT,
-                parse_status    TEXT NOT NULL DEFAULT 'parsed'
-                                    CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error')),
-                raw_input       TEXT,
-                error_message   TEXT,
-                priority        INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
-                due_date        TEXT,
-                committed_date  TEXT,
-                source_type     TEXT DEFAULT 'manual'
-                                    CHECK (source_type IN ('email','meeting','chat','manual')),
-                source_id       TEXT,
-                source_url      TEXT,
-                source_snippet  TEXT,
-                coaching_text   TEXT,
-                action_type     TEXT DEFAULT 'general'
-                                    CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
-                skill_output    TEXT,
-                key_people      TEXT,
-                related_meeting TEXT,
-                user_notes      TEXT DEFAULT '',
-                waiting_activity TEXT,
-                suggestion_refreshed_at TEXT,
-                cowork_revision INTEGER NOT NULL DEFAULT 0,
-                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-                updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-            );
-            INSERT INTO tasks_new (id, title, description, status, snoozed_until, parse_status,
-                raw_input, priority, due_date, committed_date, source_type, source_id,
-                source_url, source_snippet, coaching_text, action_type, skill_output,
-                key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
-                cowork_revision,
-                created_at, updated_at)
-            SELECT id, title, description, status, snoozed_until, parse_status,
-                raw_input, priority, due_date, committed_date, source_type, source_id,
-                source_url, source_snippet, coaching_text, action_type, skill_output,
-                key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
-                cowork_revision,
-                created_at, updated_at
-            FROM tasks;
-            DROP TABLE tasks;
-            ALTER TABLE tasks_new RENAME TO tasks;
-        """)
-        # Recreate indexes after table swap
-        conn.executescript("""
-            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-            CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
-            CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
-        """)
-
-    # Migrate tasks table to support 'error' parse_status and error_message column
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
-    if "error_message" not in cols:
-        task_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
-        ).fetchone()
-        if task_sql and "'error'" not in (task_sql[0] or ""):
-            # Need table swap to update CHECK constraint
-            conn.executescript("""
-                CREATE TABLE tasks_new (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title           TEXT NOT NULL,
-                    description     TEXT DEFAULT '',
-                    status          TEXT NOT NULL DEFAULT 'active'
-                                        CHECK (status IN ('suggested','active','in_progress','waiting','snoozed','completed','dismissed','deleted')),
-                    snoozed_until   TEXT,
-                    parse_status    TEXT NOT NULL DEFAULT 'parsed'
-                                        CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error')),
-                    raw_input       TEXT,
-                    error_message   TEXT,
-                    priority        INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
-                    due_date        TEXT,
-                    committed_date  TEXT,
-                    source_type     TEXT DEFAULT 'manual'
-                                        CHECK (source_type IN ('email','meeting','chat','manual')),
-                    source_id       TEXT,
-                    source_url      TEXT,
-                    source_snippet  TEXT,
-                    coaching_text   TEXT,
-                    action_type     TEXT DEFAULT 'general'
-                                        CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
-                    skill_output    TEXT,
-                    key_people      TEXT,
-                    related_meeting TEXT,
-                    user_notes      TEXT DEFAULT '',
-                    waiting_activity TEXT,
-                    suggestion_refreshed_at TEXT,
-                    cowork_revision INTEGER NOT NULL DEFAULT 0,
-                    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-                    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-                );
-                INSERT INTO tasks_new (id, title, description, status, snoozed_until, parse_status,
-                    raw_input, priority, due_date, committed_date, source_type, source_id,
-                    source_url, source_snippet, coaching_text, action_type, skill_output,
-                    key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
-                    cowork_revision,
-                    created_at, updated_at)
-                SELECT id, title, description, status, snoozed_until, parse_status,
-                    raw_input, priority, due_date, committed_date, source_type, source_id,
-                    source_url, source_snippet, coaching_text, action_type, skill_output,
-                    key_people, related_meeting, user_notes, waiting_activity, suggestion_refreshed_at,
-                    cowork_revision,
-                    created_at, updated_at
-                FROM tasks;
-                DROP TABLE tasks;
-                ALTER TABLE tasks_new RENAME TO tasks;
-            """)
-            conn.executescript("""
-                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-                CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
-                CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
-            """)
-        else:
-            # CHECK constraint already has 'error', just add the column
-            conn.execute("ALTER TABLE tasks ADD COLUMN error_message TEXT")
-            conn.commit()
-
-    # Add cowork_prompt column if missing
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
-    if "cowork_prompt" not in cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN cowork_prompt TEXT")
-        conn.commit()
-
-    # Add is_quick_hit column if missing
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
-    if "is_quick_hit" not in cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN is_quick_hit INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
+    sql = (task_sql[0] or "") if task_sql else ""
+    if "'snoozed'" not in sql or "'error'" not in sql:
+        _rebuild_tasks_constraints(conn)
 
     action_cols = [
         r[1] for r in conn.execute("PRAGMA table_info(task_actions)").fetchall()
@@ -285,6 +288,59 @@ def _migrate(conn: sqlite3.Connection):
             DROP TABLE sync_log;
             ALTER TABLE sync_log_new RENAME TO sync_log;
         """)
+
+    _migrate_identity_schema(conn)
+
+
+def _add_optional_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: dict[str, str],
+) -> None:
+    existing = {
+        _value(row, "name", 1)
+        for row in conn.execute(
+            f"PRAGMA table_info({_quote_identifier(table)})"
+        ).fetchall()
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(
+                f"ALTER TABLE {_quote_identifier(table)} "
+                f"ADD COLUMN {_quote_identifier(name)} {definition}"
+            )
+
+
+def _migrate_identity_schema(conn: sqlite3.Connection) -> None:
+    provenance = {
+        "evidence_kind": "TEXT",
+        "evidence_ref": "TEXT",
+        "observed_at": "TEXT",
+        "confirmation_mode": "TEXT",
+        "confirmed_at": "TEXT",
+        "lookup_kind": "TEXT",
+    }
+    _add_optional_columns(conn, "person_alias", provenance)
+    _add_optional_columns(conn, "task_person", provenance)
+
+    marker = conn.execute(
+        "SELECT id FROM person_backfill_state WHERE id=1"
+    ).fetchone()
+    if not marker:
+        existing_identity = sum(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("person", "person_alias", "task_person")
+        )
+        status = "legacy_untracked" if existing_identity else "not_started"
+        conn.execute(
+            """
+            INSERT INTO person_backfill_state (
+                id, status, last_task_id, revision, updated_at
+            ) VALUES (1, ?, 0, 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            (status,),
+        )
+    conn.commit()
 
 
 def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
@@ -408,6 +464,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                         CHECK (source_type IN ('email','meeting','chat','manual')),
     source_id       TEXT,
     source_url      TEXT,
+    source_date     TEXT,
     source_snippet  TEXT,
     coaching_text   TEXT,
     action_type     TEXT DEFAULT 'general'
@@ -498,10 +555,80 @@ CREATE TABLE IF NOT EXISTS task_actions (
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
+CREATE TABLE IF NOT EXISTS person (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name        TEXT NOT NULL,
+    primary_email       TEXT,
+    aad_object_id       TEXT UNIQUE,
+    canonical_person_id INTEGER REFERENCES person(id),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS person_alias (
+    person_id        INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    alias_kind       TEXT NOT NULL
+                         CHECK (alias_kind IN ('aad','email','upn','name')),
+    alias_value      TEXT NOT NULL,
+    confidence       TEXT NOT NULL
+                         CHECK (confidence IN ('aad','email','user','inferred','name')),
+    evidence_kind    TEXT,
+    evidence_ref     TEXT,
+    observed_at      TEXT,
+    confirmation_mode TEXT,
+    confirmed_at     TEXT,
+    lookup_kind      TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (alias_kind, alias_value, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS person_merge_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    losing_id    INTEGER NOT NULL REFERENCES person(id),
+    winning_id   INTEGER NOT NULL REFERENCES person(id),
+    reason       TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    undone_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_person (
+    task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    person_id        INTEGER NOT NULL REFERENCES person(id),
+    role             TEXT NOT NULL
+                         CHECK (role IN ('sender','key_people','attendee')),
+    evidence_kind    TEXT,
+    evidence_ref     TEXT,
+    observed_at      TEXT,
+    confirmation_mode TEXT,
+    confirmed_at     TEXT,
+    lookup_kind      TEXT,
+    PRIMARY KEY (task_id, person_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS person_backfill_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    status       TEXT NOT NULL
+                     CHECK (status IN (
+                         'not_started','legacy_untracked','in_progress','complete'
+                     )),
+    last_task_id INTEGER NOT NULL DEFAULT 0 CHECK (last_task_id >= 0),
+    revision     INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    completed_at TEXT,
+    updated_at   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parse_status ON tasks(parse_status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_task_context_task_id ON task_context(task_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_next ON refresh_schedule(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_task_actions_task_id ON task_actions(task_id);
+CREATE INDEX IF NOT EXISTS idx_person_email ON person(primary_email);
+CREATE INDEX IF NOT EXISTS idx_person_canonical ON person(canonical_person_id);
+CREATE INDEX IF NOT EXISTS idx_person_alias_value ON person_alias(alias_value);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_alias_exact_identity
+    ON person_alias(alias_kind, alias_value)
+    WHERE alias_kind IN ('aad','email','upn')
+      AND confidence IN ('aad','email','user');
+CREATE INDEX IF NOT EXISTS idx_task_person_person ON task_person(person_id);
 """

@@ -33,7 +33,11 @@ class TestDatabaseSchema(unittest.TestCase):
 
     def test_init_db_creates_all_tables(self):
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log", "task_actions"}
+        expected = {
+            "tasks", "task_context", "refresh_schedule", "sync_log",
+            "task_actions", "person", "person_alias", "person_merge_history",
+            "task_person", "person_backfill_state",
+        }
         self.assertEqual(tables, expected)
 
     def test_tasks_table_columns(self):
@@ -42,7 +46,7 @@ class TestDatabaseSchema(unittest.TestCase):
         expected = {
             "id", "title", "description", "status", "parse_status",
             "raw_input", "priority", "due_date", "committed_date",
-            "source_type", "source_id", "source_url", "source_snippet",
+            "source_type", "source_id", "source_url", "source_date", "source_snippet",
             "coaching_text", "key_people", "related_meeting", "user_notes",
             "suggestion_refreshed_at", "created_at", "updated_at",
             "action_type", "is_quick_hit", "error_message", "cowork_prompt",
@@ -122,7 +126,11 @@ class TestDatabaseSchema(unittest.TestCase):
         # Running init_db a second time should not raise
         init_db(self.conn)
         tables = self._get_tables()
-        expected = {"tasks", "task_context", "refresh_schedule", "sync_log", "task_actions"}
+        expected = {
+            "tasks", "task_context", "refresh_schedule", "sync_log",
+            "task_actions", "person", "person_alias", "person_merge_history",
+            "task_person", "person_backfill_state",
+        }
         self.assertEqual(tables, expected)
 
 

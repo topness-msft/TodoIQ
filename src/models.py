@@ -4,6 +4,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from .db import get_connection, init_db
+from .services import person_identity as _person_identity
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def create_task(
     source_type: str = "manual",
     source_id: str | None = None,
     source_url: str | None = None,
+    source_date: str | None = None,
     source_snippet: str | None = None,
     coaching_text: str | None = None,
     action_type: str = "general",
@@ -166,17 +168,23 @@ def create_task(
             """INSERT INTO tasks
                (title, description, status, parse_status, raw_input, priority,
                 due_date, committed_date, source_type, source_id, source_url,
-                source_snippet, coaching_text, action_type, skill_output, key_people,
+                source_date, source_snippet, coaching_text, action_type, skill_output, key_people,
                 related_meeting, user_notes, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 title, description, status, parse_status, raw_input, priority,
                 due_date, committed_date, source_type, source_id, source_url,
-                source_snippet, coaching_text, action_type, skill_output, key_people,
+                source_date, source_snippet, coaching_text, action_type, skill_output, key_people,
                 related_meeting, user_notes, now, now,
             ),
         )
         task_id = cursor.lastrowid
+        _person_identity.derive_task_persons(
+            conn,
+            task_id,
+            key_people_json=key_people,
+            source_id=source_id,
+        )
         conn.commit()
         return get_task(task_id, conn)
     finally:
@@ -249,8 +257,22 @@ def update_task(task_id: int, **fields) -> dict | None:
     conn = get_connection()
     try:
         conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+        if {"key_people", "source_id"} & set(fields):
+            row = conn.execute(
+                "SELECT key_people,source_id FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row:
+                _person_identity.derive_task_persons(
+                    conn,
+                    task_id,
+                    key_people_json=row["key_people"],
+                    source_id=row["source_id"],
+                )
         conn.commit()
         return get_task(task_id, conn)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -297,6 +319,17 @@ def update_task_for_action_type(task_id: int, **fields) -> dict | None:
             f"UPDATE tasks SET {set_clause} WHERE id = ?",
             (*fields.values(), task_id),
         )
+        if {"key_people", "source_id"} & set(fields):
+            row = conn.execute(
+                "SELECT key_people,source_id FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row:
+                _person_identity.derive_task_persons(
+                    conn,
+                    task_id,
+                    key_people_json=row["key_people"],
+                    source_id=row["source_id"],
+                )
         conn.commit()
         updated = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
