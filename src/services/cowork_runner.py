@@ -37,6 +37,7 @@ from .runtime_mode import (
     DEMO_DISABLED_MESSAGE,
     cowork_execute_enabled,
     cowork_session_enabled,
+    demo_schedule_choices_enabled,
 )
 
 __all__ = [
@@ -3130,6 +3131,38 @@ def certify_schedule_interaction(
     return certified
 
 
+def _demo_schedule_result(interaction, attendees):
+    """Build demo-only slot evidence after exact FindMeetingTimes succeeds."""
+    if not demo_schedule_choices_enabled() or not isinstance(interaction, dict):
+        return None
+    questions = interaction.get("questions")
+    if not isinstance(questions, list) or len(questions) != 1:
+        return None
+    options = questions[0].get("options") or []
+    if len(options) != 3:
+        return None
+    slots = []
+    for option in options:
+        match = _AVAILABILITY_MARKER_RE.search(
+            str(option.get("description") or "")
+        )
+        if not match:
+            return None
+        try:
+            availability = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        slots.append({
+            "value": str(option.get("value") or "").strip(),
+            "availability": availability,
+        })
+    return {
+        "attendees": _attendee_emails(attendees),
+        "working_hours_checked": True,
+        "slots": slots,
+    }
+
+
 def schedule_text_only_interaction(interaction, attendees):
     fallback = json.loads(json.dumps(interaction))
     evidence = fallback.get("schedule_evidence")
@@ -4086,8 +4119,14 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         if not interaction:
                             continue
                         if schedule_people:
+                            trusted_schedule_result = _demo_schedule_result(
+                                interaction, schedule_people
+                            )
                             certified = certify_schedule_interaction(
-                                interaction, events, schedule_people
+                                interaction,
+                                events,
+                                schedule_people,
+                                trusted_schedule_result,
                             )
                             if certified:
                                 interaction = certified

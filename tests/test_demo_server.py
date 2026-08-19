@@ -149,14 +149,17 @@ def test_live_demo_capabilities_are_independently_allowlisted(monkeypatch):
     assert not runtime_mode.todo_parse_enabled()
     assert not runtime_mode.cowork_session_enabled()
     assert not runtime_mode.cowork_execute_enabled()
+    assert not runtime_mode.demo_schedule_choices_enabled()
     assert not runtime_mode.copilot_command_enabled("/todo-refresh", "sync")
 
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_TODO_PARSE", "1")
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_SESSION", "1")
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_EXECUTE", "1")
+    monkeypatch.setenv("RIVETER_DEMO_TRUST_SCHEDULE_CHOICES", "1")
     assert runtime_mode.todo_parse_enabled()
     assert runtime_mode.cowork_session_enabled()
     assert runtime_mode.cowork_execute_enabled()
+    assert runtime_mode.demo_schedule_choices_enabled()
     assert runtime_mode.copilot_command_enabled("/todo-parse", "parse")
     assert not runtime_mode.copilot_command_enabled("/todo-refresh", "parse")
     assert not runtime_mode.copilot_command_enabled("/todo-parse", "sync")
@@ -234,6 +237,65 @@ def test_live_demo_allows_cowork_entrypoints_with_fake_transports(
         assert cowork_runner.answer_interaction(
             "demo:user:answer", "invocation", {"0": "answer"}
         ) is True
+
+
+def test_schedule_choice_trust_is_demo_only(monkeypatch):
+    attendees = [
+        {"name": "Bobby Chang", "email": "bobby.chang@microsoft.com"},
+        {"name": "Em D'Arcy", "email": "emdarcy@microsoft.com"},
+    ]
+    marker = (
+        '[avail:{"bobby.chang@microsoft.com":"free",'
+        '"emdarcy@microsoft.com":"free"}]'
+    )
+    interaction = {
+        "invocation_id": "demo-schedule",
+        "questions": [{
+            "id": "0",
+            "header": "Pick a time",
+            "question": "Which verified time works?",
+            "multi_select": False,
+            "options": [
+                {
+                    "value": value,
+                    "label": value,
+                    "description": marker,
+                    "image_url": "",
+                }
+                for value in ("Wed 1 PM ET", "Thu 10 AM ET", "Fri 2 PM ET")
+            ],
+        }],
+    }
+    events = [
+        ("ts", {
+            "tid": "tool-1",
+            "tn": "mcp__outlook_calendar__FindMeetingTimes",
+            "inp": json.dumps({
+                "attendees": [
+                    "bobby.chang@microsoft.com",
+                    "emdarcy@microsoft.com",
+                ]
+            }),
+        }),
+        ("tx", {
+            "tid": "tool-1",
+            "tn": "mcp__outlook_calendar__FindMeetingTimes",
+            "ok": True,
+        }),
+    ]
+    assert cowork_runner._demo_schedule_result(interaction, attendees) is None
+
+    monkeypatch.setenv("RIVETER_DEMO_MODE", "1")
+    monkeypatch.setenv("RIVETER_DEMO_TRUST_SCHEDULE_CHOICES", "1")
+    trusted = cowork_runner._demo_schedule_result(interaction, attendees)
+    certified = cowork_runner.certify_schedule_interaction(
+        interaction, events, attendees, trusted
+    )
+    assert certified["schedule_evidence"]["valid"] is True
+    assert certified["schedule_evidence"]["attendees"] == [
+        "bobby.chang@microsoft.com",
+        "emdarcy@microsoft.com",
+    ]
 
 
 def test_demo_server_routes_are_live_and_sync_skills_stay_forbidden(tmp_path):

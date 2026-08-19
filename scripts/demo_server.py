@@ -29,6 +29,7 @@ def _configure(db_path=DB_PATH):
     os.environ["RIVETER_DEMO_ALLOW_TODO_PARSE"] = "1"
     os.environ["RIVETER_DEMO_ALLOW_COWORK_SESSION"] = "1"
     os.environ["RIVETER_DEMO_ALLOW_COWORK_EXECUTE"] = "1"
+    os.environ["RIVETER_DEMO_TRUST_SCHEDULE_CHOICES"] = "1"
     os.environ["TODONESS_DB_PATH"] = str(db_path)
     os.environ["TODONESS_SETTINGS_PATH"] = str(SETTINGS_PATH)
     os.environ["TODONESS_LOG_FILE"] = str(LOG_PATH)

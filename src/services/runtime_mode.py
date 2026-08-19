@@ -23,6 +23,10 @@ def cowork_execute_enabled() -> bool:
     return not demo_mode() or _demo_flag("RIVETER_DEMO_ALLOW_COWORK_EXECUTE")
 
 
+def demo_schedule_choices_enabled() -> bool:
+    return demo_mode() and _demo_flag("RIVETER_DEMO_TRUST_SCHEDULE_CHOICES")
+
+
 def copilot_command_enabled(command: str, label: str) -> bool:
     if not demo_mode():
         return True
