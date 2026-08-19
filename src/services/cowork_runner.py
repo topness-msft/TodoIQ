@@ -33,12 +33,19 @@ import uuid
 import zlib
 from urllib.parse import unquote, quote, urlparse
 
+from .runtime_mode import DEMO_DISABLED_MESSAGE, external_integrations_enabled
+
 __all__ = [
     "parse_source_url",
     "schedule_attendees",
     "compose_prompt",
     "parse_cowork_output",
 ]
+
+
+def _require_external_integrations():
+    if not external_integrations_enabled():
+        raise RuntimeError(DEMO_DISABLED_MESSAGE)
 
 _MESSAGE_RE = re.compile(r"/l/message/(?P<conv>[^/?#]+)(?:/(?P<msg>[^/?#]+))?")
 _CHAT_RE = re.compile(r"/l/chat/(?P<conv>[^/?#]+)/conversations(?:[/?#]|$)")
@@ -1401,6 +1408,8 @@ def resolve_cowork_island():
     Prefers the routing cache file over the CLI probe: same answer, no Python
     import, so the API transport keeps working if ``cowork_cli`` breaks.
     """
+    if not external_integrations_enabled():
+        return None
     global _island_probe_attempted, _cached_island_url
     with _island_probe_lock:
         if _island_probe_attempted:
@@ -1560,6 +1569,8 @@ def warm_barrier_precheck() -> None:
     pay the ~5.5s cold cost. Failure is silently ignored: an unwarmed cache
     only means the next caller computes it.
     """
+    if not external_integrations_enabled():
+        return
     try:
         tenant_barrier_precheck(use_cache=True)
     except Exception:  # noqa: BLE001
@@ -1992,6 +2003,7 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
     starting up. This is turn 1 regardless: the id says where to address the
     run, not that a conversation is being resumed.
     """
+    _require_external_integrations()
     label = preview_label(task_id)
 
     with _runs_lock:
@@ -2097,6 +2109,7 @@ def continue_preview(
     at 27s to 6 minutes and 69 to 355 credits. A follow-up turn keeps the
     conversation's context and completed in about 30s in a live check.
     """
+    _require_external_integrations()
     if not conversation_id:
         raise ValueError("A conversation id is required to continue a preview.")
     prompt = compose_refine_prompt(
@@ -2150,6 +2163,7 @@ def start_execution(
     log_dir=None,
 ) -> str:
     """Run one explicitly approved, unbarriered API follow-up turn."""
+    _require_external_integrations()
     if not api_transport_enabled():
         raise RuntimeError("Direct actions require the Cowork API transport.")
     if not conversation_id:
@@ -2210,6 +2224,7 @@ def answer_interaction(conversation_id, invocation_id, answers):
     keys are stringified question indexes and multi-select values are joined
     with newlines.
     """
+    _require_external_integrations()
     if not conversation_id:
         raise ValueError("A conversation id is required to answer Cowork.")
     if not invocation_id:
@@ -2504,6 +2519,8 @@ def handoff_status(conversation_id, _get=None):
     Fails soft on every path. A throttled endpoint, an expired token or a shape
     change must degrade to today's behaviour rather than break the card.
     """
+    if not external_integrations_enabled():
+        return None
     if not conversation_id:
         return None
 
@@ -3630,6 +3647,7 @@ def read_blocked_question(conversation_id):
     snapshot before live events. It is answer-aware and contains at most one
     question, avoiding historical ``aq``/``aa`` reconciliation entirely.
     """
+    _require_external_integrations()
     if not conversation_id:
         return None
     pending_question = None
@@ -4265,7 +4283,7 @@ def cancel_run(conversation_id, _post=None) -> bool:
     Never raises. A cancel that cannot be delivered reports False so the caller
     can say so, rather than leaving the card claiming it stopped something.
     """
-    if not conversation_id:
+    if not external_integrations_enabled() or not conversation_id:
         return False
     post = _post or _api_post
     try:

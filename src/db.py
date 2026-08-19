@@ -1,10 +1,12 @@
 """SQLite database initialization and connection management for TodoNess."""
 
+import os
 import sqlite3
 from pathlib import Path
 
-DB_DIR = Path(__file__).resolve().parent.parent / "data"
-DB_PATH = DB_DIR / "claudetodo.db"
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "claudetodo.db"
+DB_PATH = Path(os.environ.get("TODONESS_DB_PATH", _DEFAULT_DB_PATH)).resolve()
+DB_DIR = DB_PATH.parent
 
 _STATUS_CHECK = (
     "CHECK (status IN ('suggested','active','in_progress','waiting','snoozed',"

@@ -16,16 +16,19 @@ if PROJECT_ROOT not in sys.path:
 
 
 def ensure_dependencies():
-    """Install pystray and Pillow if not already available."""
+    """Install the web runtime and tray dependencies when missing."""
     missing = []
-    try:
-        import pystray  # noqa: F401
-    except ImportError:
-        missing.append("pystray")
-    try:
-        from PIL import Image  # noqa: F401
-    except ImportError:
-        missing.append("Pillow")
+    packages = (
+        ("tornado", "tornado"),
+        ("jinja2", "jinja2"),
+        ("pystray", "pystray"),
+        ("PIL", "Pillow"),
+    )
+    for module_name, package_name in packages:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_name)
 
     if missing:
         print(f"Installing missing dependencies: {', '.join(missing)}")

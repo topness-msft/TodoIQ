@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="app">
+<div class="app" data-demo-mode="{{ 'true' if demo_mode else 'false' }}">
     <!-- Top Bar -->
     <header class="top-bar">
         <div class="top-bar-left">

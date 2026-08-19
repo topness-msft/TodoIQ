@@ -131,7 +131,11 @@ function setConnectionStatus(state) {
     el.className = 'connection-indicator ' + state;
     var label = el.querySelector('.connection-label');
     if (label) {
-        var labels = { connected: 'Live', connecting: 'Connecting', disconnected: 'Offline' };
+        var app = document.querySelector('.app');
+        var isDemo = app && app.getAttribute('data-demo-mode') === 'true';
+        var labels = isDemo
+            ? { connected: 'Demo', connecting: 'Demo', disconnected: 'Demo offline' }
+            : { connected: 'Live', connecting: 'Connecting', disconnected: 'Offline' };
         label.textContent = labels[state] || state;
     }
 }

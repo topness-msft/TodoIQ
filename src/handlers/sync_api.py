@@ -13,6 +13,7 @@ import tornado.web
 from ..db import get_connection
 from ..models import get_last_sync
 from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
+from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ class SyncStatusHandler(tornado.web.RequestHandler):
         }))
 
     def post(self):
+        if demo_mode():
+            self.set_status(403)
+            self.write(json.dumps({"error": DEMO_DISABLED_MESSAGE}))
+            return
         try:
             body = json.loads(self.request.body) if self.request.body else {}
         except (json.JSONDecodeError, TypeError):

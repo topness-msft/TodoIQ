@@ -9,6 +9,7 @@ from ..models import (
     snooze_task, transition_task, get_task, update_task,
 )
 from ..services.claude_runner import run_copilot
+from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 from .ws import broadcast
 
 PARSE_BASE_TIMEOUT = 300  # 5 min base
@@ -115,6 +116,10 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         self.set_header("Content-Type", "application/json")
 
     def post(self, task_id):
+        if demo_mode():
+            self.set_status(403)
+            self.write(json.dumps({"error": DEMO_DISABLED_MESSAGE}))
+            return
         tid = int(task_id)
         task = get_task(tid)
         if not task:
@@ -140,6 +145,10 @@ class TaskSkillHandler(tornado.web.RequestHandler):
         self.set_header("Content-Type", "application/json")
 
     def post(self, task_id):
+        if demo_mode():
+            self.set_status(403)
+            self.write(json.dumps({"error": DEMO_DISABLED_MESSAGE}))
+            return
         try:
             body = json.loads(self.request.body)
         except (json.JSONDecodeError, TypeError):

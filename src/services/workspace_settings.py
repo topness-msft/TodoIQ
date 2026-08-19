@@ -6,11 +6,14 @@ resolved root; ``Path.is_symlink()`` alone does not detect every NTFS junction.
 """
 
 import json
+import os
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-SETTINGS_PATH = PROJECT_ROOT / "data" / "settings.json"
+SETTINGS_PATH = Path(
+    os.environ.get("TODONESS_SETTINGS_PATH", PROJECT_ROOT / "data" / "settings.json")
+).resolve()
 
 
 def validate_workspace_root(value: str | None) -> Path | None:

@@ -14,6 +14,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..db import DB_PATH
+from .runtime_mode import DEMO_DISABLED_MESSAGE, external_integrations_enabled
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -67,7 +70,7 @@ def _set_task_error(label: str, error_message: str) -> None:
     For 'parse' labels: finds tasks in 'parsing' status and marks them as error.
     For 'skill:{name}:{id}' labels: writes error_message but does NOT change parse_status.
     """
-    db_path = PROJECT_ROOT / "data" / "claudetodo.db"
+    db_path = DB_PATH
     if not db_path.exists():
         return
 
@@ -133,7 +136,7 @@ def _skill_persist(label: str) -> None:
     except ValueError:
         return
 
-    db_path = PROJECT_ROOT / "data" / "claudetodo.db"
+    db_path = DB_PATH
     if not db_path.exists():
         return
 
@@ -253,6 +256,8 @@ def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
 
     Returns {"ok": True/False, "message": ...}.
     """
+    if not external_integrations_enabled():
+        return {"ok": False, "message": DEMO_DISABLED_MESSAGE}
     if is_running(label):
         return {"ok": False, "message": f"'{label}' already running."}
 

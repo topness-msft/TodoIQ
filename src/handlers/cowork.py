@@ -71,6 +71,7 @@ from ..services.cowork_runner import (
     start_execution,
 )
 from ..services.workspace_settings import api_transport_enabled
+from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 
 # Test seams. Production leaves both None so the runner uses its own defaults.
 SPAWN = None
@@ -464,6 +465,8 @@ def _enrich(action: dict) -> dict:
         # conversation cache can still carry the preview's waiting state.
         action["waiting_on_user"] = False
         action["interaction_request"] = None
+    elif action.get("state") == "previewing" and demo_mode():
+        action["waiting_on_user"] = bool(action.get("interaction_request"))
     elif action.get("state") == "previewing" and action.get("conversation_id"):
         try:
             status = (HANDOFF_FN or handoff_status)(action["conversation_id"])
@@ -971,6 +974,8 @@ class CoworkHandler(tornado.web.RequestHandler):
     # ── POST ──
 
     def post(self, task_id):
+        if demo_mode():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         task = get_task(tid)
         if not task:
@@ -1159,6 +1164,8 @@ class CoworkHandler(tornado.web.RequestHandler):
         the capability the API transport adds, verified live: the run stopped
         3.0s after the request.
         """
+        if demo_mode():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         action = get_latest_task_action(tid)
         if not action:
@@ -1226,6 +1233,8 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     def post(self, task_id):
+        if demo_mode():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         if self.request.headers.get("X-Riveter-Action") != "confirm":
             return self._fail(403, "Direct actions require Riveter confirmation.")
@@ -1369,6 +1378,8 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     def post(self, task_id):
+        if demo_mode():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         task = get_task(tid)
         if not task:
@@ -1460,6 +1471,8 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     async def post(self, task_id):
+        if demo_mode():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         action = get_latest_task_action(tid)
         if not action:

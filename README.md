@@ -7,19 +7,25 @@ TodoNess scans your Teams messages, meetings, and flagged emails to surface acti
 ## Prerequisites
 
 - Python 3.11+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- WorkIQ MCP configured in Claude Code settings
+- GitHub Copilot CLI installed and authenticated
+- WorkIQ MCP configured for Microsoft 365 task discovery
+- Cowork authenticated for drafting and approved actions
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies and register Riveter to start at logon
+python scripts/install_startup.py
 
-# Start the dashboard server
-python -m src.app
-
+# The installer can start Riveter immediately.
 # Open http://localhost:8766
+```
+
+For a foreground development run instead:
+
+```bash
+python -m pip install -r requirements.txt
+python -m src.app 8766
 ```
 
 ## Usage
@@ -139,6 +145,29 @@ The tray icon provides:
 - **Stop & Exit** to shut down
 
 Logs are written to `data/todoness.log`. Requires `pystray` and `Pillow` (installed automatically by the install script).
+
+## Safe demo instance
+
+Run a separate, fictional demo on port 8776. It uses only `data/demo/` and
+hard-disables WorkIQ, Copilot, Cowork, and Microsoft 365 actions.
+
+```bash
+# Create/reset the fictional data (server must be stopped)
+python scripts/demo_server.py reset
+
+# Start persistently in the background
+python scripts/demo_server.py start
+
+# Open http://localhost:8776
+
+# Check or stop it
+python scripts/demo_server.py status
+python scripts/demo_server.py stop
+```
+
+The demo dataset includes suggested, active, waiting, snoozed, and completed
+tasks plus ready, delivered, unconfirmed, and safe scheduling-fallback Cowork
+cards. Reset is deterministic, so recordings can start from the same state.
 
 ## Dependencies
 
