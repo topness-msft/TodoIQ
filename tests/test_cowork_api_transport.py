@@ -406,6 +406,441 @@ class TestExecutionApprovalAnswer(unittest.TestCase):
         )
 
 
+class TestScheduleInteractionCertification(unittest.TestCase):
+    attendees = [{"name": "Jay Padimiti", "email": "jay.padimiti@microsoft.com"}]
+
+    @staticmethod
+    def _events(attendees=None, *, ok=True, tool_name=None):
+        attendees = attendees or ["jay.padimiti@microsoft.com"]
+        tool_name = tool_name or "mcp__outlook_calendar__FindMeetingTimes"
+        return [
+            ("ts", {
+                "tid": "tool-1",
+                "tn": tool_name,
+                "inp": json.dumps({"attendees": attendees, "duration_minutes": 25}),
+            }),
+            ("tx", {
+                "tid": "tool-1",
+                "tn": tool_name,
+                "ok": ok,
+            }),
+        ]
+
+    @staticmethod
+    def _interaction(question="Which time works?"):
+        marker = '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        return {
+            "invocation_id": "schedule-1",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Pick a time",
+                "question": question,
+                "multi_select": False,
+                "image_url": "",
+                "options": [
+                    {
+                        "value": value,
+                        "label": value,
+                        "description": marker,
+                        "image_url": "",
+                    }
+                    for value in (
+                        "Wed 8/19, 1:05 PM ET",
+                        "Thu 8/20, 10:05 AM ET",
+                        "Fri 8/21, 2:05 PM ET",
+                    )
+                ],
+            }],
+        }
+
+    @staticmethod
+    def _trusted_result():
+        availability = {"jay.padimiti@microsoft.com": "free"}
+        return {
+            "attendees": ["jay.padimiti@microsoft.com"],
+            "working_hours_checked": True,
+            "slots": [
+                {"value": value, "availability": availability}
+                for value in (
+                    "Wed 8/19, 1:05 PM ET",
+                    "Thu 8/20, 10:05 AM ET",
+                    "Fri 8/21, 2:05 PM ET",
+                )
+            ],
+        }
+
+    def test_certifies_exact_attendee_calendar_evidence(self):
+        certified = cr.certify_schedule_interaction(
+            self._interaction(),
+            self._events(),
+            self.attendees,
+            self._trusted_result(),
+        )
+
+        self.assertEqual(
+            certified["schedule_evidence"]["attendees"],
+            ["jay.padimiti@microsoft.com"],
+        )
+        self.assertEqual(
+            certified["schedule_evidence"]["source"], "FindMeetingTimes"
+        )
+
+    def test_rejects_unknown_timezone_and_incomplete_calendar_coverage(self):
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction("Jay's timezone is unknown."),
+                self._events(),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction(),
+                self._events(["someone.else@microsoft.com"]),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+        reverse = self._interaction()
+        reverse["questions"][0]["options"][0]["label"] = (
+            "Wed 8/19, 1:05 PM ET (unknown timezone)"
+        )
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                reverse, self._events(), self.attendees, self._trusted_result()
+            )
+        )
+        reverse["questions"][0]["label"] = ""
+        reverse["questions"][0]["options"][0]["label"] = (
+            "Could not determine attendee timezone"
+        )
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                reverse, self._events(), self.attendees, self._trusted_result()
+            )
+        )
+        for wording in ("timezone is uncertain", "timezone is unclear"):
+            with self.subTest(wording=wording):
+                self.assertIsNone(
+                    cr.certify_schedule_interaction(
+                        self._interaction(wording),
+                        self._events(),
+                        self.attendees,
+                        self._trusted_result(),
+                    )
+                )
+
+    def test_rejects_failed_or_non_calendar_tool_evidence(self):
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction(),
+                self._events(ok=False),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction(),
+                self._events(tool_name="mcp__me_profile__GetUserDetails"),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+
+    def test_rejects_model_choices_without_structured_tool_result(self):
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction(), self._events(), self.attendees
+            )
+        )
+        trusted = self._trusted_result()
+        trusted["slots"][0] = {
+            "value": "Sunday 3:00 AM ET",
+            "availability": {"jay.padimiti@microsoft.com": "free"},
+        }
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                self._interaction(),
+                self._events(),
+                self.attendees,
+                trusted,
+            )
+        )
+
+    def test_rejects_unknown_or_missing_availability(self):
+        interaction = self._interaction()
+        interaction["questions"][0]["options"][0]["description"] = (
+            '[avail:{"jay.padimiti@microsoft.com":"unknown"}]'
+        )
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                interaction,
+                self._events(),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+
+    def test_answer_selection_requires_current_certification(self):
+        certified = cr.certify_schedule_interaction(
+            self._interaction(),
+            self._events(),
+            self.attendees,
+            self._trusted_result(),
+        )
+        self.assertTrue(
+            cr.schedule_answer_is_safe(
+                certified,
+                {"0": "Wed 8/19, 1:05 PM ET"},
+                self.attendees,
+            )
+        )
+        self.assertFalse(
+            cr.schedule_answer_is_safe(
+                certified,
+                {"0": "Wed 8/19, 1:05 PM ET"},
+                [{"name": "Adele Vance", "email": "adele@microsoft.com"}],
+            )
+        )
+        self.assertTrue(
+            cr.schedule_answer_is_safe(
+                self._interaction(),
+                {"0": "Please check Jay's work schedule again"},
+                self.attendees,
+            )
+        )
+
+    def test_text_only_fallback_is_idempotent_and_remembers_rejected_slots(self):
+        fallback = cr.schedule_text_only_interaction(
+            self._interaction(), self.attendees
+        )
+        fallback = cr.schedule_text_only_interaction(fallback, self.attendees)
+
+        self.assertFalse(
+            cr.schedule_answer_is_safe(
+                fallback,
+                {"0": "Wed 8/19, 1:05 PM ET"},
+                self.attendees,
+            )
+        )
+        self.assertIn(
+            "Wed 8/19, 1:05 PM ET",
+            fallback["schedule_evidence"]["rejected_option_values"],
+        )
+
+    def test_rejects_multi_select_schedule_interaction(self):
+        interaction = self._interaction()
+        interaction["questions"][0]["multi_select"] = True
+
+        self.assertIsNone(
+            cr.certify_schedule_interaction(
+                interaction,
+                self._events(),
+                self.attendees,
+                self._trusted_result(),
+            )
+        )
+
+    def test_free_text_becomes_a_recheck_instruction(self):
+        prepared = cr.schedule_answers_for_recheck(
+            self._interaction(),
+            {"0": "Try Thursday at 2 PM"},
+        )
+
+        self.assertIn("Re-run FindMeetingTimes", prepared["0"])
+        self.assertIn("Try Thursday at 2 PM", prepared["0"])
+        self.assertIn("do not create an event yet", prepared["0"])
+
+    def test_live_runner_corrects_once_then_surfaces_text_only(self):
+        invalid = {
+            "iid": "schedule-1",
+            "q": [{
+                "id": "slot",
+                "question": "Which time works? Jay's timezone is unknown.",
+                "options": [
+                    {
+                        "label": "Wed 8/19, 1:05 PM ET",
+                        "value": "Wed 8/19, 1:05 PM ET",
+                    }
+                ],
+            }],
+        }
+
+        class Response:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                events = [
+                    ("ts", {
+                        "tid": "tool-1",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "inp": json.dumps({
+                            "attendees": ["jay.padimiti@microsoft.com"]
+                        }),
+                    }),
+                    ("tx", {
+                        "tid": "tool-1",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "ok": True,
+                    }),
+                    ("aq", invalid),
+                    ("aq", {**invalid, "iid": "schedule-2"}),
+                    ("rl", {"st": "ok"}),
+                ]
+                for kind, data in events:
+                    yield "event: " + kind
+                    yield "data: " + json.dumps(data)
+                    yield ""
+
+        class Posted:
+            status_code = 202
+
+        class Client:
+            def __init__(self):
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response()
+
+            def post(self, _url, **kwargs):
+                self.posts.append(kwargs["json"])
+                return Posted()
+
+        client = Client()
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client), \
+                mock.patch(
+                    "src.models.set_blocked_question_if_missing"
+                ) as store_question:
+            cr._api_run_default(
+                "schedule it",
+                None,
+                lambda _text: None,
+                action_id=135,
+                schedule_people=self.attendees,
+            )
+
+        self.assertEqual(len(client.posts), 1)
+        raw = client.posts[0]["content"][0]["rawEvent"]
+        self.assertEqual(raw["invocationId"], "schedule-1")
+        self.assertIn("FindMeetingTimes", raw["answers"]["0"])
+        stored = json.loads(store_question.call_args.args[1])
+        self.assertEqual(stored["invocation_id"], "schedule-2")
+        self.assertEqual(stored["questions"][0]["options"], [])
+        self.assertFalse(stored["schedule_evidence"]["valid"])
+
+    def test_live_runner_does_not_trust_model_choices_without_tool_output(self):
+        invalid = {
+            "iid": "schedule-1",
+            "q": [{
+                "id": "slot",
+                "question": "Which time works? Jay's timezone is unknown.",
+                "options": [{"label": "Wed 1 PM", "value": "Wed 1 PM"}],
+            }],
+        }
+        marker = '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        valid = {
+            "iid": "schedule-2",
+            "q": [{
+                "id": "slot",
+                "question": "Which verified time works?",
+                "options": [
+                    {"label": value, "value": value, "description": marker}
+                    for value in ("Wed 1 PM ET", "Thu 10 AM ET", "Fri 2 PM ET")
+                ],
+            }],
+        }
+
+        class Response:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                events = [
+                    ("ts", {
+                        "tid": "tool-1",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "inp": json.dumps({
+                            "attendees": ["jay.padimiti@microsoft.com"]
+                        }),
+                    }),
+                    ("tx", {
+                        "tid": "tool-1",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "ok": True,
+                    }),
+                    ("aq", invalid),
+                    ("aq", valid),
+                    ("rl", {"st": "ok"}),
+                ]
+                for kind, data in events:
+                    yield "event: " + kind
+                    yield "data: " + json.dumps(data)
+                    yield ""
+
+        class Posted:
+            status_code = 202
+
+        class Client:
+            def __init__(self):
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response()
+
+            def post(self, _url, **kwargs):
+                self.posts.append(kwargs["json"])
+                return Posted()
+
+        client = Client()
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client), \
+                mock.patch(
+                    "src.models.set_blocked_question_if_missing"
+                ) as store_question:
+            cr._api_run_default(
+                "schedule it",
+                None,
+                lambda _text: None,
+                action_id=135,
+                schedule_people=self.attendees,
+            )
+
+        self.assertEqual(len(client.posts), 1)
+        stored = json.loads(store_question.call_args.args[1])
+        self.assertEqual(stored["invocation_id"], "schedule-2")
+        self.assertFalse(stored["schedule_evidence"]["valid"])
+        self.assertEqual(stored["questions"][0]["options"], [])
+
+
 class TestExecutionToolApproval(unittest.TestCase):
     def setUp(self):
         self.conversation_id = "tenant:user:conversation"

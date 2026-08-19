@@ -90,7 +90,6 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         self.assertIn("three exact available times", self.prompt)
         self.assertIn("CreateEvent", self.prompt)
         self.assertIn("[avail:", self.prompt)
-        self.assertIn("unknown", self.prompt)
         self.assertLess(len(self.prompt), 1000)
 
     def test_it_does_not_request_a_message_draft(self):
@@ -130,7 +129,7 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
             ])
         ))
         self.assertLess(
-            prompt.index("working-hours timezone"),
+            prompt.index("confirmed email"),
             prompt.index("FindMeetingTimes"),
         )
         self.assertIn("Chris Garty", prompt)
@@ -138,7 +137,10 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         self.assertIn("Doug Bellingeri", prompt)
         self.assertIn("Eastern Standard Time", prompt)
         self.assertIn("local time", prompt)
-        self.assertIn("timezone is unknown", prompt)
+        self.assertIn("work schedules", prompt)
+        self.assertIn("do not use people profile", prompt.lower())
+        self.assertIn("text-only clarification", prompt.lower())
+        self.assertNotIn("timezone is unknown", prompt.lower())
 
     def test_it_rejects_an_empty_attendee_list(self):
         with self.assertRaisesRegex(ValueError, "confirmed attendee"):

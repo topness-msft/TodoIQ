@@ -4352,6 +4352,9 @@ function renderCoworkCard(task) {
         }
 
         if (a && a.state === 'executed') {
+            var deliveredTransitions = VALID_TRANSITIONS[task.status] || [];
+            var canCompleteDelivered = Boolean(a.delivery_confirmed_at)
+                && deliveredTransitions.indexOf('completed') >= 0;
             return cwShell('is-delivered', 'delivered', task,
                 '<section class="cw-delivery-result is-confirmed" data-testid="delivery-confirmed">'
                 + '<span class="cw-delivery-mark" aria-hidden="true">\u2713</span><div>'
@@ -4359,7 +4362,12 @@ function renderCoworkCard(task) {
                 + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
-                cwCostBadge(a) + cwCumulativeCostBadge(a),
+                (canCompleteDelivered
+                   ? '<button class="cw-btn cw-btn-ghost" type="button" '
+                       + 'data-testid="cw-mark-complete" onclick="doAction('
+                       + task.id + ',\'complete\')">Mark complete</button>'
+                   : '')
+                + cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }
 
@@ -4523,6 +4531,9 @@ function cwLoad(taskId, markSeen) {
             if (!currentTask
                     || Number(currentTask.cowork_revision || 0) !== revisionAtStart
                     || currentTask.action_type !== typeAtStart) {
+                if (currentTask && _cwActions[taskId] === undefined) {
+                    cwLoad(taskId, markSeen);
+                }
                 return;
             }
             if (data.action && !cwActionMatchesTask(taskId, data.action)) {

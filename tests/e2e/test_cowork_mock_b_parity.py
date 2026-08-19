@@ -328,6 +328,7 @@ def test_action_labels_and_terminal_states(page: Page, base_url):
         },
     )
     expect(page.get_by_role("button", name="Review meeting")).to_be_visible()
+    expect(page.get_by_test_id("cw-mark-complete")).to_have_count(0)
 
     unconfirmed_task_id = _render(
         page,
@@ -342,6 +343,7 @@ def test_action_labels_and_terminal_states(page: Page, base_url):
     expect(page.get_by_test_id("delivery-unconfirmed")).to_contain_text(
         "Check the destination before retrying"
     )
+    expect(page.get_by_test_id("cw-mark-complete")).to_have_count(0)
     assert page.evaluate(
         f"Boolean(_cwPollers[{unconfirmed_task_id}])"
     ) is False
@@ -363,11 +365,28 @@ def test_action_labels_and_terminal_states(page: Page, base_url):
     expect(page.get_by_test_id("delivery-confirmed")).to_contain_text(
         "Delivered to Mehdi Slaoui Andaloussi"
     )
+    complete = page.get_by_test_id("cw-mark-complete")
+    expect(complete).to_be_visible()
+    complete_box = complete.bounding_box()
+    assert complete_box
+    assert 20 <= complete_box["height"] <= 36
+    assert complete_box["width"] < 130
     assert page.evaluate(f"Boolean(_cwPollers[{executed_task_id}])") is False
     page.screenshot(
-        path=os.path.join(TEMP_DIR, "cowork-delivery-confirmed.png"),
+        path=os.path.join(TEMP_DIR, "cowork-delivery-mark-complete-dev.png"),
         full_page=True,
     )
+    confirmed_at = page.evaluate(
+        f"_cwActions[{executed_task_id}].delivery_confirmed_at"
+    )
+    complete.click()
+    page.wait_for_function(
+        f"tasks.find(t => t.id === {executed_task_id}).status === 'completed'"
+    )
+    expect(page.get_by_test_id("cw-mark-complete")).to_have_count(0)
+    assert page.evaluate(
+        f"_cwActions[{executed_task_id}].delivery_confirmed_at"
+    ) == confirmed_at
 
 
 def test_execution_progress_and_approval_states(page: Page, base_url):

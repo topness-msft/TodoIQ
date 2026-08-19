@@ -3175,6 +3175,52 @@ class TestInteractionAnswer(CoworkAPITestBase):
             headers={"Content-Type": "application/json"},
         )
 
+    def _blocked_schedule(self):
+        from src.db import get_connection
+
+        tid = self._blocked()
+        conn = get_connection()
+        conn.execute(
+            "UPDATE tasks SET action_type='schedule-meeting',key_people=? WHERE id=?",
+            (
+                json.dumps([{
+                    "name": "Jay Padimiti",
+                    "email": "jay.padimiti@microsoft.com",
+                }]),
+                tid,
+            ),
+        )
+        conn.execute(
+            "UPDATE task_actions SET action_type='schedule-meeting' WHERE task_id=?",
+            (tid,),
+        )
+        interaction = {
+            "invocation_id": "invoke-1",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Pick a time",
+                "question": "Which time works?",
+                "options": [{
+                    "value": "Wed 8/19, 1:05 PM ET",
+                    "label": "Wed 8/19, 1:05 PM ET",
+                    "description": (
+                        '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+                    ),
+                    "image_url": "",
+                }],
+                "multi_select": False,
+                "image_url": "",
+            }],
+        }
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE task_id=?",
+            (json.dumps(interaction), tid),
+        )
+        conn.commit()
+        conn.close()
+        return tid
+
     def test_it_answers_the_same_live_conversation(self):
         tid = self._blocked()
         response = self._answer_request(tid)
@@ -3200,6 +3246,81 @@ class TestInteractionAnswer(CoworkAPITestBase):
         body = json.loads(response.body)
         self.assertEqual(body["action"]["state"], "executing")
         self.assertFalse(body["action"]["waiting_on_user"])
+
+    def test_schedule_slot_without_current_evidence_is_rejected(self):
+        tid = self._blocked_schedule()
+
+        visible = json.loads(
+            self.fetch(f"/api/tasks/{tid}/cowork").body
+        )["action"]["interaction_request"]
+        self.assertEqual(visible["questions"][0]["options"], [])
+        self.assertIn(
+            "could not verify suitable working-hours slots",
+            visible["questions"][0]["question"],
+        )
+
+        response = self._answer_request(
+            tid, {"0": "Wed 8/19, 1:05 PM ET"}
+        )
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.answers, [])
+
+    def test_schedule_free_text_correction_remains_allowed(self):
+        tid = self._blocked_schedule()
+
+        response = self._answer_request(
+            tid, {"0": "Check Jay's timezone and availability again"}
+        )
+
+        self.assertEqual(response.code, 202)
+        self.assertIn(
+            "Re-run FindMeetingTimes",
+            self.answers[-1][2]["0"],
+        )
+        self.assertIn(
+            "Check Jay's timezone and availability again",
+            self.answers[-1][2]["0"],
+        )
+
+    def test_schedule_slot_is_rejected_after_attendee_change(self):
+        from src.db import get_connection
+
+        tid = self._blocked_schedule()
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id,blocked_question FROM task_actions WHERE task_id=?", (tid,)
+        ).fetchone()
+        interaction = json.loads(row["blocked_question"])
+        interaction["schedule_evidence"] = {
+            "valid": True,
+            "source": "FindMeetingTimes",
+            "attendees": ["jay.padimiti@microsoft.com"],
+            "working_hours_checked": True,
+        }
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps(interaction), row["id"]),
+        )
+        conn.execute(
+            "UPDATE tasks SET key_people=? WHERE id=?",
+            (
+                json.dumps([{
+                    "name": "Adele Vance",
+                    "email": "adele.vance@microsoft.com",
+                }]),
+                tid,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._answer_request(
+            tid, {"0": "Wed 8/19, 1:05 PM ET"}
+        )
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.answers, [])
 
     def test_empty_answer_is_rejected(self):
         tid = self._blocked()

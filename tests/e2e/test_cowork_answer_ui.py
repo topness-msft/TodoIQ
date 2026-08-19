@@ -158,6 +158,72 @@ def test_blocked_question_can_be_answered_in_place(page: Page, base_url):
     }
 
 
+def test_schedule_evidence_fallback_is_text_only(page: Page, base_url):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a timezone-safe review"},
+    )
+    task_id = created.json()["task"]["id"]
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([{
+                name: 'Jay Padimiti',
+                email: 'jay.padimiti@microsoft.com'
+            }]);
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                interaction_request: {
+                    invocation_id: 'schedule-fallback',
+                    questions: [{
+                        id: '0',
+                        producer_id: 'slot',
+                        header: 'Availability needs another check',
+                        question: 'I could not verify suitable working-hours slots '
+                            + 'for every attendee. Tell me what to check or change.',
+                        options: [],
+                        multi_select: false
+                    }],
+                    schedule_evidence: {
+                        valid: false,
+                        source: 'FindMeetingTimes',
+                        attendees: ['jay.padimiti@microsoft.com'],
+                        working_hours_checked: false
+                    }
+                },
+                conversation_id: 't:u:schedule-fallback'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    blocked = page.get_by_test_id("cw-blocked")
+    expect(blocked).to_contain_text("Availability needs another check")
+    expect(blocked).to_contain_text(
+        "could not verify suitable working-hours slots"
+    )
+    expect(page.get_by_test_id("cw-choice")).to_have_count(0)
+    answer = page.get_by_test_id("cw-answer")
+    expect(answer).to_be_visible()
+    answer_box = answer.bounding_box()
+    assert answer_box and answer_box["width"] >= 300
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-schedule-text-only-dev.png"),
+        full_page=True,
+    )
+
+
 def test_execution_question_can_be_answered_in_place(page: Page, base_url):
     created = page.request.post(
         base_url + "/api/tasks",
@@ -919,6 +985,8 @@ def test_identity_refresh_loads_persisted_live_cowork_action(page: Page, base_ur
         "id": task_id,
         "task_id": task_id,
         "state": "previewing",
+        "action_type": "schedule-meeting",
+        "cowork_revision": 0,
         "progress": ["Loading the saved Cowork preview"],
     }
     page.route(

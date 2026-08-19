@@ -62,7 +62,11 @@ from ..services.cowork_runner import (
     parse_source_url,
     preview_label,
     read_blocked_question,
+    schedule_answer_is_safe,
+    schedule_answers_for_recheck,
     schedule_attendees,
+    schedule_interaction_is_certified,
+    schedule_text_only_interaction,
     start_preview,
     start_execution,
 )
@@ -435,6 +439,18 @@ def _enrich(action: dict) -> dict:
     action["interaction_request"] = _decode_interaction_request(
         action.get("blocked_question")
     )
+    if (
+        action.get("action_type") == "schedule-meeting"
+        and action.get("interaction_request")
+    ):
+        task = get_task(action["task_id"])
+        attendees = schedule_attendees(task) if task else []
+        if not schedule_interaction_is_certified(
+            action["interaction_request"], attendees
+        ):
+            action["interaction_request"] = schedule_text_only_interaction(
+                action["interaction_request"], attendees
+            )
     action["is_broadcast"] = action.get("destination_kind") in _BROADCAST_KINDS
     if action.get("state") == "ready" and action.get("action_type") == "schedule-meeting":
         calendar_preview = _calendar_confirmation_preview(action)
@@ -986,8 +1002,10 @@ class CoworkHandler(tornado.web.RequestHandler):
         ):
             return self._fail(400, "Invalid interaction mode")
         interaction_mode = "interaction"
+        confirmed_schedule_people = None
         if task.get("action_type") == "schedule-meeting":
             confirmed = schedule_attendees(task)
+            confirmed_schedule_people = confirmed
             unresolved = _unresolved_schedule_people(task)
             if not confirmed and unresolved == ["selected attendees"]:
                 return self._fail(
@@ -1054,6 +1072,8 @@ class CoworkHandler(tornado.web.RequestHandler):
                 spawn=SPAWN,
                 log_dir=LOG_DIR_OVERRIDE,
                 conversation_id=conversation_id,
+                action_id=action["id"],
+                schedule_people=confirmed_schedule_people,
             )
         except AlreadyRunning:
             return self._fail(409, "A preview is already running for this task")
@@ -1478,6 +1498,23 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         }
         if set(cleaned_answers) != expected_ids:
             return self._fail(400, "Every Cowork question requires an answer")
+        task = get_task(tid)
+        if (
+            task
+            and task.get("action_type") == "schedule-meeting"
+            and not schedule_answer_is_safe(
+                interaction, cleaned_answers, schedule_attendees(task)
+            )
+        ):
+            return self._fail(
+                409,
+                "Those meeting times are no longer verified for the current "
+                "attendees. Ask Cowork to check availability again.",
+            )
+        if task and task.get("action_type") == "schedule-meeting":
+            cleaned_answers = schedule_answers_for_recheck(
+                interaction, cleaned_answers
+            )
 
         previous_question = action.get("blocked_question")
         if not claim_blocked_question_answer(action["id"], previous_question):

@@ -582,18 +582,19 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
             defaults.append(prefs["notes"])
         lines.append("Meeting preferences: " + "; ".join(defaults) + ".")
     lines.extend([
-        "Before searching availability, try to verify each attendee's working-hours "
-        "timezone from calendar or profile data. If unavailable, say the attendee's "
-        "timezone is unknown; never guess. Show organizer and attendee local time.",
-        "Use the native calendar scheduling flow. Call FindMeetingTimes to check "
-        "both calendars' free/busy (the organizer plus every selected attendee), "
-        "then ask_user with three exact available times.",
-        "Do not call CreateEvent before the user selects one. Create only the "
+        "Use the native calendar scheduling flow and each confirmed email; do not "
+        "use people profile.",
+        "Call FindMeetingTimes for both calendars: organizer and every attendee. "
+        "Check free/busy and work schedules; offer three exact available times "
+        "returned by it in organizer local time.",
+        "If any calendar is unavailable or fewer than three slots are verified, "
+        "ask_user a text-only clarification with no time choices.",
+        "Do not call CreateEvent before the user selects one; create only the "
         "selected time.",
-        "Honor the requested duration and agenda. If a calendar is not visible, say "
-        "so; never guess or replace ask_user with a message.",
+        "Honor duration and agenda. Never guess attendee local time or label an "
+        "attendee timezone unknown after FindMeetingTimes succeeds.",
         'End each option description with [avail:{"attendee@email":"free"}] for '
-        "every attendee; use only free, tentative, busy, or unknown.",
+        "every attendee; choices may use only free or tentative.",
     ])
     correction = _clean(redirect_text)
     if correction:
@@ -1982,7 +1983,8 @@ def _spawn_default(argv, **kwargs):
 
 
 def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
-                  conversation_id=None) -> str:
+                  conversation_id=None, action_id=None,
+                  schedule_people=None) -> str:
     """Spawn a preview run and return its label. Non-blocking.
 
     ``conversation_id`` is optional and, when given, is the id the caller has
@@ -2022,7 +2024,12 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
             target=_collect_api,
             args=(label, task_id, prompt, config_path,
                   Path(log_dir) if log_dir else LOG_DIR),
-            kwargs={"conversation_id": conversation_id, "is_follow_up": False},
+            kwargs={
+                "conversation_id": conversation_id,
+                "is_follow_up": False,
+                "action_id": action_id,
+                "schedule_people": schedule_people,
+            },
             daemon=True,
             name=f"cowork-api-{task_id}",
         )
@@ -2943,6 +2950,255 @@ def _parse_aq_interaction(data):
     return {"invocation_id": invocation_id, "questions": questions}
 
 
+_AVAILABILITY_MARKER_RE = re.compile(r"\[avail:(\{[^][]+\})\]", re.I)
+_UNKNOWN_TIMEZONE_RE = re.compile(
+    r"(?:(?:time\s*zone|timezone).{0,32}(?:unknown|unconfirmed|not visible|"
+    r"unavailable|uncertain|unclear|cannot|can't|could not|couldn't)|"
+    r"(?:unknown|unconfirmed|not visible|unavailable|uncertain|unclear|cannot|"
+    r"can't|could not|couldn't).{0,32}(?:time\s*zone|timezone))",
+    re.I,
+)
+
+
+def _attendee_emails(attendees) -> list[str]:
+    values = {
+        str(person.get("email") or "").strip().lower()
+        for person in attendees or []
+        if isinstance(person, dict)
+    }
+    values.discard("")
+    return sorted(values)
+
+
+def _successful_find_meeting_attendees(events) -> set[str] | None:
+    starts = {}
+    for kind, data in events or []:
+        if not isinstance(data, dict):
+            continue
+        tool_id = str(data.get("tid") or "")
+        name = str(data.get("tn") or "")
+        if kind == "ts" and tool_id and name.lower().endswith("findmeetingtimes"):
+            starts[tool_id] = data.get("inp")
+        elif kind == "tx" and tool_id in starts and data.get("ok") is True:
+            raw_input = starts[tool_id]
+            try:
+                params = (
+                    json.loads(raw_input)
+                    if isinstance(raw_input, str)
+                    else raw_input
+                )
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(params, dict):
+                continue
+            attendees = params.get("attendees")
+            if not isinstance(attendees, list):
+                continue
+            return {
+                str(value).strip().lower()
+                for value in attendees
+                if str(value).strip()
+            }
+    return None
+
+
+def certify_schedule_interaction(
+    interaction,
+    events,
+    attendees,
+    trusted_schedule_result=None,
+):
+    """Attach server-derived evidence to a safe scheduling choice interaction."""
+    expected = _attendee_emails(attendees)
+    if not expected or _successful_find_meeting_attendees(events) != set(expected):
+        return None
+    if not isinstance(trusted_schedule_result, dict):
+        return None
+    trusted_attendees = {
+        str(value).strip().lower()
+        for value in trusted_schedule_result.get("attendees") or []
+        if str(value).strip()
+    }
+    if (
+        trusted_attendees != set(expected)
+        or trusted_schedule_result.get("working_hours_checked") is not True
+    ):
+        return None
+    trusted_slots = trusted_schedule_result.get("slots")
+    if not isinstance(trusted_slots, list) or len(trusted_slots) != 3:
+        return None
+    trusted_by_value = {
+        str(slot.get("value") or "").strip(): slot
+        for slot in trusted_slots
+        if isinstance(slot, dict) and str(slot.get("value") or "").strip()
+    }
+    if len(trusted_by_value) != 3:
+        return None
+    if not isinstance(interaction, dict):
+        return None
+    questions = interaction.get("questions")
+    if not isinstance(questions, list) or len(questions) != 1:
+        return None
+    question = questions[0]
+    options = question.get("options") if isinstance(question, dict) else None
+    if (
+        question.get("multi_select")
+        or not isinstance(options, list)
+        or len(options) != 3
+    ):
+        return None
+    visible_text = " ".join(
+        str(value or "")
+        for value in (
+            question.get("header"),
+            question.get("question"),
+            *(
+                value
+                for option in options
+                for value in (
+                    option.get("label"),
+                    option.get("value"),
+                    option.get("description"),
+                )
+            ),
+        )
+    )
+    if _UNKNOWN_TIMEZONE_RE.search(visible_text):
+        return None
+    if {
+        str(option.get("value") or "").strip()
+        for option in options
+    } != set(trusted_by_value):
+        return None
+    for option in options:
+        description = str(option.get("description") or "")
+        match = _AVAILABILITY_MARKER_RE.search(description)
+        if not match:
+            return None
+        try:
+            availability = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        normalized = {
+            str(email).strip().lower(): str(status).strip().lower()
+            for email, status in availability.items()
+        } if isinstance(availability, dict) else {}
+        if set(normalized) != set(expected):
+            return None
+        if any(status not in {"free", "tentative"} for status in normalized.values()):
+            return None
+        trusted = trusted_by_value[str(option.get("value") or "").strip()]
+        trusted_availability = {
+            str(email).strip().lower(): str(status).strip().lower()
+            for email, status in (trusted.get("availability") or {}).items()
+        }
+        if normalized != trusted_availability:
+            return None
+    certified = json.loads(json.dumps(interaction))
+    certified["schedule_evidence"] = {
+        "valid": True,
+        "source": "FindMeetingTimes",
+        "attendees": expected,
+        "working_hours_checked": True,
+    }
+    return certified
+
+
+def schedule_text_only_interaction(interaction, attendees):
+    fallback = json.loads(json.dumps(interaction))
+    evidence = fallback.get("schedule_evidence")
+    rejected_values = list(
+        evidence.get("rejected_option_values") or []
+    ) if isinstance(evidence, dict) else []
+    for question in fallback.get("questions") or []:
+        rejected_values.extend(
+            str(option.get("value") or "").strip()
+            for option in question.get("options") or []
+            if isinstance(option, dict) and str(option.get("value") or "").strip()
+        )
+        question["header"] = "Availability needs another check"
+        question["question"] = (
+            "I could not verify suitable working-hours slots for every attendee. "
+            "Tell me what to check or change."
+        )
+        question["options"] = []
+        question["multi_select"] = False
+    fallback["schedule_evidence"] = {
+        "valid": False,
+        "source": "FindMeetingTimes",
+        "attendees": _attendee_emails(attendees),
+        "working_hours_checked": False,
+        "rejected_option_values": sorted(set(rejected_values)),
+    }
+    return fallback
+
+
+def schedule_interaction_is_certified(interaction, attendees) -> bool:
+    evidence = interaction.get("schedule_evidence") if isinstance(
+        interaction, dict
+    ) else None
+    return bool(
+        isinstance(evidence, dict)
+        and evidence.get("valid") is True
+        and evidence.get("source") == "FindMeetingTimes"
+        and evidence.get("working_hours_checked") is True
+        and evidence.get("attendees") == _attendee_emails(attendees)
+    )
+
+
+def schedule_answer_is_safe(interaction, answers, attendees) -> bool:
+    """Allow free-text corrections, but require current evidence for slot choices."""
+    questions = interaction.get("questions") if isinstance(interaction, dict) else None
+    if not isinstance(questions, list) or not isinstance(answers, dict):
+        return False
+    selected_option = False
+    evidence = interaction.get("schedule_evidence")
+    rejected_values = set(
+        evidence.get("rejected_option_values") or []
+    ) if isinstance(evidence, dict) else set()
+    for question in questions:
+        answer = str(answers.get(str(question.get("id")), "")).strip()
+        if answer in rejected_values:
+            return False
+        option_values = {
+            str(option.get("value") or "").strip()
+            for option in question.get("options") or []
+            if isinstance(option, dict)
+        }
+        if answer and answer in option_values:
+            selected_option = True
+    if not selected_option:
+        return True
+    return schedule_interaction_is_certified(interaction, attendees)
+
+
+def schedule_answers_for_recheck(interaction, answers):
+    """Keep exact certified choices; turn all other text into a research request."""
+    prepared = {}
+    questions = {
+        str(question.get("id")): question
+        for question in interaction.get("questions") or []
+        if isinstance(question, dict)
+    }
+    for question_id, answer in answers.items():
+        question = questions.get(str(question_id), {})
+        option_values = {
+            str(option.get("value") or "").strip()
+            for option in question.get("options") or []
+            if isinstance(option, dict)
+        }
+        if answer in option_values:
+            prepared[str(question_id)] = answer
+        else:
+            prepared[str(question_id)] = (
+                "Treat this only as a scheduling preference. Re-run "
+                "FindMeetingTimes for every confirmed attendee and return "
+                "certified choices; do not create an event yet. User request: "
+                + answer
+            )
+    return prepared
+
+
 def _execution_approval_answer(data, approval_kind):
     """Return the one safe answer for a channel-matched send confirmation."""
     interaction = _parse_aq_interaction(data)
@@ -3484,7 +3740,8 @@ def _is_auth_failure(exc) -> bool:
 def _collect_api(label, task_id, prompt, config_path, log_dir,
                  conversation_id=None, is_follow_up=None,
                  approval_kind=None, approved_snapshot=None,
-                 approved_calendar_event=None, action_id=None) -> None:
+                 approved_calendar_event=None, action_id=None,
+                 schedule_people=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -3522,6 +3779,8 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
             run_kwargs["approved_calendar_event"] = approved_calendar_event
         if action_id:
             run_kwargs["action_id"] = action_id
+        if schedule_people is not None:
+            run_kwargs["schedule_people"] = schedule_people
         call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
@@ -3660,7 +3919,7 @@ def new_conversation_id(_auth=None):
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
                      is_follow_up=None, approval_kind=None,
                      approved_snapshot=None, approved_calendar_event=None,
-                     action_id=None):
+                     action_id=None, schedule_people=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -3746,18 +4005,21 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                     )
             ask_user_answered = False
             tool_approval_answered = False
+            schedule_correction_answered = False
             for kind, data in _iter_sse(response.iter_lines()):
                 events.append((kind, data))
                 text = _api_progress_text(kind, data)
                 if text:
                     on_progress(text)
-                if kind == "aq" and approval_kind:
-                    approval = (
-                        None
-                        if ask_user_answered
-                        else _execution_approval_answer(data, approval_kind)
-                    )
-                    if approval:
+                if kind == "aq":
+                    approval = None
+                    if approval_kind:
+                        approval = (
+                            None
+                            if ask_user_answered
+                            else _execution_approval_answer(data, approval_kind)
+                        )
+                    if approval is not None:
                         invocation_id, answers = approval
                         answer_body = {
                             "conversationId": conversation_id,
@@ -3796,6 +4058,58 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         interaction = _parse_aq_interaction(data)
                         if not interaction:
                             continue
+                        if schedule_people:
+                            certified = certify_schedule_interaction(
+                                interaction, events, schedule_people
+                            )
+                            if certified:
+                                interaction = certified
+                            elif not schedule_correction_answered:
+                                correction = (
+                                    "Recheck with FindMeetingTimes using every confirmed "
+                                    "attendee email. Offer exactly three returned slots "
+                                    "with free/tentative [avail] evidence, or ask a "
+                                    "text-only clarification. Do not say a timezone is "
+                                    "unknown."
+                                )
+                                answer_body = {
+                                    "conversationId": conversation_id,
+                                    "role": "user",
+                                    "content": [{
+                                        "type": "ask_user_answer",
+                                        "rawEvent": {
+                                            "invocationId": interaction["invocation_id"],
+                                            "answers": {
+                                                question["id"]: correction
+                                                for question in interaction["questions"]
+                                            },
+                                        },
+                                    }],
+                                }
+                                answered = client.post(
+                                    f"{base}/v1/messages",
+                                    headers={
+                                        **post_headers,
+                                        "X-Conversation-ID": conversation_id,
+                                    },
+                                    json=answer_body,
+                                    timeout=15,
+                                )
+                                if answered.status_code not in (200, 202):
+                                    raise RuntimeError(
+                                        "Cowork rejected the scheduling correction: "
+                                        f"HTTP {answered.status_code}"
+                                    )
+                                schedule_correction_answered = True
+                                logger.info(
+                                    "requested one scheduling evidence correction for %s",
+                                    conversation_id,
+                                )
+                                continue
+                            else:
+                                interaction = schedule_text_only_interaction(
+                                    interaction, schedule_people
+                                )
                         encoded = json.dumps(interaction, separators=(",", ":"))
                         stored = set_blocked_question_if_missing(action_id, encoded)
                         if stored:
