@@ -70,8 +70,17 @@ Cowork-powered draft, approval, and direct-action flows.
 - Environments:
   - Dev/dogfood: `http://localhost:8768` from this worktree.
   - Production/tray: `http://localhost:8766`, scheduled task `TodoNess`.
+  - Isolated live demo: `http://localhost:8776`, fictional seed plus explicitly
+    enabled parsing/Cowork capabilities, with all local state under `data/demo/`.
 - Dev deploy command: from the selected checkout,
   `python -m src.app 8768`.
+- Demo lifecycle commands, from the selected checkout:
+  - `python scripts/demo_server.py stop`
+  - `python scripts/demo_server.py reset`
+  - `python scripts/demo_server.py start`
+  - `python scripts/demo_server.py status`
+  Reset is destructive only to `data/demo/riveter-demo.db` and refuses while the
+  validated demo process or port is live. Never copy production data into demo.
 - Prod deploy command: from the selected checkout,
   `python scripts/install_startup.py`, start now = Yes. Requires explicit
   current-conversation production approval and port 8766 ownership cleanup.
@@ -96,6 +105,23 @@ Cowork-powered draft, approval, and direct-action flows.
   | `/api/sync-status` | GET | 200 | WorkIQ sync state is available |
   | `/api/runner-status` | GET | 200 | No orphaned subprocess state |
   | `/static/js/dashboard.js` | GET | 200 | Current static feature bundle served |
+
+- Demo verification additionally requires:
+  - exactly 8 seeded tasks, zero action rows after reset
+  - statuses: 3 active; 1 each suggested, waiting, snoozed, completed, dismissed
+  - active scenarios: Bobby Chang + Em D'Arcy scheduling, Raj Gopalakrishnan
+    Teams materials, Adrian Maclean email about Srini Raghavan
+  - `data/demo/settings.json` has `cowork_api_transport: true`
+  - sync and standalone skill POST routes return 403
+  - parsing, Cowork session, approved execution, and demo schedule-choice flags
+    are present on the validated demo process
+  - ports 8766 and 8768 retain their original PIDs, DB hashes, and health probes
+  - browser load issues no requests outside `127.0.0.1:8776` until the presenter
+    explicitly starts parsing or Cowork
+
+- Demo rollback: stop port 8776 with `demo_server.py stop`, check out the prior
+  commit, then run reset/start/status. Production and dev are never part of demo
+  rollback.
 
 - Rollback procedure:
   1. Stop the deployed tray by its exact PID and stop all other TodoIQ writers.
