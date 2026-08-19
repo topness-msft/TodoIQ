@@ -9,7 +9,7 @@ from ..models import (
     snooze_task, transition_task, get_task, update_task,
 )
 from ..services.claude_runner import run_copilot
-from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
+from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode, todo_parse_enabled
 from .ws import broadcast
 
 PARSE_BASE_TIMEOUT = 300  # 5 min base
@@ -116,7 +116,7 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         self.set_header("Content-Type", "application/json")
 
     def post(self, task_id):
-        if demo_mode():
+        if not todo_parse_enabled():
             self.set_status(403)
             self.write(json.dumps({"error": DEMO_DISABLED_MESSAGE}))
             return

@@ -71,7 +71,12 @@ from ..services.cowork_runner import (
     start_execution,
 )
 from ..services.workspace_settings import api_transport_enabled
-from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
+from ..services.runtime_mode import (
+    DEMO_DISABLED_MESSAGE,
+    cowork_execute_enabled,
+    cowork_session_enabled,
+    demo_mode,
+)
 
 # Test seams. Production leaves both None so the runner uses its own defaults.
 SPAWN = None
@@ -974,7 +979,7 @@ class CoworkHandler(tornado.web.RequestHandler):
     # ── POST ──
 
     def post(self, task_id):
-        if demo_mode():
+        if not cowork_session_enabled():
             return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         task = get_task(tid)
@@ -1164,7 +1169,7 @@ class CoworkHandler(tornado.web.RequestHandler):
         the capability the API transport adds, verified live: the run stopped
         3.0s after the request.
         """
-        if demo_mode():
+        if not cowork_session_enabled():
             return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         action = get_latest_task_action(tid)
@@ -1233,7 +1238,7 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     def post(self, task_id):
-        if demo_mode():
+        if not cowork_execute_enabled():
             return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         if self.request.headers.get("X-Riveter-Action") != "confirm":
@@ -1378,7 +1383,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     def post(self, task_id):
-        if demo_mode():
+        if not cowork_session_enabled():
             return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         task = get_task(tid)
@@ -1471,7 +1476,7 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"error": message}))
 
     async def post(self, task_id):
-        if demo_mode():
+        if not cowork_session_enabled():
             return self._fail(403, DEMO_DISABLED_MESSAGE)
         tid = int(task_id)
         action = get_latest_task_action(tid)

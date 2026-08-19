@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..db import DB_PATH
-from .runtime_mode import DEMO_DISABLED_MESSAGE, external_integrations_enabled
+from .runtime_mode import DEMO_DISABLED_MESSAGE, copilot_command_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +256,7 @@ def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
 
     Returns {"ok": True/False, "message": ...}.
     """
-    if not external_integrations_enabled():
+    if not copilot_command_enabled(command, label):
         return {"ok": False, "message": DEMO_DISABLED_MESSAGE}
     if is_running(label):
         return {"ok": False, "message": f"'{label}' already running."}

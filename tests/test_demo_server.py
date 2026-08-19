@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -10,7 +11,7 @@ from unittest import mock
 
 import pytest
 
-from src.services import claude_runner, cowork_runner
+from src.services import claude_runner, cowork_runner, runtime_mode
 from scripts import demo_server
 
 
@@ -58,6 +59,11 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
     assert first.returncode == 0, first.stderr
     demo_db = tmp_path / "demo" / "riveter-demo.db"
     assert demo_db.exists()
+    settings = json.loads(
+        (tmp_path / "demo" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert settings["demo_mode"] is True
+    assert settings["cowork_api_transport"] is True
     first_digest = _digest(demo_db)
 
     second = _run(tmp_path, "reset")
@@ -67,7 +73,7 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
 
     conn = sqlite3.connect(demo_db)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] >= 8
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 8
         task_statuses = {
             row[0]
             for row in conn.execute("SELECT DISTINCT status FROM tasks")
@@ -76,10 +82,25 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
             row[0]
             for row in conn.execute("SELECT DISTINCT state FROM task_actions")
         }
+        titles = {
+            row[0] for row in conn.execute("SELECT title FROM tasks")
+        }
     finally:
         conn.close()
-    assert {"suggested", "active", "waiting", "completed"} <= task_statuses
-    assert {"ready", "executed", "execute_unconfirmed", "previewing"} <= action_states
+    assert task_statuses == {
+        "suggested", "active", "waiting", "completed", "dismissed", "snoozed"
+    }
+    assert action_states == set()
+    assert titles == {
+        "Review the demo run-of-show",
+        "Schedule the Friday demo review with Bobby Chang and Em D'Arcy",
+        "Send Raj the complete Kickstarter adoption materials in Teams",
+        "Reply to Adrian about Srini's executive pane",
+        "Waiting on the final demo video assets",
+        "Finish the isolated demo environment",
+        "Send the outdated demo script",
+        "Check pilot adoption metrics",
+    }
 
 
 def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):
@@ -123,7 +144,99 @@ def test_external_runners_fail_closed_in_demo_mode(monkeypatch):
     cancel.assert_not_called()
 
 
-def test_demo_server_routes_are_live_but_external_actions_are_forbidden(tmp_path):
+def test_live_demo_capabilities_are_independently_allowlisted(monkeypatch):
+    monkeypatch.setenv("RIVETER_DEMO_MODE", "1")
+    assert not runtime_mode.todo_parse_enabled()
+    assert not runtime_mode.cowork_session_enabled()
+    assert not runtime_mode.cowork_execute_enabled()
+    assert not runtime_mode.copilot_command_enabled("/todo-refresh", "sync")
+
+    monkeypatch.setenv("RIVETER_DEMO_ALLOW_TODO_PARSE", "1")
+    monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_SESSION", "1")
+    monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_EXECUTE", "1")
+    assert runtime_mode.todo_parse_enabled()
+    assert runtime_mode.cowork_session_enabled()
+    assert runtime_mode.cowork_execute_enabled()
+    assert runtime_mode.copilot_command_enabled("/todo-parse", "parse")
+    assert not runtime_mode.copilot_command_enabled("/todo-refresh", "parse")
+    assert not runtime_mode.copilot_command_enabled("/todo-parse", "sync")
+
+
+def test_todo_parse_command_uses_configured_database():
+    command = (ROOT / ".claude" / "commands" / "todo-parse.md").read_text(
+        encoding="utf-8"
+    )
+    assert "TODONESS_DB_PATH" in command
+    assert "sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')" not in command
+
+
+def test_live_demo_allows_cowork_entrypoints_with_fake_transports(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("RIVETER_DEMO_MODE", "1")
+    monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_SESSION", "1")
+    monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_EXECUTE", "1")
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    with mock.patch.object(
+        cowork_runner, "api_transport_enabled", return_value=True
+    ), mock.patch.object(
+        cowork_runner, "build_callback_config", return_value=tmp_path / "callback.json"
+    ), mock.patch.object(
+        cowork_runner, "write_prompt_file", return_value=tmp_path / "prompt.txt"
+    ), mock.patch.object(
+        cowork_runner,
+        "tenant_barrier_precheck",
+        return_value={"status": "ok", "reason": "test"},
+    ), mock.patch.object(cowork_runner.threading, "Thread", FakeThread):
+        preview = cowork_runner.start_preview(
+            901, "Preview", conversation_id="demo:user:preview"
+        )
+        follow_up = cowork_runner.continue_preview(
+            902, "demo:user:follow-up", "Refine"
+        )
+        execution = cowork_runner.start_execution(
+            903, "Execute", "demo:user:execute"
+        )
+    assert preview == cowork_runner.preview_label(901)
+    assert follow_up == cowork_runner.preview_label(902)
+    assert execution == cowork_runner.execution_label(903)
+    with cowork_runner._runs_lock:
+        cowork_runner._runs.pop(preview, None)
+        cowork_runner._runs.pop(follow_up, None)
+        cowork_runner._runs.pop(execution, None)
+
+    class Response:
+        status_code = 202
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    with mock.patch.object(
+        cowork_runner,
+        "_api_auth_fn",
+        return_value=("token", "https://api", "tenant", "user"),
+    ), mock.patch.object(cowork_runner, "_api_http_client_fn", return_value=Client()):
+        assert cowork_runner.answer_interaction(
+            "demo:user:answer", "invocation", {"0": "answer"}
+        ) is True
+
+
+def test_demo_server_routes_are_live_and_sync_skills_stay_forbidden(tmp_path):
     reset = _run(tmp_path, "reset")
     assert reset.returncode == 0, reset.stderr
     started = _run(tmp_path, "start")
@@ -136,20 +249,9 @@ def test_demo_server_routes_are_live_but_external_actions_are_forbidden(tmp_path
         with urllib.request.urlopen(base + "/", timeout=5) as response:
             assert response.status == 200
             assert b'data-demo-mode="true"' in response.read()
-        with urllib.request.urlopen(base + "/api/tasks/2/cowork", timeout=5) as response:
-            assert response.status == 200
-            assert b'"state": "ready"' in response.read()
         for path, body in (
             ("/api/sync-status", b"{}"),
-            ("/api/tasks/1/refresh", b"{}"),
             ("/api/tasks/1/skill", b'{"skill":"follow-up"}'),
-            ("/api/tasks/1/cowork", b'{"interaction_mode":"interaction"}'),
-            ("/api/tasks/2/cowork/refine", b'{"instruction":"Improve it"}'),
-            (
-                "/api/tasks/3/cowork/answer",
-                b'{"invocation_id":"demo","answers":{"0":"answer"}}',
-            ),
-            ("/api/tasks/2/cowork/execute", b"{}"),
         ):
             request = urllib.request.Request(
                 base + path,
@@ -161,13 +263,6 @@ def test_demo_server_routes_are_live_but_external_actions_are_forbidden(tmp_path
                 urllib.request.urlopen(request, timeout=5)
             assert error.value.code == 403
             assert b"demo mode" in error.value.read().lower()
-        delete = urllib.request.Request(
-            base + "/api/tasks/3/cowork",
-            method="DELETE",
-        )
-        with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(delete, timeout=5)
-        assert error.value.code == 403
     finally:
         stopped = _run(tmp_path, "stop")
         assert stopped.returncode == 0, stopped.stderr

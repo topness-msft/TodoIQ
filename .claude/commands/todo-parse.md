@@ -4,13 +4,26 @@ description: Parse unparsed tasks — Claude reads raw text and enriches with st
 
 Parse tasks that were added via the dashboard input bar and need enrichment.
 
+Every database connection in this command must use:
+
+```python
+db_path = __import__('os').environ.get(
+    'TODONESS_DB_PATH',
+    '$PROJECT_ROOT/data/claudetodo.db',
+)
+```
+
+When `RIVETER_DEMO_MODE=1`, keep the turn fast and focused: resolve named people,
+infer the structured task fields and coaching, but skip OOO/presence checks,
+related-meeting research, and Step 3c skill-output generation.
+
 ## Step 1: Fetch unparsed tasks
 
 ```python
 import sqlite3
 from datetime import datetime, timezone
 
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 tasks = conn.execute("SELECT id, raw_input, title, description, key_people, action_type, user_notes, source_type, source_url, parse_status FROM tasks WHERE parse_status IN ('unparsed', 'queued') AND status NOT IN ('deleted', 'completed')").fetchall()
 conn.close()
@@ -21,7 +34,7 @@ If no unparsed tasks, say "All tasks are already parsed!" and stop.
 ## Step 2: For each unparsed task, mark as 'parsing'
 
 ```python
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn = sqlite3.connect(db_path)
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute("UPDATE tasks SET parse_status = 'parsing', updated_at = ? WHERE id = ?", (now, task_id))
 conn.commit()
@@ -265,7 +278,7 @@ If there are unanswered questions, make a single WorkIQ call with all questions:
 After getting the response, write answers back into `user_notes` by inserting `  → [answer text]` on the line immediately below each answered question. Use:
 
 ```python
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn = sqlite3.connect(db_path)
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 task_id = TASK_ID
 qa_pairs = [('@WorkIQ question line text', 'answer text'), ...]
@@ -291,7 +304,7 @@ Replace TASK_ID and the question/answer pairs with actual values. Skip this step
 **For full parse:**
 
 ```python
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn = sqlite3.connect(db_path)
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute(
     """UPDATE tasks
@@ -314,7 +327,7 @@ Note: `waiting_activity` is the JSON string from the OOO check (or null if perso
 **For coaching-only re-parse:**
 
 ```python
-conn = sqlite3.connect('$PROJECT_ROOT/data/claudetodo.db')
+conn = sqlite3.connect(db_path)
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 conn.execute(
     """UPDATE tasks

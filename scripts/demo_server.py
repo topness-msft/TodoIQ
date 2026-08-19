@@ -26,6 +26,9 @@ PID_PATH = DEMO_DIR / "riveter-demo.pid"
 
 def _configure(db_path=DB_PATH):
     os.environ["RIVETER_DEMO_MODE"] = "1"
+    os.environ["RIVETER_DEMO_ALLOW_TODO_PARSE"] = "1"
+    os.environ["RIVETER_DEMO_ALLOW_COWORK_SESSION"] = "1"
+    os.environ["RIVETER_DEMO_ALLOW_COWORK_EXECUTE"] = "1"
     os.environ["TODONESS_DB_PATH"] = str(db_path)
     os.environ["TODONESS_SETTINGS_PATH"] = str(SETTINGS_PATH)
     os.environ["TODONESS_LOG_FILE"] = str(LOG_PATH)
@@ -119,7 +122,7 @@ def _write_settings():
         json.dumps(
             {
                 "demo_mode": True,
-                "cowork_api_transport": False,
+                "cowork_api_transport": True,
                 "task_workspaces": {"enabled": False},
                 "meeting_preferences": {
                     "default_minutes": 25,
@@ -166,202 +169,142 @@ def _seed_database(path):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     from src.db import get_connection, init_db
-    from src.models import create_task, create_task_action
+    from src.models import create_task
 
     conn = get_connection()
     init_db(conn)
     conn.close()
 
     people = {
-        "maya": json.dumps(
-            [{"name": "Maya Chen", "email": "maya.chen@example.test"}]
-        ),
-        "jonah": json.dumps(
-            [{"name": "Jonah Lee", "email": "jonah.lee@example.test"}]
-        ),
-    }
-    create_task(
-        "Review Northwind launch readiness",
-        "Confirm the pilot owners, launch risks, and Friday decision.",
-        status="suggested",
-        priority=2,
-        source_type="chat",
-        source_id="demo::northwind-launch",
-        source_snippet="Can you pull the launch decision points together?",
-        coaching_text="Summarize the decision and propose a concise follow-up.",
-        action_type="follow-up",
-        key_people=people["maya"],
-    )
-    ready = create_task(
-        "Reply to Maya with the pilot recap",
-        "Send the agreed outcomes and the two owners from yesterday's review.",
-        priority=1,
-        source_type="email",
-        source_id="demo::pilot-recap",
-        source_snippet="Could you send me the final recap before noon?",
-        coaching_text="Draft a short recap in email form.",
-        action_type="respond-email",
-        key_people=people["maya"],
-        due_date="2026-08-21",
-    )
-    action = create_task_action(
-        ready["id"],
-        intent=ready["coaching_text"],
-        destination_kind="one_to_one",
-        destination_ref="maya.chen@example.test",
-        destination_display="Maya Chen",
-        destination_source="demo",
-        destination_confirmed_at="2026-08-19T09:00:00Z",
-        delivery_channel="email",
-        conversation_id="demo:user:ready",
-    )
-    _set_action_result(
-        action["id"],
-        state="ready",
-        finding="The pilot is approved. Maya owns enablement; Jonah owns telemetry.",
-        draft=(
-            "Subject: Northwind pilot recap\n\n"
-            "Hi Maya,\n\nThe pilot is approved. You have enablement, Jonah has "
-            "telemetry, and Friday is the launch checkpoint.\n\nThanks,\nPhil"
-        ),
-        terminal_status="ok",
-        tool_trace="[]",
-        completed_at="2026-08-19T09:02:00Z",
-    )
-    schedule = create_task(
-        "Schedule the Northwind decision review",
-        "Find a 25-minute slot with Jonah before Friday.",
-        priority=2,
-        source_type="manual",
-        source_id="demo::decision-review",
-        coaching_text="Check Jonah's work schedule before offering times.",
-        action_type="schedule-meeting",
-        key_people=people["jonah"],
-        due_date="2026-08-21",
-    )
-    blocked = {
-        "invocation_id": "demo-timezone-fallback",
-        "questions": [
+        "meeting": json.dumps([
             {
-                "id": "0",
-                "producer_id": "slot",
-                "header": "Availability needs another check",
-                "question": (
-                    "I could not verify suitable working-hours slots for every "
-                    "attendee. Tell me what to check or change."
-                ),
-                "options": [],
-                "multi_select": False,
-                "image_url": "",
-            }
-        ],
-        "schedule_evidence": {
-            "valid": False,
-            "source": "FindMeetingTimes",
-            "attendees": ["jonah.lee@example.test"],
-            "working_hours_checked": False,
-            "rejected_option_values": [],
-        },
+                "name": "Bobby Chang",
+                "email": "bobby.chang@microsoft.com",
+                "aad_object_id": "dbebad9c-cce5-4aa8-9df7-d4a43a80db03",
+            },
+            {
+                "name": "Em D'Arcy",
+                "email": "emdarcy@microsoft.com",
+                "aad_object_id": "f5a69d2c-b748-407e-aa01-f6f3c6ac9250",
+            },
+        ]),
+        "raj": json.dumps([{
+            "name": "Raj Gopalakrishnan",
+            "email": "rajgopal@microsoft.com",
+            "aad_object_id": "fe1c66c5-49f4-49ab-b275-0c1eb2d2cbf6",
+        }]),
+        "exec_pane": json.dumps([
+            {
+                "name": "Adrian Maclean",
+                "email": "adrian.maclean@microsoft.com",
+                "aad_object_id": "de428c82-dd53-45dc-b71d-1e15084805ed",
+            },
+            {
+                "name": "Srini Raghavan",
+                "email": "srini.raghavan@microsoft.com",
+                "aad_object_id": "0431fcd9-f1c7-49f5-8d9f-1ba00fc5b7cc",
+            },
+        ]),
     }
-    create_task_action(
-        schedule["id"],
-        intent=schedule["coaching_text"],
-        conversation_id="demo:user:timezone",
-        blocked_question=json.dumps(blocked, separators=(",", ":")),
-        interaction_mode="interaction",
-    )
-    delivered = create_task(
-        "Send the partner handoff",
-        "Share the approved handoff summary with Maya.",
-        priority=3,
-        source_type="chat",
-        source_id="demo::partner-handoff",
-        coaching_text="Send the approved handoff note.",
-        action_type="follow-up",
-        key_people=people["maya"],
-    )
-    action = create_task_action(
-        delivered["id"],
-        destination_kind="one_to_one",
-        destination_ref="maya.chen@example.test",
-        destination_display="Maya Chen",
-        destination_source="demo",
-        destination_confirmed_at="2026-08-18T16:00:00Z",
-        delivery_channel="teams",
-        conversation_id="demo:user:delivered",
-    )
-    _set_action_result(
-        action["id"],
-        state="executed",
-        finding="The approved handoff was delivered.",
-        draft="Maya — the partner handoff is complete. Owners and next steps are attached.",
-        terminal_status="ok",
-        tool_trace="[]",
-        delivery_confirmed_at="2026-08-18T16:05:00Z",
-        completed_at="2026-08-18T16:05:00Z",
-    )
-    uncertain = create_task(
-        "Confirm the telemetry update",
-        "Check whether the update reached the project channel.",
-        priority=3,
-        source_type="chat",
-        source_id="demo::telemetry-update",
-        coaching_text="Post the approved telemetry update.",
-        action_type="follow-up",
-        key_people=people["jonah"],
-    )
-    action = create_task_action(
-        uncertain["id"],
-        destination_kind="group",
-        destination_ref="demo-project-channel",
-        destination_display="Northwind project channel",
-        destination_source="demo",
-        delivery_channel="teams",
-        conversation_id="demo:user:unconfirmed",
-    )
-    _set_action_result(
-        action["id"],
-        state="execute_unconfirmed",
-        draft="Telemetry is green and the dashboard is ready for Friday.",
-        terminal_status="ok",
-        error="Delivery could not be confirmed in the demo.",
-        tool_trace="[]",
-        completed_at="2026-08-18T15:00:00Z",
-    )
     create_task(
-        "Waiting on the security checklist",
-        "Maya is confirming the final exception owners.",
-        status="waiting",
-        priority=2,
-        source_type="email",
-        source_id="demo::security-checklist",
-        action_type="awaiting-response",
-        key_people=people["maya"],
-        user_notes="Follow up Thursday afternoon if there is no response.",
-    )
-    create_task(
-        "Prepare Friday's launch briefing",
-        "Build the five-minute executive briefing for the pilot decision.",
-        status="active",
-        priority=1,
-        source_type="meeting",
-        source_id="demo::launch-briefing",
-        action_type="prepare",
-        key_people=people["maya"],
-        related_meeting="Northwind pilot launch review — Friday 10:00 AM",
-        skill_output=(
-            "## Decision\nApprove the pilot launch.\n\n"
-            "## Watch items\n- Security checklist\n- Telemetry owner coverage"
-        ),
-    )
-    create_task(
-        "Publish the customer FAQ",
-        "The approved FAQ is now available to the field team.",
-        status="completed",
+        "Review the demo run-of-show",
+        "Confirm the opening story, live task flow, and closing call to action.",
+        status="suggested",
         priority=3,
         source_type="manual",
-        source_id="demo::customer-faq",
+        source_id="demo::run-of-show",
+        coaching_text="Review the flow and accept it when the demo sequence is ready.",
         action_type="review-document",
+    )
+    create_task(
+        "Schedule the Friday demo review with Bobby Chang and Em D'Arcy",
+        "Find a 30-minute time this week to walk through the Friday Riveter demo.",
+        priority=2,
+        source_type="manual",
+        source_id="demo::bobby-em-schedule",
+        coaching_text=(
+            "Find a 30-minute working-hours slot with Bobby Chang and Em D'Arcy "
+            "this week and prepare a focused demo-review agenda."
+        ),
+        action_type="schedule-meeting",
+        key_people=people["meeting"],
+        due_date="2026-08-21",
+    )
+    create_task(
+        "Send Raj the complete Kickstarter adoption materials in Teams",
+        (
+            "Reply to Raj Gopalakrishnan with the complete Kickstarter adoption "
+            "module and the fuller deck he asked about."
+        ),
+        priority=2,
+        source_type="chat",
+        source_id="chat::rajgopal@microsoft.com::1786489142550",
+        source_url=(
+            "https://teams.microsoft.com/l/message/"
+            "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
+            "fe1c66c549f449abb2750c1eb2d2cbf6@unq.gbl.spaces/"
+            "1786489142550?context=%7B%22contextType%22:%22chat%22%7D"
+        ),
+        source_snippet=(
+            "The adoption module only has seven slides. Is there a more complete "
+            "set available?"
+        ),
+        coaching_text=(
+            "Send Raj Gopalakrishnan the complete Kickstarter adoption resources "
+            "and directly answer his question about the fuller deck."
+        ),
+        action_type="follow-up",
+        key_people=people["raj"],
+        due_date="2026-08-21",
+    )
+    create_task(
+        "Reply to Adrian about Srini's executive pane",
+        (
+            "Respond to Adrian Maclean about tuning Srini Raghavan's executive "
+            "pane so it shows agent status, progress, and blockers clearly."
+        ),
+        priority=2,
+        source_type="email",
+        source_id="email::adrian.maclean@microsoft.com::exec-pane",
+        source_snippet=(
+            "Can we report what agents and progress are deployed, then show the "
+            "blockers on the remaining work?"
+        ),
+        coaching_text=(
+            "Reply to Adrian Maclean with a concise proposal for improving Srini "
+            "Raghavan's executive pane and the next iteration."
+        ),
+        action_type="respond-email",
+        key_people=people["exec_pane"],
+        due_date="2026-08-21",
+    )
+    create_task(
+        "Waiting on the final demo video assets",
+        "The latest screenshots and title card are still being finalized.",
+        status="waiting",
+        priority=3,
+        source_type="manual",
+        source_id="demo::video-assets",
+        action_type="awaiting-response",
+        user_notes="Check again Thursday afternoon.",
+    )
+    create_task(
+        "Finish the isolated demo environment",
+        "The fictional database, live integrations, and demo URL are ready.",
+        status="completed",
+        priority=2,
+        source_type="manual",
+        source_id="demo::environment-complete",
+        action_type="general",
+    )
+    create_task(
+        "Send the outdated demo script",
+        "This version was superseded by the live run-of-show.",
+        status="dismissed",
+        priority=5,
+        source_type="manual",
+        source_id="demo::outdated-script",
+        action_type="general",
     )
     create_task(
         "Check pilot adoption metrics",
@@ -407,7 +350,12 @@ def serve():
     _configure()
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    from src.app import make_app, setup_logging
+    from src.app import (
+        PARSE_CHECK_INTERVAL_MS,
+        _check_unparsed,
+        make_app,
+        setup_logging,
+    )
     from src.db import get_connection, init_db
     import tornado.ioloop
 
@@ -421,6 +369,11 @@ def serve():
     app.demo_mode = True
     app.listen(PORT, address="127.0.0.1")
     ioloop = tornado.ioloop.IOLoop.current()
+    parse_callback = tornado.ioloop.PeriodicCallback(
+        _check_unparsed, PARSE_CHECK_INTERVAL_MS
+    )
+    parse_callback.start()
+    app.parse_callback = parse_callback
 
     def stop_loop(*_args):
         ioloop.add_callback(ioloop.stop)
@@ -431,6 +384,7 @@ def serve():
     try:
         ioloop.start()
     finally:
+        parse_callback.stop()
         if _pid() == os.getpid():
             PID_PATH.unlink(missing_ok=True)
     return 0
