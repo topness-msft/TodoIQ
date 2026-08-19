@@ -146,6 +146,16 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "confirmed attendee"):
             compose_prompt(_task(key_people="[]"))
 
+    def test_it_rejects_uncertain_group_attendance(self):
+        people = [{
+            "name": "Exact Chat Member",
+            "email": "member@example.test",
+            "aad_object_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "attendance_uncertain": True,
+        }]
+        with self.assertRaisesRegex(ValueError, "confirmed attendee"):
+            compose_prompt(_task(key_people=json.dumps(people)))
+
 
 class TestSchedulingUsesCalendarVoice(unittest.TestCase):
     def test_teams_fallback_does_not_turn_meeting_into_chat_draft(self):

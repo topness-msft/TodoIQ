@@ -511,7 +511,11 @@ def schedule_attendees(task) -> list[dict]:
     selected = []
     seen = set()
     for person in people:
-        if not isinstance(person, dict) or person.get("unresolved") is True:
+        if (
+            not isinstance(person, dict)
+            or person.get("unresolved") is True
+            or person.get("attendance_uncertain") is True
+        ):
             return []
         name = _clean(person.get("name")).strip()
         email = _clean(person.get("email")).strip().lower()

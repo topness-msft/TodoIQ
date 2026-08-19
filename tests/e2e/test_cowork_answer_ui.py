@@ -1079,6 +1079,14 @@ def test_directory_match_requires_explicit_dropdown_confirmation(
         expect(primary).to_contain_text("Henry James")
         expect(primary).to_contain_text("henry@microsoft.com")
 
+        refresh_requests = []
+        page.on(
+            "request",
+            lambda request: refresh_requests.append(request.url)
+            if request.method == "POST"
+            and request.url.endswith(f"/api/tasks/{task_id}/refresh")
+            else None,
+        )
         with page.expect_request(
             lambda request: request.method == "PUT"
             and request.url.endswith(f"/api/tasks/{task_id}")
@@ -1088,6 +1096,162 @@ def test_directory_match_requires_explicit_dropdown_confirmation(
         people = json.loads(request_info.value.post_data_json["key_people"])
         assert people[0]["name"] == "Henry James"
         assert people[0]["email"] == "henry@microsoft.com"
+        assert "unresolved" not in people[0]
+        page.wait_for_timeout(300)
+        assert refresh_requests == []
+        persisted = page.request.get(f"{base_url}/api/tasks/{task_id}").json()["task"]
+        persisted_people = json.loads(persisted["key_people"])
+        assert persisted["parse_status"] == "parsed"
+        assert persisted_people[0]["name"] == "Henry James"
+        assert "unresolved" not in persisted_people[0]
+
+        page.reload()
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate("taskId => selectTask(taskId)", task_id)
+        expect(page.locator(".person-pill.is-unresolved")).to_have_count(0)
+        expect(page.locator(".person-pill")).to_contain_text("Henry James")
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_selecting_an_alternate_identity_refreshes_once(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Henry James',
+                    email: 'henry@microsoft.com',
+                    unresolved: true,
+                    alternatives: [{
+                        name: 'Henry Jamison',
+                        email: 'henry.jamison@microsoft.com'
+                    }]
+                }]);
+                window.identityRefreshes = [];
+                window.attendanceAlerts = [];
+                refreshTask = id => window.identityRefreshes.push(id);
+                window.alert = message => window.attendanceAlerts.push(message);
+                _cwActions[taskId] = null;
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        page.locator(".person-pill.is-unresolved").click()
+        alternate = page.locator(".alternative-item").filter(
+            has_text="Henry Jamison"
+        )
+        alternate.click()
+        page.wait_for_function(
+            "taskId => window.identityRefreshes.length === 1", arg=task_id
+        )
+
+        assert page.evaluate("window.identityRefreshes") == [task_id]
+        persisted = page.request.get(f"{base_url}/api/tasks/{task_id}").json()["task"]
+        people = json.loads(persisted["key_people"])
+        assert people[0]["name"] == "Henry Jamison"
+        assert people[0]["email"] == "henry.jamison@microsoft.com"
+        assert "unresolved" not in people[0]
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_exact_group_member_requires_attendance_confirmation(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a group review", "parse_status": "parsed"},
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+        )
+        page.evaluate(
+            """taskId => {
+                const task = tasks.find(t => t.id === taskId);
+                task.parse_status = 'parsed';
+                task.action_type = 'schedule-meeting';
+                task.key_people = JSON.stringify([{
+                    name: 'Exact Chat Member',
+                    email: 'member@microsoft.com',
+                    aad_object_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                    attendance_uncertain: true,
+                    alternatives: []
+                }]);
+                window.identityRefreshes = [];
+                window.attendanceAlerts = [];
+                refreshTask = id => window.identityRefreshes.push(id);
+                window.alert = message => window.attendanceAlerts.push(message);
+                _cwActions[taskId] = null;
+                selectedTaskId = taskId;
+                renderDetailPane(task);
+            }""",
+            task_id,
+        )
+
+        pill = page.locator(".person-pill.is-unresolved")
+        expect(pill).to_have_attribute(
+            "title", "Confirm this attendee before scheduling"
+        )
+        pill.click()
+        dropdown = page.locator(".alternatives-dropdown.open")
+        expect(dropdown).to_contain_text(
+            "Confirm attendee"
+        )
+        expect(page.get_by_test_id("cw-identity-pending")).to_contain_text(
+            "Confirm who should attend"
+        )
+        pill_box = pill.bounding_box()
+        dropdown_box = dropdown.bounding_box()
+        assert pill_box and pill_box["height"] >= 24 and pill_box["width"] >= 120
+        assert dropdown_box and dropdown_box["height"] >= 70
+        page.screenshot(
+            path=os.path.join(TEMP_DIR, "cowork-attendance-confirmation.png"),
+            full_page=True,
+        )
+
+        page.evaluate(
+            """taskId => {
+                cwStart(taskId);
+                _cwActions[taskId] = {
+                    task_id: taskId,
+                    state: 'ready',
+                    action_type: 'schedule-meeting',
+                    draft: 'Meeting review'
+                };
+                cwOpenExecuteConfirm(taskId);
+            }""",
+            task_id,
+        )
+        assert page.evaluate("window.attendanceAlerts") == [
+            "Confirm whether Exact Chat Member should attend before scheduling.",
+            "Confirm whether Exact Chat Member should attend before scheduling.",
+        ]
+        assert page.evaluate("window.identityRefreshes") == []
+
+        page.locator(".alternative-item.selected").click()
+        page.wait_for_timeout(300)
+
+        assert page.evaluate("window.identityRefreshes") == []
+        persisted = page.request.get(f"{base_url}/api/tasks/{task_id}").json()["task"]
+        people = json.loads(persisted["key_people"])
+        assert "attendance_uncertain" not in people[0]
         assert "unresolved" not in people[0]
     finally:
         page.request.delete(f"{base_url}/api/tasks/{task_id}")

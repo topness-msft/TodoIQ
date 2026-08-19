@@ -246,6 +246,28 @@ def _unresolved_schedule_people(task: dict) -> list[str]:
     return unresolved
 
 
+def _uncertain_schedule_attendees(task: dict) -> list[str]:
+    """Exact identities whose inclusion in the meeting is not yet confirmed."""
+    return [
+        (person.get("name") or person.get("email") or "selected attendee").strip()
+        for person in _people_with_metadata(task)
+        if person.get("attendance_uncertain") is True
+    ]
+
+
+def _people_with_metadata(task: dict) -> list[dict]:
+    raw = (task.get("key_people") or "").strip()
+    if not raw.startswith("[") and not raw.startswith("{"):
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    return [person for person in data if isinstance(person, dict)]
+
+
 def _schedule_destination(people: list[dict]) -> tuple[str | None, str | None]:
     resolved = []
     seen = set()
@@ -1016,6 +1038,13 @@ class CoworkHandler(tornado.web.RequestHandler):
         if task.get("action_type") == "schedule-meeting":
             confirmed = schedule_attendees(task)
             confirmed_schedule_people = confirmed
+            uncertain_attendance = _uncertain_schedule_attendees(task)
+            if uncertain_attendance:
+                names = ", ".join(uncertain_attendance)
+                return self._fail(
+                    400,
+                    f"Confirm whether {names} should attend before scheduling.",
+                )
             unresolved = _unresolved_schedule_people(task)
             if not confirmed and unresolved == ["selected attendees"]:
                 return self._fail(

@@ -1185,7 +1185,9 @@ function renderPeoplePills(keyPeople, taskId) {
     var html = '<div class="people-list">';
     people.forEach(function(person, idx) {
         var hasAlts = person.alternatives && person.alternatives.length > 0;
+        var attendanceUncertain = person.attendance_uncertain === true;
         var unresolved = person.unresolved === true
+            || attendanceUncertain
             || !String(person.email || '').trim();
         var pillId = 'pill-' + taskId + '-' + idx;
 
@@ -1194,7 +1196,11 @@ function renderPeoplePills(keyPeople, taskId) {
         // Pill — always clickable (dropdown always available for remove)
         html += '<div class="person-pill has-alternatives'
             + (unresolved ? ' is-unresolved' : '') + '" '
-            + (unresolved ? 'title="Choose a resolved identity before scheduling" ' : '')
+            + (unresolved ? 'title="'
+                + (attendanceUncertain
+                    ? 'Confirm this attendee before scheduling'
+                    : 'Choose a resolved identity before scheduling')
+                + '" ' : '')
             + 'onclick="event.stopPropagation(); togglePeopleDropdown(\'' + pillId + '\')">'
             + '<span class="person-pill-avatar">' + getInitials(person.name) + '</span>'
             + '<span class="person-name">' + escapeHtml(person.name) + '</span>';
@@ -1207,7 +1213,10 @@ function renderPeoplePills(keyPeople, taskId) {
         html += '<div class="alternatives-dropdown" id="dropdown-' + pillId + '">';
         if (hasAlts || (unresolved && person.email)) {
             html += '<div class="alternatives-header">'
-                + (unresolved ? 'Choose the right person' : 'Did you mean?') + '</div>';
+                + (attendanceUncertain
+                    ? 'Confirm attendee'
+                    : unresolved ? 'Choose the right person' : 'Did you mean?')
+                + '</div>';
 
             // Current selection (highlighted)
             html += '<div class="alternative-item selected" '
@@ -1281,11 +1290,15 @@ function selectPerson(taskId, personIdx, altIdx) {
     var oldName = person.name;
     var newName = person.name;
     if (altIdx < 0) {
-        if (person.unresolved !== true || !person.email) {
+        if (
+            (person.unresolved !== true && person.attendance_uncertain !== true)
+            || !person.email
+        ) {
             closeAllDropdowns();
             return;
         }
         delete person.unresolved;
+        delete person.attendance_uncertain;
         people[personIdx] = person;
     } else {
         var alt = person.alternatives[altIdx];
@@ -1337,8 +1350,10 @@ function selectPerson(taskId, personIdx, altIdx) {
             if (idx >= 0) tasks[idx] = data.task;
             renderDetailPane(data.task);
             renderTaskList();
-            // Auto-queue refresh so Claude re-enriches with the correct person's context
-            refreshTask(data.task.id);
+            // Confirming the already-selected exact profile changes no task
+            // context, so do not start an expensive coaching refresh. Choosing
+            // a different alternative can change names and context, so refresh.
+            if (altIdx >= 0) refreshTask(data.task.id);
         }
     })
     .catch(function(err) { console.error('Failed to update person:', err); });
@@ -3439,10 +3454,12 @@ function cwMeetingPeople(task) {
             return {
                 name: String(person.name || '').trim(),
                 email: String(person.email || '').trim().toLowerCase(),
-                unresolved: person.unresolved === true
+                unresolved: person.unresolved === true,
+                attendanceUncertain: person.attendance_uncertain === true
             };
         }).filter(function(person) {
-            if (person.unresolved || !person.name || !person.email || seen[person.email]) {
+            if (person.unresolved || person.attendanceUncertain
+                    || !person.name || !person.email || seen[person.email]) {
                 return false;
             }
             seen[person.email] = true;
@@ -3460,7 +3477,17 @@ function cwUnresolvedMeetingPeople(task) {
             var email = String(person.email || '').trim().toLowerCase();
             var duplicate = email && seen[email];
             if (email) seen[email] = true;
-            return !name || person.unresolved === true || !email || duplicate;
+            return !name
+                || person.unresolved === true
+                || person.attendance_uncertain === true
+                || !email
+                || duplicate;
+        });
+}
+
+function cwAttendanceUncertainPeople(task) {
+        return cwUnresolvedMeetingPeople(task).filter(function(person) {
+            return person.attendance_uncertain === true;
         });
 }
 
@@ -3584,11 +3611,16 @@ function cwOpenExecuteConfirm(taskId) {
         if (isMeeting) {
             var unresolved = cwUnresolvedMeetingPeople(task);
             if (unresolved.length) {
-                window.alert('Resolve ' + unresolved.map(function(person) {
-                    return person.name;
-                }).join(', ') + ' in Key People before scheduling. '
-                    + 'Riveter is refreshing identity matches now.');
-                refreshTask(taskId);
+                var attendanceUncertain = cwAttendanceUncertainPeople(task);
+                if (attendanceUncertain.length) {
+                    window.alert('Confirm whether ' + attendanceUncertain.map(
+                        function(person) { return person.name; }
+                    ).join(', ') + ' should attend before scheduling.');
+                } else {
+                    window.alert('Resolve ' + unresolved.map(function(person) {
+                        return person.name;
+                    }).join(', ') + ' in Key People before scheduling.');
+                }
                 return;
             }
             var meetingPeople = cwMeetingPeople(task);
@@ -4257,6 +4289,7 @@ function renderCoworkCard(task) {
         ? cwUnresolvedMeetingPeople(task)
         : [];
     if (!liveAction && unresolvedPeople.length) {
+        var attendanceUncertain = cwAttendanceUncertainPeople(task);
         var missingAttendees = unresolvedPeople.some(function(person) {
             return person.missing === true;
         });
@@ -4268,13 +4301,20 @@ function renderCoworkCard(task) {
         });
         return cwShell('', 'needs you', task,
             '<div class="cw-blocked" data-testid="cw-identity-pending">'
-            + '<b>' + (missingAttendees
+            + '<b>' + (attendanceUncertain.length
+                ? 'Confirm who should attend.'
+                : missingAttendees
                 ? 'Add and confirm at least one attendee.'
                 : matchesReady
                 ? 'Confirm the attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.')
                 : 'Riveter is resolving attendee ' + (unresolvedPeople.length === 1 ? 'identity.' : 'identities.'))
             + '</b><div class="cw-blocked-sub">'
-            + (missingAttendees
+            + (attendanceUncertain.length
+                ? 'For ' + attendanceUncertain.map(function(person) {
+                    return '<b>' + escapeHtml(String(person.name || '').trim()) + '</b>';
+                }).join(', ') + ', choose Confirm attendee in Key People or remove '
+                    + 'them from this meeting.'
+                : missingAttendees
                 ? 'Riveter is resolving the linked Teams participants now.'
                 : matchesReady
                 ? 'Choose the correct match for ' + unresolvedNames
@@ -4563,17 +4603,31 @@ function cwStart(taskId, isRedo) {
     var unresolved = task && task.action_type === 'schedule-meeting'
         ? cwUnresolvedMeetingPeople(task) : [];
     if (unresolved.length) {
+        var attendanceUncertain = cwAttendanceUncertainPeople(task);
+        if (attendanceUncertain.length) {
+            window.alert('Confirm whether ' + attendanceUncertain.map(
+                function(person) { return person.name; }
+            ).join(', ') + ' should attend before scheduling.');
+            return;
+        }
         if (unresolved.some(function(person) { return person.missing === true; })) {
             window.alert('Add and confirm at least one attendee before scheduling. '
                 + 'Riveter is resolving the linked Teams participants now.');
             refreshTask(taskId);
             return;
         }
-        window.alert('Resolve ' + unresolved.map(function(person) {
+        var unresolvedNames = unresolved.map(function(person) {
             return person.name;
-        }).join(', ') + ' in Key People before scheduling. '
-            + 'Riveter is refreshing identity matches now.');
-        refreshTask(taskId);
+        }).join(', ');
+        var needsDirectoryLookup = unresolved.some(function(person) {
+            return !String(person.email || '').trim();
+        });
+        window.alert('Resolve ' + unresolvedNames
+            + ' in Key People before scheduling.'
+            + (needsDirectoryLookup
+                ? ' Riveter is refreshing identity matches now.'
+                : ' Choose the correct match in Key People.'));
+        if (needsDirectoryLookup) refreshTask(taskId);
         return;
     }
     var body = {
@@ -4743,7 +4797,9 @@ function cwInteractionFields(taskId, interaction) {
                 if (!person || typeof person !== 'object') return [];
                 var name = String(person.name || '').trim();
                 var email = String(person.email || '').trim().toLowerCase();
-                if (person.unresolved === true || !name || !email || emails[email]) return [];
+                if (person.unresolved === true
+                        || person.attendance_uncertain === true
+                        || !name || !email || emails[email]) return [];
                 emails[email] = true;
                 attendees.push({name: name, email: email});
             }

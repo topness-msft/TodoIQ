@@ -43,29 +43,48 @@ conn.close()
 
 ## Step 2b: Check if this is a coaching-only re-parse
 
-A task needs **coaching-only** re-parse if it already has `title`, `description`, and `key_people` populated (i.e. it was previously fully parsed). This happens when the user changes the `action_type` or edits the description from the dashboard.
+A task needs **coaching-only** re-parse if it already has `title`, `description`, and `key_people` populated (i.e. it was previously fully parsed). This happens when the user changes the `action_type`, edits the description, or chooses a different identity from the dashboard.
 
-For coaching-only tasks, **skip Step 3** but first do **Step 2c** (incremental name resolution) and **Step 2d** (exact Teams-link participant resolution), then jump to **Step 3b** to re-generate `coaching_text`.
+For coaching-only tasks, **skip Step 3**. Do Step 2c only for entries that
+remain unresolved or lack an email. Do not repeat Step 2d when `key_people`
+already contains confirmed email-backed people. Never replace confirmed `key_people`,
+never restore `unresolved` on a confirmed person, and never re-add a person the user removed.
+Then jump to Step 3b to regenerate `coaching_text`.
 
 ## Step 2c: Incremental name resolution for coaching-only re-parse
 
-Before regenerating coaching, resolve both name-only entries already in `key_people` and names in the current `title`, `description` and `user_notes` that are NOT already in `key_people`:
+Before regenerating coaching, resolve only existing name-only or unresolved
+entries already in `key_people`:
 
 1. Parse existing `key_people` JSON. Treat every entry without a non-empty `email` as unresolved, even if its name is already present.
-2. For each unresolved entry, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Replace that entry with the best match as the primary person and the other matches in `alternatives`. Preserve the typed name as an alternative when it differs from the primary match. Keep `unresolved: true` on the primary person even after adding its email; directory resolution proposes candidates, but only the user's explicit choice in the alternate-name dropdown confirms the identity.
-3. Build the already-resolved name set from the updated primary people and their alternatives.
-4. Scan `title`, `description` and `user_notes` for capitalized multi-word tokens that look like person names (e.g. "Alex Kim", "Sarah") that aren't in the resolved set.
-5. Resolve each new name with the same WorkIQ query and append its best match plus alternatives to the existing array with `unresolved: true`. Every WorkIQ-derived candidate requires an explicit dropdown choice; the top search result is never implicit confirmation.
-6. Update the `key_people` column before proceeding to Step 3b.
+2. For each unresolved entry, first run an exact directory query for the full
+   display name. When it returns exactly one internal tenant profile whose
+   normalized display name matches and which has an email, persist that exact
+   profile without `unresolved`. Multiple plausible matches, fuzzy matches,
+   guest/external-only results, or profiles without an email remain candidates:
+   put the best candidate first, retain the others in `alternatives`, and keep
+   `unresolved: true`.
+3. Do not scan task prose for new people during coaching-only refresh. The
+   existing selected list is authoritative; names absent from it may have been
+   removed by the user.
+4. Update only the existing unresolved entries in `key_people` before proceeding
+   to Step 3b.
 
-Existing email-backed people without an `unresolved` marker must be preserved unchanged. Name-only people are upgraded in place so the existing alternate-name dropdown becomes the required explicit identity choice before scheduling.
+Existing email-backed people without an `unresolved` marker must be preserved
+unchanged. Their presence in `key_people` means the user selected them; a
+coaching refresh must not reconstruct the attendee list from the source chat.
+Name-only or genuinely ambiguous people are upgraded in place so the existing
+alternate-name dropdown remains the explicit confirmation boundary.
 
 ## Step 2d: Resolve exact Teams-link participants
 
-Run this step for full and coaching-only parses whenever `source_url` is a
-`teams.microsoft.com/l/chat/.../conversations` or `/l/message/...` link. Complete
-it before any Cowork scheduling preview. The Teams conversation is authoritative;
-Never substitute a recent chat or recent contact when exact lookup fails.
+Run this step for a full parse whenever `source_url` is a
+`teams.microsoft.com/l/chat/.../conversations` or `/l/message/...` link. For a
+coaching-only parse, run it only when `key_people` is empty; otherwise preserve
+the selected list as described above. Complete it before any Cowork scheduling
+preview. Complete exact participant resolution before any Cowork scheduling preview.
+The Teams conversation is authoritative. Never substitute a recent chat or recent contact
+when exact lookup fails.
 
 1. Fetch the signed-in profile with WorkIQ (`/me?$select=id,displayName,mail,userPrincipalName`)
    and parse the decoded conversation ID from `source_url`.
@@ -84,10 +103,19 @@ Never substitute a recent chat or recent contact when exact lookup fails.
    If the meeting request explicitly names additional attendees, directory-search
    those names with the exact chat participants and topic as context. Store those
    matches with `unresolved: true` and alternatives; never silently select one.
-6. Persist exact 1:1 counterpart profiles in `key_people` as
-   `{name,email,role}`. For a group chat or additional mentioned attendees, persist
-   candidate entries with `unresolved: true` so the user can remove or confirm each
-   person in Key People before scheduling.
+6. Exact membership profiles are confirmed identities; do not add `unresolved`
+   to exact internal profiles. Exact membership proves identity, not meeting attendance.
+   Persist an exact internal 1:1 counterpart as
+   `{name,email,role,aad_object_id}` without `unresolved`. For group chats:
+   - If the request explicitly names attendees, add only those exact members.
+   - If it explicitly says the whole group/everyone should attend, add every
+     exact internal member as confirmed.
+   - Otherwise add exact internal members with `attendance_uncertain: true`.
+     Their identity is confirmed, but the user must confirm or remove each
+     attendee before scheduling.
+   Guest or external membership profiles always keep `unresolved: true` even
+   when membership and email are exact. Additional people found only through
+   name search follow the Step 2c certainty rule.
 7. If exact membership/profile lookup fails, lacks an email, or is ambiguous, leave
    the person unresolved and record the failure in the task description. Never
    continue scheduling with an empty `key_people` list.
@@ -110,7 +138,12 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   - 4 = low importance
   - 5 = information/FYI/not directly actionable by me
 - **due_date**: ISO date (YYYY-MM-DD) resolved from any time references. "Next Wednesday" → calculate from today. "End of week" → Friday. "Tomorrow" → tomorrow. null if none implied.
-- **key_people**: A JSON array of directory-matched people. For each name mentioned, call `ask_work_iq` with "Who is [name]? Give me the top 3-4 most likely matches with full name, email, and role." Pick the best match and store alternatives, but mark every WorkIQ-derived primary with `unresolved: true` until the user explicitly selects it in the alternate-name dropdown. Format:
+- **key_people**: A JSON array of directory-matched people. For each name
+  mentioned, first use an exact full display-name directory query. Exactly one
+  internal tenant profile with an exact normalized display name and email may be
+  persisted as confirmed. Multiple plausible matches, fuzzy matches, guests,
+  or missing-email profiles must keep `unresolved: true` and alternatives for
+  explicit selection. Format:
   ```json
   [{"name": "Alex Kim", "email": "alex.kim@contoso.com", "role": "PM",
     "unresolved": true,

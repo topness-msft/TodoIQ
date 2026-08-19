@@ -536,6 +536,25 @@ class TestStartPreview(CoworkAPITestBase):
             "Resolve the identity for Henry James before scheduling.",
         )
 
+    def test_schedule_meeting_rejects_uncertain_group_attendance(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Exact Chat Member",
+                "email": "member@microsoft.com",
+                "aad_object_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "attendance_uncertain": True,
+            }]),
+        )
+
+        response = self.start(tid)
+
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            json.loads(response.body)["error"],
+            "Confirm whether Exact Chat Member should attend before scheduling.",
+        )
+
     def test_schedule_meeting_rejects_plain_text_attendees(self):
         tid = self.make_task(
             action_type="schedule-meeting",
