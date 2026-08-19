@@ -30,27 +30,49 @@ python -m src.app 8766
 
 ## Usage
 
-The dashboard runs as a local web server. AI features (scanning, parsing, skills) run through Claude Code slash commands:
+Open [http://localhost:8766](http://localhost:8766) and work entirely from the
+Riveter dashboard.
 
-| Command | Purpose |
-|---------|---------|
-| `/todo` | Status summary and dashboard URL |
-| `/todo-add "text"` | Add a task with natural language parsing |
-| `/todo-parse` | Parse tasks added via the dashboard quick-add |
-| `/todo-refresh` | Scan M365 for new actionable items |
-| `/todo-review` | Review tasks needing attention |
-| `/waiting-check` | Check for activity on waiting tasks |
-| `/suggestion-check` | Check if suggested tasks are already resolved |
+### Add a task naturally
 
-Skills generate contextual drafts for individual tasks:
+Type a quick reminder into **Add a task** as you would write it to yourself:
 
-| Skill | Purpose |
-|-------|---------|
-| `respond-email` | Draft an email response |
-| `schedule-meeting` | Suggest meeting times |
-| `teams-message` | Draft a Teams message |
-| `follow-up` | Draft a follow-up message |
-| `prepare` | Build meeting/presentation prep notes |
+> send raj the complete adoption deck in teams
+
+Riveter turns it into a structured task, resolves people, identifies the likely
+next action, and adds useful context. If a name has multiple matches, choose the
+right person from the **Key people** menu before continuing.
+
+### Work the task
+
+1. Select a task from the left pane.
+2. Review its description, priority, due date, people, source, and notes.
+3. Correct anything that Riveter inferred incorrectly.
+4. Choose or change the action type, such as **Schedule meeting**, **Reply by
+   email**, **Follow up**, or **Prepare**.
+5. Add a note when Cowork needs extra context that is not in the source material.
+
+### Use Cowork
+
+Select **Preview with Cowork** to research the task and prepare the action.
+Cowork can check Microsoft 365 context, draft a response, or find meeting
+availability. Nothing is sent during preview.
+
+If Cowork needs a decision, answer directly in the task card. Review and edit
+the final draft or meeting details, confirm the destination, and then use the
+final approval button to perform the action.
+
+### Keep the list current
+
+- **Mark complete** when the work is finished. Delivered Cowork actions also
+  show a subtle completion button in their receipt.
+- Use **Waiting** when someone else owes the next move.
+- Use **Snooze** when the task should return later.
+- Accept useful suggestions and dismiss ones that are not actionable.
+- Use **Refresh** when the task context or source conversation has changed.
+
+Riveter runs Microsoft 365 discovery and task maintenance in the background, so
+normal use does not require terminal commands.
 
 ## Settings
 
