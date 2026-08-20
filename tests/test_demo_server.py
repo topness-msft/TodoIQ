@@ -92,6 +92,25 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
                 "WHERE status = 'suggested' AND waiting_activity IS NOT NULL"
             )
         ]
+        task_four_people = json.loads(
+            conn.execute(
+                "SELECT key_people FROM tasks WHERE source_id=?",
+                ("meeting::demo-video-assets::delivered",),
+            ).fetchone()[0]
+        )
+        suggestion_sources = [
+            row[0]
+            for row in conn.execute(
+                "SELECT source_snippet FROM tasks "
+                "WHERE source_id IN (?,?,?,?) ORDER BY id",
+                (
+                    "chat::rajgopal@microsoft.com::pilot-feedback",
+                    "email::adrian.maclean@microsoft.com::exec-pane-reply",
+                    "meeting::demo-video-assets::delivered",
+                    "meeting::emdarcy@microsoft.com::run-of-show-timing",
+                ),
+            )
+        ]
     finally:
         conn.close()
     assert task_statuses == {
@@ -119,6 +138,11 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         item.get("summary") and item.get("checked_at")
         for item in suggestion_activity
     )
+    assert [person["name"] for person in task_four_people] == [
+        "Bobby Chang",
+        "Em D'Arcy",
+    ]
+    assert all(summary.startswith("On ") for summary in suggestion_sources)
 
 
 def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):
