@@ -107,8 +107,9 @@ Cowork-powered draft, approval, and direct-action flows.
   | `/static/js/dashboard.js` | GET | 200 | Current static feature bundle served |
 
 - Demo verification additionally requires:
-  - exactly 8 seeded tasks, zero action rows after reset
-  - statuses: 3 active; 1 each suggested, waiting, snoozed, completed, dismissed
+  - exactly 12 seeded tasks, zero action rows after reset
+  - statuses: 5 suggested, 3 active; 1 each waiting, snoozed, completed, dismissed
+  - two suggested tasks carry deterministic `likely_resolved` activity
   - active scenarios: Bobby Chang + Em D'Arcy scheduling, Raj Gopalakrishnan
     Teams materials, Adrian Maclean email about Srini Raghavan
   - `data/demo/settings.json` has `cowork_api_transport: true`

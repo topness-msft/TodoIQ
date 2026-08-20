@@ -73,7 +73,7 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
 
     conn = sqlite3.connect(demo_db)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 8
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 12
         task_statuses = {
             row[0]
             for row in conn.execute("SELECT DISTINCT status FROM tasks")
@@ -85,6 +85,13 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         titles = {
             row[0] for row in conn.execute("SELECT title FROM tasks")
         }
+        suggestion_activity = [
+            json.loads(row[0])
+            for row in conn.execute(
+                "SELECT waiting_activity FROM tasks "
+                "WHERE status = 'suggested' AND waiting_activity IS NOT NULL"
+            )
+        ]
     finally:
         conn.close()
     assert task_statuses == {
@@ -100,7 +107,18 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         "Finish the isolated demo environment",
         "Send the outdated demo script",
         "Check pilot adoption metrics",
+        "Follow up on the Kickstarter pilot feedback from Raj",
+        "Check whether Adrian replied about the executive pane layout",
+        "Confirm the demo video assets are ready to use",
+        "Review the run-of-show timing with Em D'Arcy",
     }
+    assert [item["status"] for item in suggestion_activity].count(
+        "likely_resolved"
+    ) == 2
+    assert all(
+        item.get("summary") and item.get("checked_at")
+        for item in suggestion_activity
+    )
 
 
 def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):

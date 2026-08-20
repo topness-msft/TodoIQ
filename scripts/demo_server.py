@@ -252,6 +252,80 @@ def _seed_database(path):
         action_type="review-document",
     )
     create_task(
+        "Follow up on the Kickstarter pilot feedback from Raj",
+        (
+            "Raj shared early reactions to the Kickstarter adoption materials. "
+            "Confirm the remaining feedback and agree on the next revision."
+        ),
+        status="suggested",
+        priority=3,
+        source_type="chat",
+        source_id="chat::rajgopal@microsoft.com::pilot-feedback",
+        source_snippet="I have a few pilot notes to walk through with you.",
+        coaching_text=(
+            "Draft a short Teams follow-up asking Raj for the remaining pilot "
+            "feedback and the most important revision."
+        ),
+        action_type="follow-up",
+        key_people=people["raj"],
+        due_date="2026-08-24",
+    )
+    create_task(
+        "Check whether Adrian replied about the executive pane layout",
+        (
+            "A follow-up check found a newer reply in the executive pane thread. "
+            "Review the response before deciding whether any work remains."
+        ),
+        status="suggested",
+        priority=3,
+        source_type="email",
+        source_id="email::adrian.maclean@microsoft.com::exec-pane-reply",
+        source_snippet=(
+            "The revised executive pane layout works for me. No further changes "
+            "are needed before the review."
+        ),
+        coaching_text="This suggestion appears resolved and can be dismissed.",
+        action_type="awaiting-response",
+        key_people=people["exec_pane"],
+    )
+    create_task(
+        "Confirm the demo video assets are ready to use",
+        (
+            "The final screenshots and title card were previously outstanding. "
+            "A later meeting update indicates the complete asset set was delivered."
+        ),
+        status="suggested",
+        priority=3,
+        source_type="meeting",
+        source_id="meeting::demo-video-assets::delivered",
+        source_snippet=(
+            "All final video assets are in the shared folder and ready for the demo."
+        ),
+        coaching_text="This suggestion appears resolved and can be dismissed.",
+        action_type="follow-up",
+    )
+    create_task(
+        "Review the run-of-show timing with Em D'Arcy",
+        (
+            "Em asked for a final timing pass before the live introduction. "
+            "Check the six-slide pacing and confirm the handoff to the product demo."
+        ),
+        status="suggested",
+        priority=2,
+        source_type="meeting",
+        source_id="meeting::emdarcy@microsoft.com::run-of-show-timing",
+        source_snippet=(
+            "Can we do one final timing pass before the Riveter introduction?"
+        ),
+        coaching_text=(
+            "Prepare a concise timing review focused on slide pacing and the "
+            "handoff to the live demo."
+        ),
+        action_type="prepare",
+        key_people=json.dumps([json.loads(people["meeting"])[1]]),
+        due_date="2026-08-21",
+    )
+    create_task(
         "Schedule the Friday demo review with Bobby Chang and Em D'Arcy",
         "Find a 30-minute time this week to walk through the Friday Riveter demo.",
         priority=2,
@@ -353,6 +427,30 @@ def _seed_database(path):
 
     conn = get_connection()
     try:
+        resolved_suggestions = {
+            "email::adrian.maclean@microsoft.com::exec-pane-reply": {
+                "status": "likely_resolved",
+                "summary": (
+                    "Adrian replied that the revised executive pane layout works "
+                    "and no further changes are needed."
+                ),
+                "checked_at": "2026-08-20T09:00:00Z",
+            },
+            "meeting::demo-video-assets::delivered": {
+                "status": "likely_resolved",
+                "summary": (
+                    "The latest meeting update says all final video assets were "
+                    "delivered to the shared folder."
+                ),
+                "checked_at": "2026-08-20T09:00:00Z",
+            },
+        }
+        for source_id, activity in resolved_suggestions.items():
+            conn.execute(
+                "UPDATE tasks SET waiting_activity=? WHERE source_id=?",
+                (json.dumps(activity), source_id),
+            )
+        conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA journal_mode=DELETE")
     finally:
