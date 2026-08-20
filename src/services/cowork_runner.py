@@ -711,24 +711,29 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
             defaults.append(prefs["notes"])
         lines.append("Meeting preferences: " + "; ".join(defaults) + ".")
     lines.extend([
-        "Use the native calendar scheduling flow with confirmed emails; do not use people profile.",
-        "Call FindMeetingTimes for both calendars: organizer and every attendee. "
-        "Check free/busy and work schedules; offer three exact available times "
-        "returned by it in organizer local time.",
-        "If any calendar is unavailable or fewer than three slots return, "
-        "ask_user a text-only clarification.",
+        "Use native calendar scheduling flow with confirmed emails; do not use "
+        "people profile.",
+        "Call FindMeetingTimes for both calendars; check free/busy and work schedules; "
+        "offer three exact available times in organizer local time.",
+        "If <3 or unavailable, ask_user a text-only clarification.",
         "Do not call CreateEvent before the user selects one; create only the "
         "selected time.",
-        "Honor duration and agenda. Never guess attendee local time or label an "
-        "attendee timezone unknown after FindMeetingTimes succeeds.",
-        "End each option description with "
+        "Include the agenda; do not guess timezone.",
+        "Each option: "
         '[slot:{"start":"offset ISO","end":"offset ISO","timezone":"Windows zone"}] '
-        f'[avail:{{"email":"free"}}]. Times must be {duration_minutes}m; list every '
-        "attendee; only free/tentative.",
+        f'[avail:{{"email":"free"}}]. Times must be {duration_minutes}m; all attendees; '
+        "free/tentative only.",
     ])
     correction = _clean(redirect_text)
     if correction:
         lines.append("User correction: " + correction)
+    lines.append(
+        "Non-negotiable after any correction: requested duration is invariant; never "
+        "shorten it; never shift a selected slot. The selected option already includes "
+        "the configured start offset: use its start and end markers verbatim. A timing "
+        "correction requires fresh FindMeetingTimes and a new selection. CreateEvent "
+        "start and end must exactly match the selected slot."
+    )
     return "\n\n".join(line for line in lines if line)
 
 
@@ -939,7 +944,9 @@ def compose_prompt(task, destination: dict | None = None,
 
 
 def compose_refine_prompt(
-    instruction: str, interaction_mode: str = "interaction"
+    instruction: str,
+    interaction_mode: str = "interaction",
+    schedule_duration: int | None = None,
 ) -> str:
     """The prompt for a FOLLOW-UP turn on an existing conversation.
 
@@ -961,6 +968,14 @@ def compose_refine_prompt(
     if not text:
         raise ValueError("A refine instruction is required.")
     parts = ["[REFINEMENT]\n" + text]
+    if schedule_duration is not None:
+        parts.append(
+            "[SCHEDULE CORRECTION]\n"
+            "Run fresh FindMeetingTimes for organizer and every attendee, then ask "
+            "the user to select a new exact slot. Do not reuse or shift the prior "
+            f"slot. Preserve the requested duration of {schedule_duration} minutes; "
+            "CreateEvent start and end must exactly match the new selection."
+        )
     if interaction_mode == "no_interaction":
         parts.append("[INTERACTION]\n" + _NO_INTERACTION)
     parts.append("[OUTPUT]\n" + _SAFETY)
@@ -1034,7 +1049,7 @@ _DRAFT_CUE_RE = re.compile(
 # answers these, so leaving them in makes the draft look like it needs a reply.
 _OFFER_RE = re.compile(
     r"^\s*(?:want me to|shall i|should i|would you like me to|let me know if|"
-    r"say the word)\b.*$",
+    r"(?:just\s+)?say the word)\b.*$",
     re.I | re.M,
 )
 
@@ -2240,7 +2255,9 @@ def continue_preview(
     if not conversation_id:
         raise ValueError("A conversation id is required to continue a preview.")
     prompt = compose_refine_prompt(
-        instruction, interaction_mode=interaction_mode
+        instruction,
+        interaction_mode=interaction_mode,
+        schedule_duration=schedule_duration,
     )
     label = preview_label(task_id)
 

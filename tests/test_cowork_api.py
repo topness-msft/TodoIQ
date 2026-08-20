@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -724,6 +725,13 @@ class TestStartPreview(CoworkAPITestBase):
         )
         self.start(tid)
         self.get_preview(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='ready',error=NULL WHERE task_id=?",
+            (tid,),
+        )
+        conn.commit()
+        conn.close()
         confirm = self.fetch(
             f"/api/tasks/{tid}/cowork/destination",
             method="POST",
@@ -969,6 +977,99 @@ class TestGetPreview(CoworkAPITestBase):
         self.start(tid)
         _, data = self.get_preview(tid)
         self.assertEqual(data["action"]["state"], "ready")
+
+    def test_finalises_resumed_result_after_answered_interaction(self):
+        from src.db import get_connection
+
+        tid = self.make_task()
+        action_id = self.make_action(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET answered_interaction=?, blocked_question='' "
+            "WHERE id=?",
+            ('{"kind":"interaction_answer","answers":{"0":"4:00 PM"}}', action_id),
+        )
+        conn.commit()
+        conn.close()
+        cr._runs[cr.preview_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": {
+                "stdout": json.dumps({
+                    "terminal_status": "ok",
+                    "text": "Turn two completed after the user selected a slot.",
+                    "tool_trace": [],
+                }),
+                "stderr": "",
+                "error": None,
+                "exit_code": 0,
+                "cost_credits": 2,
+            },
+        }
+
+        _, data = self.get_preview(tid)
+
+        self.assertIn("Turn two completed", data["action"]["finding"])
+
+    def test_ready_action_without_answer_does_not_refinalise(self):
+        from src.handlers import cowork as cowork_handler
+
+        tid = self.make_task()
+        self.make_action(tid)
+
+        with mock.patch.object(cowork_handler, "_finalise") as finalise:
+            self.get_preview(tid)
+
+        finalise.assert_not_called()
+
+    def test_second_get_does_not_rewrite_settled_resumed_result(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self.make_task()
+        action_id = self.make_action(tid)
+        answer = '{"kind":"interaction_answer","answers":{"0":"4:00 PM"}}'
+        result = {
+            "stdout": json.dumps({
+                "terminal_status": "ok",
+                "text": "Turn two completed after the user selected a slot.",
+                "tool_trace": [],
+            }),
+            "stderr": "",
+            "error": None,
+            "exit_code": 0,
+            "cost_credits": 2,
+        }
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET answered_interaction=?, blocked_question='' "
+            "WHERE id=?",
+            (answer, action_id),
+        )
+        conn.commit()
+        conn.close()
+        cr._runs[cr.preview_label(tid)] = {
+            "proc": None,
+            "thread": None,
+            "progress": [],
+            "result": result,
+        }
+        self.get_preview(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET updated_at='2001-01-01T00:00:00Z' WHERE id=?",
+            (action_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.get_preview(tid)
+
+        self.assertEqual(
+            get_latest_task_action(tid)["updated_at"],
+            "2001-01-01T00:00:00Z",
+        )
 
     def test_draft_extracted(self):
         tid = self.make_task()
@@ -1299,6 +1400,159 @@ class TestGetPreview(CoworkAPITestBase):
         })
         action["tool_trace"] = json.dumps(drifted)
         self.assertIsNone(_preview_calendar_event(action))
+
+    def test_calendar_event_must_exactly_match_selected_slot(self):
+        from src.services.calendar_time import calendar_event_matches_slot
+
+        slot = {
+            "start": "2026-08-20T13:00:00-04:00",
+            "end": "2026-08-20T13:30:00-04:00",
+            "timezone": "America/New_York",
+        }
+        event = {
+            "start": "2026-08-20T13:05:00-04:00",
+            "end": "2026-08-20T13:30:00-04:00",
+            "time_zone": "America/New_York",
+        }
+
+        self.assertFalse(calendar_event_matches_slot(event, slot))
+        self.assertTrue(calendar_event_matches_slot(
+            {**event, "start": slot["start"]},
+            slot,
+        ))
+        self.assertFalse(calendar_event_matches_slot(
+            {**event, "start": "2026-08-20T12:55:00-04:00"}, slot
+        ))
+        self.assertFalse(calendar_event_matches_slot(
+            {**event, "end": "2026-08-20T13:35:00-04:00"}, slot
+        ))
+        self.assertFalse(calendar_event_matches_slot(
+            {**event, "end": "2026-08-20T13:25:00-04:00"}, slot
+        ))
+        self.assertFalse(calendar_event_matches_slot(
+            {
+                **event,
+                "start": "2026-08-20T13:30:00-04:00",
+                "end": "2026-08-20T13:35:00-04:00",
+            },
+            slot,
+        ))
+
+    def test_finalise_rejects_shortened_event_shifted_inside_selected_slot(self):
+        from src.db import get_connection
+        from src.handlers import cowork as cowork_handler
+        from src.models import create_task_action, get_latest_task_action
+
+        tid = self.make_task(
+            title="Schedule a 30-minute SpaceX handoff with Aamer Kaleem",
+            description="Schedule a 30-minute handoff today.",
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Aamer Kaleem",
+                "email": "aamer.kaleem@microsoft.com",
+            }]),
+        )
+        action = create_task_action(tid, action_type="schedule-meeting")
+        selected = "4:00–4:30 PM ET"
+        answered = json.dumps({
+            "kind": "interaction_answer",
+            "question_raw": "{}",
+            "answers": {"0": selected},
+            "interaction": {
+                "schedule_evidence": {
+                    "valid": True,
+                    "source": "FindMeetingTimes+interaction",
+                    "query_backed": True,
+                    "attendees": ["aamer.kaleem@microsoft.com"],
+                    "duration_minutes": 30,
+                    "slots": [{
+                        "value": selected,
+                        "start": "2026-08-20T16:00:00-04:00",
+                        "end": "2026-08-20T16:30:00-04:00",
+                        "timezone": "Eastern Standard Time",
+                        "availability": {
+                            "aamer.kaleem@microsoft.com": "free",
+                        },
+                    }],
+                },
+            },
+        })
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET answered_interaction=?,had_interaction=1 "
+            "WHERE id=?",
+            (answered, action["id"]),
+        )
+        conn.commit()
+        conn.close()
+        action = get_latest_task_action(tid)
+        event = {
+            "subject": "SpaceX Account Handoff",
+            "start": "2026-08-20T16:05:00",
+            "end": "2026-08-20T16:30:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": ["aamer.kaleem@microsoft.com"],
+            "body": "SpaceX account handoff",
+            "is_online_meeting": True,
+        }
+        result = {
+            "stdout": json.dumps({
+                "terminal_status": "ok",
+                "conversation_id": "conv-2524",
+                "tool_trace": [{
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "ok": True,
+                    "input": json.dumps(event),
+                }],
+                "text": (
+                    "**SpaceX Account Handoff**\n\n"
+                    "- **When:** 4:05–4:30 PM ET\n\n"
+                    "**Agenda**\n- SpaceX transition"
+                ),
+            }),
+            "stderr": "",
+            "error": None,
+            "exit_code": 0,
+            "cost_credits": 1,
+        }
+
+        with mock.patch.object(cowork_handler, "get_result", return_value=result), \
+                mock.patch.object(cowork_handler, "is_running", return_value=False):
+            updated = cowork_handler._finalise(action)
+
+        self.assertEqual(updated["state"], "failed")
+        self.assertIn("selected calendar slot", updated["error"])
+        self.assertIn("30 minutes", updated["error"])
+
+        exact_result = {
+            **result,
+            "stdout": json.dumps({
+                **json.loads(result["stdout"]),
+                "tool_trace": [{
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "ok": True,
+                    "input": json.dumps({
+                        **event,
+                        "start": "2026-08-20T16:00:00",
+                    }),
+                }],
+            }),
+        }
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='previewing',error=NULL WHERE id=?",
+            (action["id"],),
+        )
+        conn.commit()
+        conn.close()
+        action = get_latest_task_action(tid)
+        with mock.patch.object(
+            cowork_handler, "get_result", return_value=exact_result
+        ), mock.patch.object(cowork_handler, "is_running", return_value=False):
+            updated = cowork_handler._finalise(action)
+
+        self.assertEqual(updated["state"], "ready")
+        self.assertIsNone(updated["error"])
 
     def test_calendar_execution_requires_a_future_start(self):
         from src.services.calendar_time import calendar_event_is_future
@@ -3377,7 +3631,7 @@ class TestRefineTurn(CoworkAPITestBase):
         self.assertEqual(self.continued[0]["cid"], "conv-abc")
         self.assertIsNotNone(self.continued[0]["action_id"])
 
-    def test_schedule_refine_carries_certification_context(self):
+    def test_schedule_refine_requires_fresh_selection_with_certification_context(self):
         from src.db import get_connection
         from src.models import get_latest_task_action
 
@@ -3401,7 +3655,7 @@ class TestRefineTurn(CoworkAPITestBase):
         conn.commit()
         conn.close()
 
-        response = self._refine(tid, "look next week")
+        response = self._refine(tid, "start 5 minutes late")
 
         self.assertEqual(response.code, 202)
         self.assertEqual(
@@ -3410,9 +3664,13 @@ class TestRefineTurn(CoworkAPITestBase):
         )
         self.assertEqual(self.continued[0]["schedule_duration"], 25)
         self.assertIsNotNone(self.continued[0]["action_id"])
-        self.assertEqual(
-            get_latest_task_action(tid)["answered_interaction"],
-            selected,
+        latest = get_latest_task_action(tid)
+        self.assertIsNone(latest["answered_interaction"])
+        self.assertIn("fresh FindMeetingTimes", latest["composed_prompt"])
+        self.assertIn("new exact slot", latest["composed_prompt"])
+        self.assertIn(
+            "25 minutes",
+            latest["composed_prompt"],
         )
 
     def test_it_creates_a_new_row_linked_to_its_parent(self):

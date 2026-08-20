@@ -41,10 +41,10 @@ Build a comma-separated list of full names from the key_people array (e.g. "Jane
 
 Build a single multi-person query to `ask_work_iq`:
 
-- If `due_date` is set: "What is the shared calendar availability for [Person1], [Person2], and [Person3] between now and [due_date]? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least 30 minutes long."
-- If no `due_date`: "What is the shared calendar availability for [Person1], [Person2], and [Person3] this week? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least 30 minutes long."
+- If `due_date` is set: "What is the shared calendar availability for [Person1], [Person2], and [Person3] between now and [due_date]? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least [requested duration or 25 minutes] long."
+- If no `due_date`: "What is the shared calendar availability for [Person1], [Person2], and [Person3] this week? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least [requested duration or 25 minutes] long."
 
-Also check `user_notes` for duration hints (e.g. "1 hour", "15 min"). Default to 30 minutes if nothing specified.
+Also check `user_notes` for duration hints (e.g. "1 hour", "15 min"). Default to 25 minutes if nothing specified.
 
 **Important:** Only suggest slots that fall within each attendee's configured Outlook working hours. If no working hours are available in the query window, say so explicitly rather than suggesting off-hours slots.
 
@@ -61,7 +61,7 @@ Suggested meeting slots:
 2. [Day], [Time] - [Time] ([duration]) — all attendees free
 3. [Day], [Time] - [Time] ([duration]) — all attendees free
 
-Duration: [from user_notes hint or 30 min default]
+Duration: [from user_notes hint or 25 min default]
 Attendees: [full names from key_people]
 <<<END_SKILL_OUTPUT>>>
 ```

@@ -91,7 +91,7 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         self.assertIn("CreateEvent", self.prompt)
         self.assertIn("[slot:", self.prompt)
         self.assertIn("[avail:", self.prompt)
-        self.assertLess(len(self.prompt), 1000)
+        self.assertLess(len(self.prompt), 1150)
 
     def test_it_does_not_request_a_message_draft(self):
         self.assertNotIn("[VOICE]", self.prompt)
@@ -104,6 +104,20 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
             self.prompt.lower(),
         )
         self.assertIn("only the selected time", self.prompt.lower())
+
+    def test_it_preserves_duration_and_exact_selected_slot(self):
+        lowered = self.prompt.lower()
+        self.assertIn("requested duration is invariant", lowered)
+        self.assertIn("never shorten", lowered)
+        self.assertIn("never shift", lowered)
+        self.assertIn(
+            "timing correction requires fresh findmeetingtimes and a new selection",
+            lowered,
+        )
+        self.assertIn(
+            "createevent start and end must exactly match the selected slot",
+            lowered,
+        )
 
     def test_it_binds_slot_metadata_to_the_requested_duration(self):
         prompt = compose_prompt(_task(
@@ -269,9 +283,13 @@ class TestGuidanceIsScopedToTheActionType(unittest.TestCase):
 
 class TestNativeSchedulingCorrection(unittest.TestCase):
     def test_a_correction_is_kept_in_the_concise_request(self):
-        prompt = compose_prompt(_task(), redirect_text="just pick any slot")
-        self.assertIn("just pick any slot", prompt)
-        self.assertLess(len(prompt), 1000)
+        prompt = compose_prompt(_task(), redirect_text="start 5 minutes late")
+        self.assertIn("start 5 minutes late", prompt)
+        self.assertLess(len(prompt), 1150)
+        self.assertLess(
+            prompt.index("User correction:"),
+            prompt.index("Non-negotiable after any correction:"),
+        )
 
 
 if __name__ == "__main__":

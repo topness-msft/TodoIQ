@@ -699,8 +699,30 @@ def _finalise(action: dict) -> dict:
         "tool_trace": json.dumps(trace) if trace else None,
         "error": error,
     }
+    if not failed and action.get("action_type") == "schedule-meeting":
+        task = get_task(action["task_id"])
+        expected_duration = schedule_duration_minutes(task) if task else None
+        candidate = {**action, **fields}
+        approved_event = _preview_calendar_event(candidate)
+        if (
+            approved_event is None
+            or calendar_event_duration_minutes(approved_event) != expected_duration
+        ):
+            duration_label = (
+                f"requested duration of {expected_duration} minutes"
+                if expected_duration
+                else "requested duration"
+            )
+            fields["state"] = "failed"
+            fields["error"] = (
+                "Cowork did not preserve the selected calendar slot and "
+                f"{duration_label}. Start over and review fresh availability."
+            )
     if parsed.get("conversation_id"):
         fields["conversation_id"] = parsed["conversation_id"]
+
+    if all(action.get(key) == value for key, value in fields.items()):
+        return action
 
     updated = update_task_action(action["id"], frozenset(fields), **fields)
     row = updated or action
@@ -1208,7 +1230,13 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(404, "No Cowork preview for this task")
 
         pre_state = action["state"]
-        if action["state"] in {"previewing", "executing"}:
+        if (
+            action["state"] in {"previewing", "executing"}
+            or (
+                action["state"] == "ready"
+                and action.get("answered_interaction")
+            )
+        ):
             action = _finalise(action)
 
         if self.get_argument("mark_seen", None) and pre_state == "ready":
@@ -1532,6 +1560,13 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
         # attempt survives and the correction chain stays auditable. The
         # audience binding is carried forward wholesale — it was resolved on a
         # ready row, so re-deriving it could silently change who this is for.
+        # Scheduling evidence is not: any refinement may change timing, so the
+        # follow-up must produce a fresh query-backed selection.
+        schedule_duration = (
+            schedule_duration_minutes(task)
+            if task.get("action_type") == "schedule-meeting"
+            else None
+        )
         new_action = create_task_action(
             tid,
             action_type=action.get("action_type") or "general",
@@ -1541,6 +1576,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             composed_prompt=compose_refine_prompt(
                 instruction,
                 interaction_mode="interaction",
+                schedule_duration=schedule_duration,
             ),
             conversation_id=conversation_id,
             island_url=action.get("island_url"),
@@ -1551,7 +1587,11 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             destination_source=action.get("destination_source"),
             destination_confirmed_at=action.get("destination_confirmed_at"),
             delivery_channel=action.get("delivery_channel"),
-            answered_interaction=action.get("answered_interaction"),
+            answered_interaction=(
+                None
+                if schedule_duration is not None
+                else action.get("answered_interaction")
+            ),
             interaction_mode="interaction",
         )
 
@@ -1569,9 +1609,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
                     else None
                 ),
                 schedule_duration=(
-                    schedule_duration_minutes(task)
-                    if task.get("action_type") == "schedule-meeting"
-                    else None
+                    schedule_duration
                 ),
             )
         except AlreadyRunning:

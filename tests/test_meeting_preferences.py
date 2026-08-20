@@ -138,6 +138,35 @@ class MeetingPreferenceTest(unittest.TestCase):
         self.assertIn("25 minutes", p)
         self.assertIn("5 minutes past", p)
 
+    def test_native_schedule_prompt_does_not_reapply_offset_after_selection(self):
+        with _with(PREFS):
+            p = cr.compose_prompt(make_task(action_type="schedule-meeting"))
+        self.assertIn(
+            "selected option already includes the configured start offset",
+            p.lower(),
+        )
+        self.assertIn("use its start and end markers verbatim", p.lower())
+
+    def test_clock_time_does_not_override_default_duration(self):
+        task = make_task(
+            action_type="schedule-meeting",
+            title="Meet Rima at 4:30 PM",
+            description="Discuss the transition today.",
+            coaching_text="Find time with Rima at 4:30 PM.",
+        )
+        with _with(PREFS):
+            self.assertEqual(cr.schedule_duration_minutes(task), 25)
+
+    def test_all_scheduling_commands_use_25_minute_default(self):
+        root = os.path.join(os.path.dirname(__file__), "..", ".claude", "commands")
+        for name in ("schedule-meeting.md", "cowork-prompt.md", "todo-parse.md"):
+            with self.subTest(name=name):
+                with open(os.path.join(root, name), encoding="utf-8") as stream:
+                    command = stream.read().lower()
+                self.assertNotIn("30 min default", command)
+                self.assertNotIn("default to 30 minutes", command)
+                self.assertIn("25 min", command)
+
     def test_native_schedule_prompt_carries_source_urls_as_reference_only(self):
         related = "https://contoso.sharepoint.com/sites/project/agenda.docx"
         task = make_task(

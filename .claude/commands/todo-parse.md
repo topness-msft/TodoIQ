@@ -179,7 +179,7 @@ Generate `coaching_text` based on the task's `action_type`, `description`, `key_
 
 Tailor coaching by action type:
 
-- **schedule-meeting**: Mention calendar availability for key_people (query WorkIQ if helpful), suggest duration/agenda. If `user_notes` contain agenda items → use them. If notes mention a duration → suggest that duration. Note the `/schedule-meeting` skill is available to help.
+- **schedule-meeting**: Mention calendar availability for key_people (query WorkIQ if helpful), suggest duration/agenda. If `user_notes` or `raw_input` mention a duration → use that duration. Otherwise use the user's standing 25-minute meeting default; never invent a 30-minute duration. Note the `/schedule-meeting` skill is available to help.
 - **respond-email**: Suggest key points to address based on the source/description. Recommend appropriate tone. Note the `/respond-email` skill is available to help draft the reply.
 - **review-document**: Suggest focus areas for the review, time-box the review (e.g. "aim for 30 min").
 - **follow-up**: Suggest timeline based on priority/due_date, draft a follow-up outline.
@@ -231,7 +231,7 @@ Urgency: [based on due_date proximity]
 ```
 
 ### schedule-meeting
-**WorkIQ query:** If `due_date` is set: "What is the shared calendar availability for [all key_people names] between now and [due_date]? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least 30 minutes long." If no `due_date`: same query but "this week" instead.
+**WorkIQ query:** If `due_date` is set: "What is the shared calendar availability for [all key_people names] between now and [due_date]? Treat tentative calendar blocks as available. Only show slots during each person's Outlook working hours. Show free time slots that are at least [requested duration or 25 minutes] long." If no `due_date`: same query but "this week" instead.
 
 **Output format:**
 ```
@@ -240,7 +240,7 @@ Suggested meeting slots:
 2. [Day], [Time] - [Time] ([duration]) — all attendees free
 3. [Day], [Time] - [Time] ([duration]) — all attendees free
 
-Duration: [from user_notes hint or 30 min default]
+Duration: [from user_notes/raw_input hint or 25 min default]
 Attendees: [full names from key_people]
 ```
 

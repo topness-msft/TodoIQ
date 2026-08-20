@@ -170,6 +170,13 @@ class TestDraftExtraction(unittest.TestCase):
         self.assertIsNone(res["draft"])
         self.assertIn("found nothing", res["finding"])
 
+    def test_just_say_the_word_offer_is_removed(self):
+        res = parse_cowork_output(self._text(
+            "The meeting is staged for review.\n\n"
+            "Just say the word and I'll send it."
+        ))
+        self.assertEqual(res["finding"], "The meeting is staged for review.")
+
     def test_longest_blockquote_wins(self):
         body = (
             "Context:\n\n> a short quote from them\n\n"

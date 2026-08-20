@@ -45,7 +45,7 @@ Build the prompt with these elements:
 1. **Goal** — schedule (or reschedule) a meeting. If `user_notes` mention rescheduling, frame it that way. If `related_meeting` is set, reference the existing meeting by name.
 2. **Participants** — full names from `key_people`. Cowork resolves them in the org directory.
 3. **Agenda / purpose** — pull discussion points and context from `coaching_text` and `skill_output`. Don't just use the title — surface the specific topics, decisions needed, and background that coaching already identified.
-4. **Duration** — check `user_notes`, `coaching_text`, and `skill_output` for duration hints (e.g. "30 min", "1 hour", "quick sync"). Default to 30 minutes if nothing specified.
+4. **Duration** — check `user_notes`, `coaching_text`, and `skill_output` for duration hints (e.g. "45 min", "1 hour", "quick sync"). Default to 25 minutes if nothing specified.
 5. **Scheduling constraints** — use `due_date` if set ("find a time before March 15"). If no due date, say "this week" or "in the next few days". Add "during working hours" and prefer morning slots. If `skill_output` contains specific free slots from a prior `/schedule-meeting` run, suggest those as preferred times.
 6. **Any other preferences** from `user_notes` — e.g. "avoid Fridays", "needs to be in-person", "include a Teams link".
 
@@ -76,11 +76,11 @@ Topic: [title]
 Copilot Cowork prompt (copy and paste):
 
 ---
-Schedule a 30-minute meeting with Jane Doe and Alex Kim to review the Q2 budget proposal. We need to discuss the revised headcount numbers and agree on the final submission before the March 15 deadline. Please find a time that works for all attendees before March 14, during working hours, preferably in the morning.
+Schedule a 25-minute meeting with Jane Doe and Alex Kim to review the Q2 budget proposal. We need to discuss the revised headcount numbers and agree on the final submission before the March 15 deadline. Please find a time that works for all attendees before March 14, during working hours, preferably in the morning.
 ---
 
 Participants: Jane Doe, Alex Kim
-Duration: 30 minutes
+Duration: 25 minutes
 Topic: Q2 budget review
 <<<END_SKILL_OUTPUT>>>
 ```
