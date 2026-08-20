@@ -1184,7 +1184,10 @@ function renderPeoplePills(keyPeople, taskId) {
 
     var html = '<div class="people-list">';
     people.forEach(function(person, idx) {
-        var hasAlts = person.alternatives && person.alternatives.length > 0;
+        var alternatives = Array.isArray(person.alternatives)
+            ? person.alternatives
+            : [];
+        var hasAlts = alternatives.length > 0;
         var attendanceUncertain = person.attendance_uncertain === true;
         var unresolved = person.unresolved === true
             || attendanceUncertain
@@ -1227,7 +1230,7 @@ function renderPeoplePills(keyPeople, taskId) {
                 + '<div class="alt-detail">' + escapeHtml([person.email, person.role].filter(Boolean).join(' \u00b7 ')) + '</div>'
                 + '</div></div>';
 
-            person.alternatives.forEach(function(alt, altIdx) {
+            alternatives.forEach(function(alt, altIdx) {
                 html += '<div class="alternative-item" '
                     + 'onclick="event.stopPropagation(); selectPerson(' + taskId + ', ' + idx + ', ' + altIdx + ')">'
                     + '<div class="alt-avatar">' + getInitials(alt.name) + '</div>'

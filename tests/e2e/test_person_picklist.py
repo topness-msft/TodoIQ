@@ -235,3 +235,77 @@ class TestPersonPicklist:
             )
         finally:
             _delete_task(page, base_url, task_id)
+
+    def test_attendance_uncertain_people_without_alternatives_render(
+        self, page: Page, base_url
+    ):
+        people = [
+            {
+                "name": "Sally Shi",
+                "email": "sally.shi@microsoft.com",
+                "role": "Principal Program Manager",
+                "aad_object_id": "aad-sally-2495",
+                "attendance_uncertain": True,
+            },
+            {
+                "name": "Azharullah Meer",
+                "email": "ameer@microsoft.com",
+                "role": "Senior Product Manager",
+                "aad_object_id": "aad-azharullah-2495",
+                "attendance_uncertain": True,
+            },
+        ]
+        response = page.request.post(
+            f"{base_url}/api/tasks",
+            data={
+                "title": "Attendance confirmation renderer regression",
+                "description": "Confirmed identities still need attendance confirmation.",
+                "parse_status": "parsed",
+                "action_type": "schedule-meeting",
+                "key_people": json.dumps(people),
+            },
+        )
+        assert response.ok, response.text()
+        task_id = response.json()["task"]["id"]
+        render_errors = []
+        page.on(
+            "console",
+            lambda message: render_errors.append(message.text)
+            if message.type == "error" and "alternatives" in message.text
+            else None,
+        )
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+
+        try:
+            page.goto(base_url)
+            page.wait_for_function(
+                f"Boolean(tasks.find(task => task.id === {task_id}))"
+            )
+            page.evaluate(f"selectTask({task_id})")
+
+            wrappers = page.locator(".person-pill-wrapper")
+            expect(wrappers).to_have_count(2)
+            expect(wrappers.nth(0)).to_contain_text("Sally Shi")
+            expect(wrappers.nth(1)).to_contain_text("Azharullah Meer")
+
+            first_pill = wrappers.nth(0).locator(".person-pill")
+            expect(first_pill).to_have_class(
+                __import__("re").compile(r"\bis-unresolved\b")
+            )
+            first_pill.click()
+            expect(
+                wrappers.nth(0).locator(
+                    ".alternatives-dropdown .alternatives-header"
+                )
+            ).to_have_text("Confirm attendee")
+            assert render_errors == []
+
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR,
+                    "attendance-uncertain-without-alternatives.png",
+                ),
+                full_page=True,
+            )
+        finally:
+            _delete_task(page, base_url, task_id)

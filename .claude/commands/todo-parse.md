@@ -104,15 +104,18 @@ when exact lookup fails.
    those names with the exact chat participants and topic as context. Store those
    matches with `unresolved: true` and alternatives; never silently select one.
 6. Exact membership profiles are confirmed identities; do not add `unresolved`
-   to exact internal profiles. Exact membership proves identity, not meeting attendance.
+   to exact internal profiles. When scheduling directly from a group-chat link,
+   exact internal membership is the intended attendee set by default.
    Persist an exact internal 1:1 counterpart as
    `{name,email,role,aad_object_id}` without `unresolved`. For group chats:
    - If the request explicitly names attendees, add only those exact members.
-   - If it explicitly says the whole group/everyone should attend, add every
-     exact internal member as confirmed.
-   - Otherwise add exact internal members with `attendance_uncertain: true`.
-     Their identity is confirmed, but the user must confirm or remove each
-     attendee before scheduling.
+   - If the request explicitly signals attendee ambiguity—for example, it asks
+     who should attend, names optional people, or says the attendee subset is still
+     undecided—add the affected exact internal members with
+     `attendance_uncertain: true`.
+   - Otherwise add every exact internal member as confirmed without `attendance_uncertain`;
+     do not ask the user to reconfirm people already
+     established by exact chat membership.
    Guest or external membership profiles always keep `unresolved: true` even
    when membership and email are exact. Additional people found only through
    name search follow the Step 2c certainty rule.

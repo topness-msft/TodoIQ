@@ -41,9 +41,15 @@ def test_coaching_refresh_preserves_confirmed_selected_people():
     assert "names in the current `title`, `description` and `user_notes`" not in COMMAND
 
 
-def test_group_membership_separates_identity_from_attendance():
-    assert "`attendance_uncertain: true`" in COMMAND
-    assert "Exact membership proves identity, not meeting attendance" in COMMAND
+def test_exact_group_membership_defaults_to_confirmed_attendance():
+    assert "exact internal membership is the intended attendee set by default" in COMMAND
+    assert "without `attendance_uncertain`" in COMMAND
+
+
+def test_attendance_uncertainty_requires_an_explicit_ambiguity_signal():
+    assert "explicitly signals attendee ambiguity" in COMMAND
+    assert "attendee subset is still" in COMMAND
+    assert "undecided" in COMMAND
 
 
 def test_exact_guest_members_still_require_confirmation():
