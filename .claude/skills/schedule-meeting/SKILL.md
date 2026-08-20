@@ -34,15 +34,15 @@ Find optimal meeting times based on calendar availability via WorkIQ.
    - Avoid back-to-back with other meetings — leave at least a 15-min buffer
    - Prefer earlier in the week when more flexibility remains
    - Consider time zones if people are in different locations
-   - Default to 30 minutes unless the task implies a longer discussion
+   - **Default to 25 minutes** as the user's standing rule unless the task explicitly requires a different duration
 
 6. **Present options**: Show suggested times with reasoning:
    ```
    Suggested Meeting Times with [key_people]
 
-   1. Tuesday Feb 17, 10:00-10:30 AM — Both calendars free, morning slot
-   2. Wednesday Feb 18, 2:00-2:30 PM — After lunch, no conflicts
-   3. Thursday Feb 19, 9:00-9:30 AM — Start of day, good for focused discussion
+   1. Tuesday Feb 17, 10:00-10:25 AM — Both calendars free, morning slot
+   2. Wednesday Feb 18, 2:00-2:25 PM — After lunch, no conflicts
+   3. Thursday Feb 19, 9:00-9:25 AM — Start of day, good for focused discussion
 
    Next step: Send the invite from Outlook for your preferred slot.
    ```
