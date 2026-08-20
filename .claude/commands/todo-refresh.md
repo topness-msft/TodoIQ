@@ -230,6 +230,12 @@ Be aggressive about dedup — it's better to augment an existing task than to cr
 - **active / in_progress / completed** → **augment**: update `source_snippet` with latest context if meaningfully new (e.g. new deadline, escalation). Update `updated_at`. Increment `updated_count`.
 - **suggested** → update `source_snippet` and `priority` if the new item shows increased urgency. Increment `updated_count`.
 
+For every existing matched task, selected `key_people` is authoritative. Never overwrite `key_people`,
+title, description, action type, coaching, notes, due
+date, or other structured task fields during refresh. A person absent from
+`key_people` may have been explicitly removed by the user. Only the fields named
+above for that status may change.
+
 ```python
 # Augment existing task with newer context
 import sqlite3
@@ -273,6 +279,10 @@ Track counts: `created`, `updated` (augmented existing), `skipped` (dismissed), 
 ## Step 4: Parse any unparsed tasks
 
 Check for tasks with `parse_status IN ('unparsed', 'queued')` — if any exist, run the same logic as `/todo-parse` to enrich them.
+
+Do not parse or reconstruct already-parsed tasks in this step. In particular,
+never re-run Teams membership resolution for an existing parsed task or replace
+its selected `key_people`.
 
 ## Step 4b: Upgrade legacy generic coaching_text
 
