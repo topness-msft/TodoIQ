@@ -31,14 +31,15 @@ import json
 import re
 import uuid
 import zlib
+from datetime import datetime, timezone
 from urllib.parse import unquote, quote, urlparse
 
 from .runtime_mode import (
     DEMO_DISABLED_MESSAGE,
     cowork_execute_enabled,
     cowork_session_enabled,
-    demo_schedule_choices_enabled,
 )
+from .calendar_time import calendar_event_is_future, named_timezone_matches
 
 __all__ = [
     "parse_source_url",
@@ -531,6 +532,112 @@ def schedule_attendees(task) -> list[dict]:
     return selected
 
 
+def schedule_duration_minutes(task) -> int:
+    """Return the requested meeting length, then the configured/default length."""
+    number_words = {
+        "five": 5,
+        "ten": 10,
+        "fifteen": 15,
+        "twenty": 20,
+        "twenty five": 25,
+        "thirty": 30,
+        "forty five": 45,
+        "sixty": 60,
+        "ninety": 90,
+    }
+    hour_words = {
+        "a": 1,
+        "an": 1,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+    }
+    minute_words = "|".join(
+        re.escape(value) for value in sorted(number_words, key=len, reverse=True)
+    )
+    hour_word_pattern = "|".join(
+        re.escape(value) for value in sorted(hour_words, key=len, reverse=True)
+    )
+
+    def token_value(token, words):
+        return float(token) if token[0].isdigit() else words[token.lower()]
+
+    for field in ("title", "user_notes", "description", "coaching_text"):
+        text = _clean(_get(task, field))
+        normalized = re.sub(r"\s+", " ", text.replace("-", " ")).strip().lower()
+        hour_minute = re.search(
+            r"\b(" + hour_word_pattern + r"|\d+(?:\.\d+)?)"
+            r"\s+(?:hours?|hrs?)(?:\s+and)?\s+("
+            + minute_words
+            + r"|\d{1,3})\s+(?:minutes?|mins?)\b",
+            normalized,
+            re.I,
+        )
+        if hour_minute:
+            value = round(
+                token_value(hour_minute.group(1), hour_words) * 60
+                + token_value(hour_minute.group(2), number_words)
+            )
+            if 5 <= value <= 480:
+                return value
+        compound_hour = re.search(
+            r"\b(" + hour_word_pattern + r"|\d+(?:\.\d+)?)"
+            r"\s+(?:(?:hours?)\s+)?and\s+a\s+half"
+            r"(?:\s+hours?)?\b",
+            normalized,
+            re.I,
+        )
+        if compound_hour:
+            base = token_value(compound_hour.group(1), hour_words)
+            value = round((base + 0.5) * 60)
+            if 5 <= value <= 480:
+                return value
+        if re.search(r"\bhours?\s+and\s+a\s+half\b", normalized, re.I):
+            return 90
+        if re.search(r"\bhalf\s+(?:an?\s+)?hours?\b", normalized, re.I):
+            return 30
+        match = re.search(
+            r"\b(\d{1,3})\s+(?:minutes?|mins?)\b", normalized, re.I
+        )
+        if match:
+            value = int(match.group(1))
+            if 5 <= value <= 480:
+                return value
+        word_match = re.search(
+            r"\b(" + minute_words + r")\s+minutes?\b",
+            normalized,
+            re.I,
+        )
+        if word_match:
+            return number_words[word_match.group(1).lower()]
+        hour_match = re.search(
+            r"\b(\d+(?:\.\d+)?)\s+(?:hours?|hrs?)\b",
+            normalized,
+            re.I,
+        )
+        if hour_match:
+            value = round(float(hour_match.group(1)) * 60)
+            if 5 <= value <= 480:
+                return value
+        word_hour_match = re.search(
+            r"\b(" + hour_word_pattern + r")\s+hours?\b",
+            normalized,
+            re.I,
+        )
+        if word_hour_match:
+            value = hour_words[word_hour_match.group(1).lower()] * 60
+            if value <= 480:
+                return value
+    prefs = meeting_preferences() or {}
+    value = prefs.get("default_minutes")
+    return value if isinstance(value, int) and 5 <= value <= 480 else 30
+
+
 def _source_reference_lines(task) -> list[str]:
     primary = _clean(_get(task, "source_url")).strip()
     if primary and not _HTTP_URL_RE.fullmatch(primary):
@@ -587,6 +694,7 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
     if notes:
         lines.append("User agenda/context: " + notes)
     prefs = meeting_preferences()
+    duration_minutes = schedule_duration_minutes(task)
     if prefs:
         defaults = []
         if prefs.get("default_minutes"):
@@ -603,19 +711,20 @@ def _compose_native_schedule_prompt(task, redirect_text: str | None = None) -> s
             defaults.append(prefs["notes"])
         lines.append("Meeting preferences: " + "; ".join(defaults) + ".")
     lines.extend([
-        "Use the native calendar scheduling flow and each confirmed email; do not "
-        "use people profile.",
+        "Use the native calendar scheduling flow with confirmed emails; do not use people profile.",
         "Call FindMeetingTimes for both calendars: organizer and every attendee. "
         "Check free/busy and work schedules; offer three exact available times "
         "returned by it in organizer local time.",
-        "If any calendar is unavailable or fewer than three slots are verified, "
-        "ask_user a text-only clarification with no time choices.",
+        "If any calendar is unavailable or fewer than three slots return, "
+        "ask_user a text-only clarification.",
         "Do not call CreateEvent before the user selects one; create only the "
         "selected time.",
         "Honor duration and agenda. Never guess attendee local time or label an "
         "attendee timezone unknown after FindMeetingTimes succeeds.",
-        'End each option description with [avail:{"attendee@email":"free"}] for '
-        "every attendee; choices may use only free or tentative.",
+        "End each option description with "
+        '[slot:{"start":"offset ISO","end":"offset ISO","timezone":"Windows zone"}] '
+        f'[avail:{{"email":"free"}}]. Times must be {duration_minutes}m; list every '
+        "attendee; only free/tentative.",
     ])
     correction = _clean(redirect_text)
     if correction:
@@ -2009,7 +2118,7 @@ def _spawn_default(argv, **kwargs):
 
 def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
                   conversation_id=None, action_id=None,
-                  schedule_people=None) -> str:
+                  schedule_people=None, schedule_duration=None) -> str:
     """Spawn a preview run and return its label. Non-blocking.
 
     ``conversation_id`` is optional and, when given, is the id the caller has
@@ -2055,6 +2164,7 @@ def start_preview(task_id, prompt, refs=None, *, spawn=None, log_dir=None,
                 "is_follow_up": False,
                 "action_id": action_id,
                 "schedule_people": schedule_people,
+                "schedule_duration": schedule_duration,
             },
             daemon=True,
             name=f"cowork-api-{task_id}",
@@ -2107,6 +2217,9 @@ def continue_preview(
     *,
     interaction_mode="interaction",
     log_dir=None,
+    action_id=None,
+    schedule_people=None,
+    schedule_duration=None,
 ) -> str:
     """Run a FOLLOW-UP turn on an existing Cowork conversation. Non-blocking.
 
@@ -2155,7 +2268,13 @@ def continue_preview(
         target=_collect_api,
         args=(label, task_id, prompt, config_path,
               Path(log_dir) if log_dir else LOG_DIR),
-        kwargs={"conversation_id": conversation_id, "is_follow_up": True},
+        kwargs={
+            "conversation_id": conversation_id,
+            "is_follow_up": True,
+            "action_id": action_id,
+            "schedule_people": schedule_people,
+            "schedule_duration": schedule_duration,
+        },
         daemon=True,
         name=f"cowork-refine-{task_id}",
     )
@@ -2981,7 +3100,11 @@ def _parse_aq_interaction(data):
     return {"invocation_id": invocation_id, "questions": questions}
 
 
-_AVAILABILITY_MARKER_RE = re.compile(r"\[avail:(\{[^][]+\})\]", re.I)
+_AVAILABILITY_MARKER_RE = re.compile(
+    r"\[avail:(\{.*\})\]\s*$", re.I
+)
+_SLOT_MARKER_RE = re.compile(r"\[slot:(\{.*?\})\]", re.I)
+_FIND_MEETING_TIMES_TOOL = "mcp__outlook_calendar__FindMeetingTimes"
 _UNKNOWN_TIMEZONE_RE = re.compile(
     r"(?:(?:time\s*zone|timezone).{0,32}(?:unknown|unconfirmed|not visible|"
     r"unavailable|uncertain|unclear|cannot|can't|could not|couldn't)|"
@@ -3001,17 +3124,23 @@ def _attendee_emails(attendees) -> list[str]:
     return sorted(values)
 
 
-def _successful_find_meeting_attendees(events) -> set[str] | None:
+def _successful_find_meeting_call(events) -> dict | None:
     starts = {}
+    successful = None
     for kind, data in events or []:
         if not isinstance(data, dict):
             continue
         tool_id = str(data.get("tid") or "")
         name = str(data.get("tn") or "")
-        if kind == "ts" and tool_id and name.lower().endswith("findmeetingtimes"):
-            starts[tool_id] = data.get("inp")
-        elif kind == "tx" and tool_id in starts and data.get("ok") is True:
-            raw_input = starts[tool_id]
+        if kind == "ts" and tool_id and name == _FIND_MEETING_TIMES_TOOL:
+            starts[tool_id] = {"name": name, "input": data.get("inp")}
+        elif (
+            kind == "tx"
+            and tool_id in starts
+            and name == starts[tool_id]["name"]
+            and data.get("ok") is True
+        ):
+            raw_input = starts[tool_id]["input"]
             try:
                 params = (
                     json.loads(raw_input)
@@ -3025,45 +3154,98 @@ def _successful_find_meeting_attendees(events) -> set[str] | None:
             attendees = params.get("attendees")
             if not isinstance(attendees, list):
                 continue
-            return {
+            normalized = {
                 str(value).strip().lower()
                 for value in attendees
                 if str(value).strip()
             }
-    return None
+            duration = params.get("duration_minutes")
+            if not isinstance(duration, int) or duration < 1:
+                continue
+            successful = {
+                "attendees": normalized,
+                "duration_minutes": duration,
+                "tool_id": tool_id,
+            }
+    return successful
+
+
+def _parse_now(value=None):
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _parse_slot_marker(description, duration_minutes, now):
+    match = _SLOT_MARKER_RE.search(description)
+    if not match:
+        return None
+    try:
+        slot = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(slot, dict):
+        return None
+    timezone_name = str(slot.get("timezone") or "").strip()
+    try:
+        start = datetime.fromisoformat(
+            str(slot.get("start") or "").replace("Z", "+00:00")
+        )
+        end = datetime.fromisoformat(
+            str(slot.get("end") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        not timezone_name
+        or not named_timezone_matches(start.isoformat(), timezone_name)
+        or not named_timezone_matches(end.isoformat(), timezone_name)
+        or start.tzinfo is None
+        or end.tzinfo is None
+        or start.utcoffset() is None
+        or end.utcoffset() is None
+        or start <= now.astimezone(start.tzinfo)
+        or end <= start
+        or (end - start).total_seconds() != duration_minutes * 60
+    ):
+        return None
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "timezone": timezone_name,
+        "instant": start.astimezone(timezone.utc).isoformat(),
+    }
 
 
 def certify_schedule_interaction(
     interaction,
     events,
     attendees,
-    trusted_schedule_result=None,
+    *,
+    duration_minutes,
+    now=None,
 ):
-    """Attach server-derived evidence to a safe scheduling choice interaction."""
+    """Certify query-backed, model-derived schedule choices."""
     expected = _attendee_emails(attendees)
-    if not expected or _successful_find_meeting_attendees(events) != set(expected):
-        return None
-    if not isinstance(trusted_schedule_result, dict):
-        return None
-    trusted_attendees = {
-        str(value).strip().lower()
-        for value in trusted_schedule_result.get("attendees") or []
-        if str(value).strip()
-    }
+    meeting_call = _successful_find_meeting_call(events)
     if (
-        trusted_attendees != set(expected)
-        or trusted_schedule_result.get("working_hours_checked") is not True
+        not expected
+        or not meeting_call
+        or meeting_call["attendees"] != set(expected)
+        or meeting_call["duration_minutes"] != duration_minutes
     ):
         return None
-    trusted_slots = trusted_schedule_result.get("slots")
-    if not isinstance(trusted_slots, list) or len(trusted_slots) != 3:
-        return None
-    trusted_by_value = {
-        str(slot.get("value") or "").strip(): slot
-        for slot in trusted_slots
-        if isinstance(slot, dict) and str(slot.get("value") or "").strip()
-    }
-    if len(trusted_by_value) != 3:
+    now_value = _parse_now(now)
+    if now_value is None:
         return None
     if not isinstance(interaction, dict):
         return None
@@ -3096,11 +3278,11 @@ def certify_schedule_interaction(
     )
     if _UNKNOWN_TIMEZONE_RE.search(visible_text):
         return None
-    if {
-        str(option.get("value") or "").strip()
-        for option in options
-    } != set(trusted_by_value):
+    values = [str(option.get("value") or "").strip() for option in options]
+    if any(not value for value in values) or len(set(values)) != 3:
         return None
+    slots = []
+    instants = set()
     for option in options:
         description = str(option.get("description") or "")
         match = _AVAILABILITY_MARKER_RE.search(description)
@@ -3118,53 +3300,27 @@ def certify_schedule_interaction(
             return None
         if any(status not in {"free", "tentative"} for status in normalized.values()):
             return None
-        trusted = trusted_by_value[str(option.get("value") or "").strip()]
-        trusted_availability = {
-            str(email).strip().lower(): str(status).strip().lower()
-            for email, status in (trusted.get("availability") or {}).items()
-        }
-        if normalized != trusted_availability:
+        slot = _parse_slot_marker(description, duration_minutes, now_value)
+        if not slot or slot["instant"] in instants:
             return None
+        instants.add(slot["instant"])
+        slots.append({
+            "value": str(option.get("value") or "").strip(),
+            "start": slot["start"],
+            "end": slot["end"],
+            "timezone": slot["timezone"],
+            "availability": normalized,
+        })
     certified = json.loads(json.dumps(interaction))
     certified["schedule_evidence"] = {
         "valid": True,
-        "source": "FindMeetingTimes",
+        "source": "FindMeetingTimes+interaction",
         "attendees": expected,
-        "working_hours_checked": True,
-    }
-    return certified
-
-
-def _demo_schedule_result(interaction, attendees):
-    """Build demo-only slot evidence after exact FindMeetingTimes succeeds."""
-    if not demo_schedule_choices_enabled() or not isinstance(interaction, dict):
-        return None
-    questions = interaction.get("questions")
-    if not isinstance(questions, list) or len(questions) != 1:
-        return None
-    options = questions[0].get("options") or []
-    if len(options) != 3:
-        return None
-    slots = []
-    for option in options:
-        match = _AVAILABILITY_MARKER_RE.search(
-            str(option.get("description") or "")
-        )
-        if not match:
-            return None
-        try:
-            availability = json.loads(match.group(1))
-        except (json.JSONDecodeError, TypeError):
-            return None
-        slots.append({
-            "value": str(option.get("value") or "").strip(),
-            "availability": availability,
-        })
-    return {
-        "attendees": _attendee_emails(attendees),
-        "working_hours_checked": True,
+        "query_backed": True,
+        "duration_minutes": duration_minutes,
         "slots": slots,
     }
+    return certified
 
 
 def schedule_text_only_interaction(interaction, attendees):
@@ -3188,28 +3344,62 @@ def schedule_text_only_interaction(interaction, attendees):
         question["multi_select"] = False
     fallback["schedule_evidence"] = {
         "valid": False,
-        "source": "FindMeetingTimes",
+        "source": "FindMeetingTimes+interaction",
         "attendees": _attendee_emails(attendees),
-        "working_hours_checked": False,
+        "query_backed": False,
         "rejected_option_values": sorted(set(rejected_values)),
     }
     return fallback
 
 
-def schedule_interaction_is_certified(interaction, attendees) -> bool:
+def schedule_interaction_is_certified(
+    interaction,
+    attendees,
+    duration_minutes=None,
+) -> bool:
     evidence = interaction.get("schedule_evidence") if isinstance(
         interaction, dict
     ) else None
-    return bool(
-        isinstance(evidence, dict)
-        and evidence.get("valid") is True
-        and evidence.get("source") == "FindMeetingTimes"
-        and evidence.get("working_hours_checked") is True
-        and evidence.get("attendees") == _attendee_emails(attendees)
-    )
+    if not isinstance(evidence, dict):
+        return False
+    slots = evidence.get("slots")
+    duration = evidence.get("duration_minutes")
+    if (
+        evidence.get("valid") is not True
+        or evidence.get("source") != "FindMeetingTimes+interaction"
+        or evidence.get("query_backed") is not True
+        or evidence.get("attendees") != _attendee_emails(attendees)
+        or not isinstance(duration, int)
+        or (
+            duration_minutes is not None
+            and duration != duration_minutes
+        )
+        or not isinstance(slots, list)
+        or len(slots) != 3
+    ):
+        return False
+    now = datetime.now(timezone.utc)
+    return all(
+        _parse_slot_marker(
+            "[slot:" + json.dumps({
+                "start": slot.get("start"),
+                "end": slot.get("end"),
+                "timezone": slot.get("timezone"),
+            }, separators=(",", ":")) + "]",
+            duration,
+            now,
+        )
+        for slot in slots
+        if isinstance(slot, dict)
+    ) and all(isinstance(slot, dict) for slot in slots)
 
 
-def schedule_answer_is_safe(interaction, answers, attendees) -> bool:
+def schedule_answer_is_safe(
+    interaction,
+    answers,
+    attendees,
+    duration_minutes=None,
+) -> bool:
     """Allow free-text corrections, but require current evidence for slot choices."""
     questions = interaction.get("questions") if isinstance(interaction, dict) else None
     if not isinstance(questions, list) or not isinstance(answers, dict):
@@ -3232,7 +3422,11 @@ def schedule_answer_is_safe(interaction, answers, attendees) -> bool:
             selected_option = True
     if not selected_option:
         return True
-    return schedule_interaction_is_certified(interaction, attendees)
+    return schedule_interaction_is_certified(
+        interaction,
+        attendees,
+        duration_minutes,
+    )
 
 
 def schedule_answers_for_recheck(interaction, answers):
@@ -3556,6 +3750,10 @@ def _execution_tool_approval(
                 expected,
                 require_footer=True,
             )
+            or not calendar_event_is_future(
+                expected,
+                now=_calendar_now_fn() if _calendar_now_fn is not None else None,
+            )
         ):
             return None
         destination = _approved_destination_attendees(
@@ -3776,6 +3974,7 @@ def _active_run_count() -> int:
 # has an idiom for swapping implementations, and a function pair is far cheaper
 # to delete if the API path disappoints.
 _api_run_fn = None
+_calendar_now_fn = None
 
 
 class CoworkAuthExpired(Exception):
@@ -3805,7 +4004,7 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
                  conversation_id=None, is_follow_up=None,
                  approval_kind=None, approved_snapshot=None,
                  approved_calendar_event=None, action_id=None,
-                 schedule_people=None) -> None:
+                 schedule_people=None, schedule_duration=None) -> None:
     """Run one preview over the runtime HTTP API. Worker thread.
 
     Twin of ``_collect``. It MUST publish the same result dict shape, because
@@ -3845,6 +4044,8 @@ def _collect_api(label, task_id, prompt, config_path, log_dir,
             run_kwargs["action_id"] = action_id
         if schedule_people is not None:
             run_kwargs["schedule_people"] = schedule_people
+        if schedule_duration is not None:
+            run_kwargs["schedule_duration"] = schedule_duration
         call = functools.partial(runner, **run_kwargs)
         try:
             payload = call(prompt, config, on_progress)
@@ -3983,7 +4184,8 @@ def new_conversation_id(_auth=None):
 def _api_run_default(prompt, config, on_progress, conversation_id=None,
                      is_follow_up=None, approval_kind=None,
                      approved_snapshot=None, approved_calendar_event=None,
-                     action_id=None, schedule_people=None):
+                     action_id=None, schedule_people=None,
+                     schedule_duration=None):
     """Run one turn over the runtime HTTP API and fold the SSE stream into a
     CLI-shaped document.
 
@@ -4123,14 +4325,11 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         if not interaction:
                             continue
                         if schedule_people:
-                            trusted_schedule_result = _demo_schedule_result(
-                                interaction, schedule_people
-                            )
                             certified = certify_schedule_interaction(
                                 interaction,
                                 events,
                                 schedule_people,
-                                trusted_schedule_result,
+                                duration_minutes=schedule_duration,
                             )
                             if certified:
                                 interaction = certified
@@ -4138,9 +4337,9 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                                 correction = (
                                     "Recheck with FindMeetingTimes using every confirmed "
                                     "attendee email. Offer exactly three returned slots "
-                                    "with free/tentative [avail] evidence, or ask a "
-                                    "text-only clarification. Do not say a timezone is "
-                                    "unknown."
+                                    "with offset-aware [slot] metadata and complete "
+                                    "free/tentative [avail] evidence, or ask a text-only "
+                                    "clarification. Do not say a timezone is unknown."
                                 )
                                 answer_body = {
                                     "conversationId": conversation_id,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import signal
 import socket
 import subprocess
@@ -29,16 +28,24 @@ def _configure(db_path=DB_PATH):
     os.environ["RIVETER_DEMO_ALLOW_TODO_PARSE"] = "1"
     os.environ["RIVETER_DEMO_ALLOW_COWORK_SESSION"] = "1"
     os.environ["RIVETER_DEMO_ALLOW_COWORK_EXECUTE"] = "1"
-    os.environ["RIVETER_DEMO_TRUST_SCHEDULE_CHOICES"] = "1"
     os.environ["TODONESS_DB_PATH"] = str(db_path)
     os.environ["TODONESS_SETTINGS_PATH"] = str(SETTINGS_PATH)
     os.environ["TODONESS_LOG_FILE"] = str(LOG_PATH)
 
 
-def _pid():
+def _pid_record():
     try:
-        return int(PID_PATH.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        value = json.loads(PID_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _pid():
+    record = _pid_record()
+    try:
+        return int(record["pid"]) if record else None
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -70,42 +77,69 @@ def _pid_running(pid):
         return False
 
 
-def _demo_process(pid):
+def _process_identity(pid):
     if not _pid_running(pid):
-        return False
+        return None
     if os.name == "nt":
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    "(Get-CimInstance Win32_Process -Filter "
-                    f"\"ProcessId = {pid}\").CommandLine"
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        command_line = result.stdout
-    else:
+        import ctypes
+        import ctypes.wintypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
         try:
-            command_line = Path(f"/proc/{pid}/cmdline").read_text(
-                encoding="utf-8", errors="replace"
-            ).replace("\0", " ")
-        except OSError:
-            return False
-    return _command_is_demo_serve(command_line)
+            creation = ctypes.wintypes.FILETIME()
+            exit_time = ctypes.wintypes.FILETIME()
+            kernel = ctypes.wintypes.FILETIME()
+            user = ctypes.wintypes.FILETIME()
+            if not ctypes.windll.kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            size = ctypes.wintypes.DWORD(32768)
+            executable = ctypes.create_unicode_buffer(size.value)
+            if not ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, executable, ctypes.byref(size)
+            ):
+                return None
+            created = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return {
+                "pid": pid,
+                "created": created,
+                "executable": executable.value.lower(),
+            }
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        executable = str(Path(f"/proc/{pid}/exe").resolve()).lower()
+        return {
+            "pid": pid,
+            "created": int(stat[21]),
+            "executable": executable,
+        }
+    except (OSError, IndexError, ValueError):
+        return None
 
 
-def _command_is_demo_serve(command_line):
-    script = re.escape(str(Path(__file__).resolve()))
+def _demo_process(pid):
+    record = _pid_record()
+    if (
+        not record
+        or record.get("pid") != pid
+        or record.get("created") is None
+        or not record.get("executable")
+    ):
+        return False
+    current = _process_identity(pid)
     return bool(
-        re.search(
-            rf'(?i)(?:"{script}"|{script})\s+serve(?:\s|$)',
-            command_line or "",
-        )
+        current
+        and current["created"] == record["created"]
+        and current["executable"] == str(record["executable"]).lower()
     )
 
 
@@ -381,7 +415,10 @@ def serve():
 
     signal.signal(signal.SIGTERM, stop_loop)
     signal.signal(signal.SIGINT, stop_loop)
-    PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    identity = _process_identity(os.getpid())
+    if identity is None:
+        raise RuntimeError("Could not establish demo process identity")
+    PID_PATH.write_text(json.dumps(identity), encoding="utf-8")
     try:
         ioloop.start()
     finally:

@@ -207,6 +207,53 @@ class BlockedRunTest(unittest.TestCase):
         self.assertIsNone(out["blocked_question"])
         self.assertEqual(calls, [("Old question?", None)])
 
+    def test_certified_schedule_answer_survives_resume_cleanup(self):
+        calls = []
+        handler.HANDOFF_FN = lambda cid: {
+            "state": "running", "waiting_on_user": False,
+        }
+        selected = "Thu 8/20, 1:05 PM ET"
+        answer = json.dumps({
+            "kind": "interaction_answer",
+            "question_raw": "{}",
+            "answers": {"0": selected},
+            "interaction": {
+                "schedule_evidence": {
+                    "query_backed": True,
+                    "slots": [{"value": selected}],
+                }
+            },
+        })
+
+        def clear(
+            action_id,
+            blocked_question,
+            answered_interaction,
+            *,
+            preserve_answer=False,
+        ):
+            calls.append((
+                blocked_question,
+                answered_interaction,
+                preserve_answer,
+            ))
+            return True
+
+        handler.clear_blocked_question_if_unchanged = clear
+        out = handler._enrich({
+            "id": 1,
+            "task_id": 2,
+            "action_type": "schedule-meeting",
+            "state": "previewing",
+            "conversation_id": "t:u:abc",
+            "blocked_question": "",
+            "answered_interaction": answer,
+        })
+
+        self.assertIsNone(out["blocked_question"])
+        self.assertEqual(out["answered_interaction"], answer)
+        self.assertEqual(calls, [("", answer, True)])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,9 +196,9 @@ def test_schedule_evidence_fallback_is_text_only(page: Page, base_url):
                     }],
                     schedule_evidence: {
                         valid: false,
-                        source: 'FindMeetingTimes',
+                        source: 'FindMeetingTimes+interaction',
                         attendees: ['jay.padimiti@microsoft.com'],
-                        working_hours_checked: false
+                        query_backed: false
                     }
                 },
                 conversation_id: 't:u:schedule-fallback'
@@ -489,13 +489,23 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
                 waiting_on_user: true,
                 interaction_request: {
                     invocation_id: 'matrix-1',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'FindMeetingTimes+interaction',
+                        query_backed: true,
+                        attendees: [
+                            'greg.howard@microsoft.com',
+                            'rima.reyes@microsoft.com',
+                            'sarah.chen@microsoft.com'
+                        ]
+                    },
                     questions: [{
                         id: '0',
                         question: 'Which time should I book?',
                         options: [{
                             value: 'Mon 10:05',
                             label: 'Mon Aug 17 · 10:05 AM',
-                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"tentative","sarah.chen@microsoft.com":"busy"}]'
+                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"tentative","sarah.chen@microsoft.com":"tentative"}]'
                         }, {
                             value: 'Tue 1:05',
                             label: 'Tue Aug 18 · 1:05 PM',
@@ -503,7 +513,7 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
                         }, {
                             value: 'Wed 3:05',
                             label: 'Wed Aug 19 · 3:05 PM',
-                            description: '[avail:{"rima.reyes@microsoft.com":"unknown","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"tentative"}]'
+                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"tentative"}]'
                         }]
                     }]
                 },
@@ -517,14 +527,19 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
 
     matrix = page.get_by_test_id("cw-avail-matrix")
     expect(matrix).to_be_visible()
+    note = page.get_by_test_id("cw-query-backed-note")
+    expect(note).to_contain_text("Query-backed suggestions")
+    expect(note).to_contain_text("Review the time before booking")
+    note_box = note.bounding_box()
+    assert note_box and note_box["height"] >= 28 and note_box["width"] >= 400
     expect(page.get_by_test_id("cw-choice")).to_have_count(0)
     expect(page.get_by_test_id("cw-avail-col-header")).to_have_count(3)
     expect(page.get_by_test_id("cw-avail-row")).to_have_count(3)
     expect(page.get_by_test_id("cw-avail-cell")).to_have_count(9)
-    expect(page.locator('[data-status="free"]')).to_have_count(5)
-    expect(page.locator('[data-status="tentative"]')).to_have_count(2)
-    expect(page.locator('[data-status="busy"]')).to_have_count(1)
-    expect(page.locator('[data-status="unknown"]')).to_have_count(1)
+    expect(page.locator('[data-status="free"]')).to_have_count(6)
+    expect(page.locator('[data-status="tentative"]')).to_have_count(3)
+    expect(page.locator('[data-status="busy"]')).to_have_count(0)
+    expect(page.locator('[data-status="unknown"]')).to_have_count(0)
     first_header = page.get_by_test_id("cw-avail-col-header").nth(0)
     expect(first_header.get_by_test_id("cw-avail-head-pill")).to_contain_text(
         "Rima Reyes"

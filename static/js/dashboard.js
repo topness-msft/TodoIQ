@@ -3637,6 +3637,8 @@ function cwOpenExecuteConfirm(taskId) {
                     || !Array.isArray(action.calendar_preview.attendees)
                     || !action.calendar_preview.attendees.length
                     || !action.calendar_preview.date_time
+                    || !action.calendar_preview.format
+                    || !action.calendar_preview.subject
                     || !action.calendar_preview.body_html) {
                 window.alert('This meeting preview is incomplete. Start over and '
                     + 'review a fresh calendar preview before creating the meeting.');
@@ -3687,11 +3689,16 @@ function cwOpenExecuteConfirm(taskId) {
                 + '<section class="cw-meeting-confirm-section" '
                 + 'data-testid="meeting-confirm-date-time">'
                 + '<span>Date &amp; time</span><b>'
-                + escapeHtml(action.calendar_preview.date_time) + '</b></section>'
+                + escapeHtml(action.calendar_preview.date_time) + '</b><small>'
+                + escapeHtml(action.calendar_preview.format) + '</small></section>'
                 + '<section class="cw-meeting-confirm-section" '
                 + 'data-testid="meeting-confirm-body">'
-                + '<span>Meeting body</span><div class="cw-meeting-confirm-body">'
-                + action.calendar_preview.body_html + '</div></section></div>';
+                + '<span>Meeting body</span><div class="cw-meeting-confirm-content">'
+                + '<div class="cw-meeting-confirm-subject">'
+                + '<small>Subject</small><b>'
+                + escapeHtml(action.calendar_preview.subject)
+                + '</b></div><div class="cw-meeting-confirm-body">'
+                + action.calendar_preview.body_html + '</div></div></section></div>';
         }
         _cwExecuteApprovals[taskId] = {
             parent_action_id: action.id,
@@ -4729,7 +4736,14 @@ function cwInteractionFields(taskId, interaction) {
     var redirectExample = isEmail
         ? 'e.g. make the subject clearer and the tone warmer'
         : 'e.g. find something later in the day';
-    return (interaction.questions || []).map(function(question) {
+    var evidence = interaction && interaction.schedule_evidence;
+    var evidenceNote = evidence && evidence.query_backed === true
+        ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note">'
+            + '<b>Query-backed suggestions</b>'
+            + '<span>Cowork derived these after checking the exact calendars. '
+            + 'Review the time before booking.</span></div>'
+        : '';
+    return evidenceNote + (interaction.questions || []).map(function(question) {
         var id = String(question.id || '');
         var heading = question.header || question.question || 'Cowork question';
         var prompt = question.header && question.question
@@ -4759,7 +4773,9 @@ function cwInteractionFields(taskId, interaction) {
                         + cwChoiceVisual(option) + '<span class="cw-choice-copy"><b>'
                         + escapeHtml(option.label) + '</b>'
                         + (option.description
-                            ? '<small class="sr-only">' + escapeHtml(option.description) + '</small>'
+                            ? '<small class="sr-only">'
+                                + escapeHtml(cwCleanChoiceDescription(option.description))
+                                + '</small>'
                             : '')
                         + '</span></button>';
                 }).join('') + '</div>'))
@@ -4813,7 +4829,7 @@ function cwInteractionFields(taskId, interaction) {
             try { parsed = JSON.parse(match[1]); } catch (_err) { return null; }
             if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return null;
             var statuses = {};
-            var allowed = ['free', 'tentative', 'busy', 'unknown'];
+            var allowed = ['free', 'tentative'];
             for (var key in parsed) {
                 if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
                 var email = String(key).trim().toLowerCase();
@@ -4822,6 +4838,13 @@ function cwInteractionFields(taskId, interaction) {
                 statuses[email] = status;
             }
             return statuses;
+        }
+
+        function cwCleanChoiceDescription(description) {
+            return String(description || '')
+                .replace(/\[slot:\{[^\]]+\}\]\s*/g, '')
+                .replace(/\[avail:\{[^\]]+\}\]\s*$/g, '')
+                .trim();
         }
 
         function cwPersonInitials(name) {

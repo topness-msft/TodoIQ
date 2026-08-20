@@ -480,6 +480,8 @@ class TestDestinationBinding:
                     "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
                     "America/New_York"
                 ),
+                "format": "Teams meeting",
+                "subject": "1:1 with Rima Reyes",
                 "body_html": (
                     "<p><strong>Agenda</strong></p><ul>"
                     "<li>Review current priorities</li></ul>"
@@ -524,16 +526,28 @@ class TestDestinationBinding:
             expect(modal.get_by_test_id("meeting-confirm-attendees")).to_contain_text(
                 "Rima Reyes"
             )
-            expect(modal.get_by_test_id("meeting-confirm-date-time")).to_have_text(
+            expect(modal.get_by_test_id("meeting-confirm-date-time")).to_contain_text(
                 "Date & timeMonday, August 17, 2026 · 10:05 AM–10:35 AM · "
                 "America/New_York"
+            )
+            expect(modal.get_by_test_id("meeting-confirm-date-time")).to_contain_text(
+                "Teams meeting"
             )
             expect(modal.get_by_test_id("meeting-confirm-body")).to_contain_text(
                 "Review current priorities"
             )
+            expect(modal.get_by_test_id("meeting-confirm-body")).to_contain_text(
+                "Subject1:1 with Rima Reyes"
+            )
+            body_section = modal.get_by_test_id("meeting-confirm-body")
+            body_box = body_section.bounding_box()
+            subject_box = body_section.locator(
+                ".cw-meeting-confirm-subject"
+            ).bounding_box()
+            assert body_box and body_box["width"] >= 480
+            assert subject_box and subject_box["x"] >= body_box["x"] + 100
             expect(modal).not_to_contain_text("Meeting details")
             expect(modal).not_to_contain_text("Availability")
-            expect(modal).not_to_contain_text("Teams meeting")
             assert posted == {
                 "destination_ref": "rima.reyes@microsoft.com",
                 "destination_display": "Rima Reyes",
@@ -592,6 +606,8 @@ class TestDestinationBinding:
                     "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
                     "America/New_York"
                 ),
+                "format": "Teams meeting",
+                "subject": "1:1 with Rima Reyes",
                 "body_html": (
                     "<p><strong>Agenda</strong></p><ul>"
                     "<li>Review current priorities</li></ul>"
@@ -750,6 +766,8 @@ class TestDestinationBinding:
                     "Monday, August 17, 2026 · 10:05 AM–10:35 AM · "
                     "America/New_York"
                 ),
+                "format": "Teams meeting",
+                "subject": "Rockwell CAPE Lighthouse kickoff",
                 "body_html": (
                     "<p><strong>Agenda</strong></p><ul>"
                     "<li>Planning review</li></ul>"
@@ -854,16 +872,11 @@ class TestDestinationBinding:
                 task_id,
             )
 
-            with page.expect_request(
-                lambda request: request.method == "POST"
-                and request.url.endswith(f"/api/tasks/{task_id}/refresh")
-            ):
-                page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
+            page.evaluate("taskId => cwOpenExecuteConfirm(taskId)", task_id)
 
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
-                "Resolve Henry James in Key People before scheduling. "
-                "Riveter is refreshing identity matches now."
+                "Resolve Henry James in Key People before scheduling."
             ]
         finally:
             _delete_task(page, base_url, task_id)
@@ -1216,6 +1229,9 @@ class TestSchedulingDestinationNote:
                 const t = tasks.find(x => x.id === {task_id});
                 t.parse_status = 'parsed';
                 t.action_type = 'schedule-meeting';
+                t.key_people = JSON.stringify([
+                    {{name: 'Sarah Goodwin', email: 'sarah@microsoft.com'}}
+                ]);
                 _cwActions[{task_id}] = {json.dumps(_action(0))};
                 _cwActions[{task_id}].task_id = {task_id};
                 selectedTaskId = {task_id};
@@ -1248,6 +1264,10 @@ class TestSchedulingDestinationNote:
                 const t = tasks.find(x => x.id === {task_id});
                 t.parse_status = 'parsed';
                 t.action_type = 'schedule-meeting';
+                t.key_people = JSON.stringify([
+                    {{name: 'Rima Reyes', email: 'rima@microsoft.com'}},
+                    {{name: 'Greg Howard', email: 'greg@microsoft.com'}}
+                ]);
                 _cwActions[{task_id}] = {json.dumps(action)};
                 selectedTaskId = {task_id};
                 renderDetailPane(t);

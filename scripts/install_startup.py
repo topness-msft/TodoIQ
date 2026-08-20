@@ -23,6 +23,7 @@ def ensure_dependencies():
         ("jinja2", "jinja2"),
         ("pystray", "pystray"),
         ("PIL", "Pillow"),
+        ("dateutil", "python-dateutil"),
     )
     for module_name, package_name in packages:
         try:

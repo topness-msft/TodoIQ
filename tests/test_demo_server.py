@@ -106,7 +106,11 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
 def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):
     demo_dir = tmp_path / "demo"
     demo_dir.mkdir()
-    (demo_dir / "riveter-demo.pid").write_text(str(os.getpid()))
+    (demo_dir / "riveter-demo.pid").write_text(json.dumps({
+        "pid": os.getpid(),
+        "created": 0,
+        "executable": "not-the-current-process.exe",
+    }))
 
     result = _run(tmp_path, "stop")
 
@@ -114,11 +118,21 @@ def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):
     assert "refusing" in (result.stdout + result.stderr).lower()
 
 
-def test_demo_process_identity_requires_serve_argument():
-    command = f'python.exe "{SCRIPT}"'
-    assert demo_server._command_is_demo_serve(command + " serve")
-    assert not demo_server._command_is_demo_serve(command + " reset")
-    assert not demo_server._command_is_demo_serve(command + " status")
+def test_demo_process_identity_requires_matching_creation_token(monkeypatch):
+    record = {"pid": 42, "created": 100, "executable": "python.exe"}
+    monkeypatch.setattr(demo_server, "_pid_record", lambda: record)
+    monkeypatch.setattr(
+        demo_server,
+        "_process_identity",
+        lambda _pid: dict(record),
+    )
+    assert demo_server._demo_process(42)
+    monkeypatch.setattr(
+        demo_server,
+        "_process_identity",
+        lambda _pid: {**record, "created": 101},
+    )
+    assert not demo_server._demo_process(42)
 
 
 def test_external_runners_fail_closed_in_demo_mode(monkeypatch):
@@ -149,17 +163,14 @@ def test_live_demo_capabilities_are_independently_allowlisted(monkeypatch):
     assert not runtime_mode.todo_parse_enabled()
     assert not runtime_mode.cowork_session_enabled()
     assert not runtime_mode.cowork_execute_enabled()
-    assert not runtime_mode.demo_schedule_choices_enabled()
     assert not runtime_mode.copilot_command_enabled("/todo-refresh", "sync")
 
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_TODO_PARSE", "1")
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_SESSION", "1")
     monkeypatch.setenv("RIVETER_DEMO_ALLOW_COWORK_EXECUTE", "1")
-    monkeypatch.setenv("RIVETER_DEMO_TRUST_SCHEDULE_CHOICES", "1")
     assert runtime_mode.todo_parse_enabled()
     assert runtime_mode.cowork_session_enabled()
     assert runtime_mode.cowork_execute_enabled()
-    assert runtime_mode.demo_schedule_choices_enabled()
     assert runtime_mode.copilot_command_enabled("/todo-parse", "parse")
     assert not runtime_mode.copilot_command_enabled("/todo-refresh", "parse")
     assert not runtime_mode.copilot_command_enabled("/todo-parse", "sync")
@@ -237,66 +248,6 @@ def test_live_demo_allows_cowork_entrypoints_with_fake_transports(
         assert cowork_runner.answer_interaction(
             "demo:user:answer", "invocation", {"0": "answer"}
         ) is True
-
-
-def test_schedule_choice_trust_is_demo_only(monkeypatch):
-    attendees = [
-        {"name": "Bobby Chang", "email": "bobby.chang@microsoft.com"},
-        {"name": "Em D'Arcy", "email": "emdarcy@microsoft.com"},
-    ]
-    marker = (
-        '[avail:{"bobby.chang@microsoft.com":"free",'
-        '"emdarcy@microsoft.com":"free"}]'
-    )
-    interaction = {
-        "invocation_id": "demo-schedule",
-        "questions": [{
-            "id": "0",
-            "header": "Pick a time",
-            "question": "Which verified time works?",
-            "multi_select": False,
-            "options": [
-                {
-                    "value": value,
-                    "label": value,
-                    "description": marker,
-                    "image_url": "",
-                }
-                for value in ("Wed 1 PM ET", "Thu 10 AM ET", "Fri 2 PM ET")
-            ],
-        }],
-    }
-    events = [
-        ("ts", {
-            "tid": "tool-1",
-            "tn": "mcp__outlook_calendar__FindMeetingTimes",
-            "inp": json.dumps({
-                "attendees": [
-                    "bobby.chang@microsoft.com",
-                    "emdarcy@microsoft.com",
-                ]
-            }),
-        }),
-        ("tx", {
-            "tid": "tool-1",
-            "tn": "mcp__outlook_calendar__FindMeetingTimes",
-            "ok": True,
-        }),
-    ]
-    assert cowork_runner._demo_schedule_result(interaction, attendees) is None
-
-    monkeypatch.setenv("RIVETER_DEMO_MODE", "1")
-    monkeypatch.setenv("RIVETER_DEMO_TRUST_SCHEDULE_CHOICES", "1")
-    trusted = cowork_runner._demo_schedule_result(interaction, attendees)
-    certified = cowork_runner.certify_schedule_interaction(
-        interaction, events, attendees, trusted
-    )
-    assert certified["schedule_evidence"]["valid"] is True
-    assert certified["schedule_evidence"]["attendees"] == [
-        "bobby.chang@microsoft.com",
-        "emdarcy@microsoft.com",
-    ]
-
 
 def test_demo_server_routes_are_live_and_sync_skills_stay_forbidden(tmp_path):
     reset = _run(tmp_path, "reset")

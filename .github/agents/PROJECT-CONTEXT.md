@@ -113,8 +113,8 @@ Cowork-powered draft, approval, and direct-action flows.
     Teams materials, Adrian Maclean email about Srini Raghavan
   - `data/demo/settings.json` has `cowork_api_transport: true`
   - sync and standalone skill POST routes return 403
-  - parsing, Cowork session, approved execution, and demo schedule-choice flags
-    are present on the validated demo process
+  - parsing, Cowork session, and approved execution flags are present on the
+    validated demo process
   - ports 8766 and 8768 retain their original PIDs, DB hashes, and health probes
   - browser load issues no requests outside `127.0.0.1:8776` until the presenter
     explicitly starts parsing or Cowork

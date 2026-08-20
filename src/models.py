@@ -251,11 +251,23 @@ def update_task(task_id: int, **fields) -> dict | None:
     """Update arbitrary fields on a task. Returns updated task or None."""
     if not fields:
         return get_task(task_id)
-    fields["updated_at"] = _now()
-    set_clause = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [task_id]
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if not current:
+            conn.rollback()
+            return None
+        if any(
+            key in fields and fields[key] != current[key]
+            for key in _COWORK_REVISION_FIELDS
+        ):
+            fields["cowork_revision"] = current["cowork_revision"] + 1
+        fields["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [task_id]
         conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
         if {"key_people", "source_id"} & set(fields):
             row = conn.execute(
@@ -290,8 +302,12 @@ def update_task_for_action_type(task_id: int, **fields) -> dict | None:
             return None
         task = dict(row)
         requested_type = fields.get("action_type", task.get("action_type"))
-        changed = requested_type != task.get("action_type")
-        if changed:
+        type_changed = requested_type != task.get("action_type")
+        input_changed = any(
+            key in fields and fields[key] != task.get(key)
+            for key in _COWORK_REVISION_FIELDS
+        )
+        if type_changed or input_changed:
             in_flight = conn.execute(
                 """
                 SELECT state FROM task_actions
@@ -552,6 +568,13 @@ _ACTION_INSERT_FIELDS = (
 # Teams and email are the only transports TodoIQ can describe today. The value
 # is orthogonal to destination_kind, which describes audience size, not channel.
 DELIVERY_CHANNELS = frozenset({"teams", "email"})
+_COWORK_REVISION_FIELDS = frozenset({
+    "title",
+    "description",
+    "coaching_text",
+    "user_notes",
+    "key_people",
+})
 
 # Only the draft the user typed is editable. Everything Cowork produced, and
 # the state machine itself, is off limits from the API.
@@ -866,7 +889,10 @@ def set_blocked_question_if_missing(action_id: int, question: str) -> dict | Non
             "answered_interaction = NULL, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND (blocked_question IS NULL OR "
-            "(blocked_question = '' AND COALESCE(answered_interaction, '') <> ?))",
+            "(blocked_question = '' AND COALESCE("
+            "CASE WHEN json_valid(answered_interaction) "
+            "THEN json_extract(answered_interaction, '$.question_raw') "
+            "ELSE answered_interaction END, '') <> ?))",
             (question, action_id, question),
         )
         conn.commit()
@@ -880,18 +906,22 @@ def set_blocked_question_if_missing(action_id: int, question: str) -> dict | Non
         conn.close()
 
 
-def claim_blocked_question_answer(action_id: int, expected_question: str) -> bool:
+def claim_blocked_question_answer(
+    action_id: int,
+    expected_question: str,
+    answered_payload: str | None = None,
+) -> bool:
     """Atomically claim the pending interaction so only one answer is sent."""
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "UPDATE task_actions SET answered_interaction = blocked_question, "
+            "UPDATE task_actions SET answered_interaction = ?, "
             "had_interaction = 1, "
             "blocked_question = '', "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND state IN ('previewing','executing') "
             "AND blocked_question = ?",
-            (action_id, expected_question),
+            (answered_payload or expected_question, action_id, expected_question),
         )
         conn.commit()
         return cursor.rowcount == 1
@@ -899,7 +929,11 @@ def claim_blocked_question_answer(action_id: int, expected_question: str) -> boo
         conn.close()
 
 
-def restore_claimed_blocked_question(action_id: int, question: str) -> bool:
+def restore_claimed_blocked_question(
+    action_id: int,
+    question: str,
+    answered_payload: str | None = None,
+) -> bool:
     """Restore a definitively rejected answer if its claim is still current."""
     conn = get_connection()
     try:
@@ -909,7 +943,7 @@ def restore_claimed_blocked_question(action_id: int, question: str) -> bool:
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND blocked_question = '' "
             "AND answered_interaction = ?",
-            (question, action_id, question),
+            (question, action_id, answered_payload or question),
         )
         conn.commit()
         return cursor.rowcount == 1
@@ -921,13 +955,21 @@ def clear_blocked_question_if_unchanged(
     action_id: int,
     blocked_question: str | None,
     answered_interaction: str | None,
+    *,
+    preserve_answer: bool = False,
 ) -> bool:
     """Clear a resumed interaction without erasing a concurrent state change."""
     conn = get_connection()
     try:
+        answer_update = (
+            "answered_interaction = answered_interaction, "
+            if preserve_answer
+            else "answered_interaction = NULL, "
+        )
         cursor = conn.execute(
             "UPDATE task_actions SET blocked_question = NULL, "
-            "answered_interaction = NULL, "
+            + answer_update
+            +
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
             "WHERE id = ? AND blocked_question IS ? "
             "AND answered_interaction IS ?",

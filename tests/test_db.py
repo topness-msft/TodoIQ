@@ -534,6 +534,36 @@ class TestTaskActionsSchema(unittest.TestCase):
         self.assertEqual(row["blocked_question"], "")
         self.assertEqual(row["answered_interaction"], "New question?")
 
+    def test_resume_cleanup_can_preserve_certified_schedule_answer(self):
+        import src.db as db_module
+        from src.models import clear_blocked_question_if_unchanged
+
+        answer = '{"kind":"interaction_answer","question_raw":"Question?"}'
+        cursor = self._insert(
+            state="previewing",
+            blocked_question="",
+            answered_interaction=answer,
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertTrue(clear_blocked_question_if_unchanged(
+                cursor.lastrowid,
+                "",
+                answer,
+                preserve_answer=True,
+            ))
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute(
+            "SELECT blocked_question, answered_interaction "
+            "FROM task_actions WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        self.assertIsNone(row["blocked_question"])
+        self.assertEqual(row["answered_interaction"], answer)
+
     def test_stopped_action_cannot_claim_or_send_an_answer(self):
         import src.db as db_module
         from src.models import claim_blocked_question_answer

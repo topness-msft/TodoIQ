@@ -429,6 +429,23 @@ class TestScheduleInteractionCertification(unittest.TestCase):
     @staticmethod
     def _interaction(question="Which time works?"):
         marker = '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        slots = (
+            (
+                "Thu 8/20, 1:05 PM ET",
+                "2099-08-20T13:05:00-04:00",
+                "2099-08-20T13:30:00-04:00",
+            ),
+            (
+                "Fri 8/21, 10:05 AM ET",
+                "2099-08-21T10:05:00-04:00",
+                "2099-08-21T10:30:00-04:00",
+            ),
+            (
+                "Mon 8/24, 2:05 PM ET",
+                "2099-08-24T14:05:00-04:00",
+                "2099-08-24T14:30:00-04:00",
+            ),
+        )
         return {
             "invocation_id": "schedule-1",
             "questions": [{
@@ -442,32 +459,21 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                     {
                         "value": value,
                         "label": value,
-                        "description": marker,
+                        "description": (
+                            "[slot:"
+                            + json.dumps({
+                                "start": start,
+                                "end": end,
+                                "timezone": "Eastern Standard Time",
+                            }, separators=(",", ":"))
+                            + "] "
+                            + marker
+                        ),
                         "image_url": "",
                     }
-                    for value in (
-                        "Wed 8/19, 1:05 PM ET",
-                        "Thu 8/20, 10:05 AM ET",
-                        "Fri 8/21, 2:05 PM ET",
-                    )
+                    for value, start, end in slots
                 ],
             }],
-        }
-
-    @staticmethod
-    def _trusted_result():
-        availability = {"jay.padimiti@microsoft.com": "free"}
-        return {
-            "attendees": ["jay.padimiti@microsoft.com"],
-            "working_hours_checked": True,
-            "slots": [
-                {"value": value, "availability": availability}
-                for value in (
-                    "Wed 8/19, 1:05 PM ET",
-                    "Thu 8/20, 10:05 AM ET",
-                    "Fri 8/21, 2:05 PM ET",
-                )
-            ],
         }
 
     def test_certifies_exact_attendee_calendar_evidence(self):
@@ -475,7 +481,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             self._interaction(),
             self._events(),
             self.attendees,
-            self._trusted_result(),
+            duration_minutes=25,
+            now="2026-08-19T12:00:00+00:00",
         )
 
         self.assertEqual(
@@ -483,8 +490,10 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             ["jay.padimiti@microsoft.com"],
         )
         self.assertEqual(
-            certified["schedule_evidence"]["source"], "FindMeetingTimes"
+            certified["schedule_evidence"]["source"],
+            "FindMeetingTimes+interaction",
         )
+        self.assertTrue(certified["schedule_evidence"]["query_backed"])
 
     def test_rejects_unknown_timezone_and_incomplete_calendar_coverage(self):
         self.assertIsNone(
@@ -492,7 +501,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 self._interaction("Jay's timezone is unknown."),
                 self._events(),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
         self.assertIsNone(
@@ -500,7 +510,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 self._interaction(),
                 self._events(["someone.else@microsoft.com"]),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
         reverse = self._interaction()
@@ -509,7 +520,11 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         )
         self.assertIsNone(
             cr.certify_schedule_interaction(
-                reverse, self._events(), self.attendees, self._trusted_result()
+                reverse,
+                self._events(),
+                self.attendees,
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
         reverse["questions"][0]["label"] = ""
@@ -518,7 +533,11 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         )
         self.assertIsNone(
             cr.certify_schedule_interaction(
-                reverse, self._events(), self.attendees, self._trusted_result()
+                reverse,
+                self._events(),
+                self.attendees,
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
         for wording in ("timezone is uncertain", "timezone is unclear"):
@@ -528,7 +547,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                         self._interaction(wording),
                         self._events(),
                         self.attendees,
-                        self._trusted_result(),
+                        duration_minutes=25,
+                        now="2026-08-19T12:00:00+00:00",
                     )
                 )
 
@@ -538,7 +558,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 self._interaction(),
                 self._events(ok=False),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
         self.assertIsNone(
@@ -546,27 +567,88 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 self._interaction(),
                 self._events(tool_name="mcp__me_profile__GetUserDetails"),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
 
-    def test_rejects_model_choices_without_structured_tool_result(self):
+    def test_rejects_choices_without_machine_slot_metadata(self):
+        interaction = self._interaction()
+        for option in interaction["questions"][0]["options"]:
+            option["description"] = (
+                '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+            )
         self.assertIsNone(
             cr.certify_schedule_interaction(
-                self._interaction(), self._events(), self.attendees
+                interaction,
+                self._events(),
+                self.attendees,
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
-        trusted = self._trusted_result()
-        trusted["slots"][0] = {
-            "value": "Sunday 3:00 AM ET",
-            "availability": {"jay.padimiti@microsoft.com": "free"},
-        }
+
+    def test_rejects_duplicate_past_or_wrong_duration_slots(self):
+        cases = []
+        duplicate = self._interaction()
+        duplicate["questions"][0]["options"][1]["description"] = (
+            duplicate["questions"][0]["options"][0]["description"]
+        )
+        cases.append(duplicate)
+        past = self._interaction()
+        past["questions"][0]["options"][0]["description"] = (
+            '[slot:{"start":"2026-08-18T13:05:00-04:00",'
+            '"end":"2026-08-18T13:30:00-04:00",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        )
+        cases.append(past)
+        wrong_duration = self._interaction()
+        wrong_duration["questions"][0]["options"][0]["description"] = (
+            '[slot:{"start":"2026-08-20T13:05:00-04:00",'
+            '"end":"2026-08-20T13:35:00-04:00",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        )
+        cases.append(wrong_duration)
+        invalid_timezone = self._interaction()
+        invalid_timezone["questions"][0]["options"][0]["description"] = (
+            '[slot:{"start":"2026-08-20T13:05:00-04:00",'
+            '"end":"2026-08-20T13:30:00-04:00",'
+            '"timezone":"Mars/Olympus"}] '
+            '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        )
+        cases.append(invalid_timezone)
+        contradictory_end = self._interaction()
+        contradictory_end["questions"][0]["options"][0]["description"] = (
+            '[slot:{"start":"2026-08-20T13:05:00-04:00",'
+            '"end":"2026-08-20T13:30:00+05:30",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        )
+        cases.append(contradictory_end)
+        for interaction in cases:
+            with self.subTest(interaction=interaction):
+                self.assertIsNone(
+                    cr.certify_schedule_interaction(
+                        interaction,
+                        self._events(),
+                        self.attendees,
+                        duration_minutes=25,
+                        now="2026-08-19T12:00:00+00:00",
+                    )
+                )
+
+    def test_rejects_mismatched_tool_completion_name(self):
+        events = self._events()
+        events[1][1]["tn"] = "mcp__outlook_calendar__CreateEvent"
         self.assertIsNone(
             cr.certify_schedule_interaction(
                 self._interaction(),
-                self._events(),
+                events,
                 self.attendees,
-                trusted,
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
 
@@ -580,7 +662,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 interaction,
                 self._events(),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
 
@@ -589,20 +672,29 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             self._interaction(),
             self._events(),
             self.attendees,
-            self._trusted_result(),
+            duration_minutes=25,
+            now="2026-08-19T12:00:00+00:00",
         )
         self.assertTrue(
             cr.schedule_answer_is_safe(
                 certified,
-                {"0": "Wed 8/19, 1:05 PM ET"},
+                {"0": "Thu 8/20, 1:05 PM ET"},
                 self.attendees,
             )
         )
         self.assertFalse(
             cr.schedule_answer_is_safe(
                 certified,
-                {"0": "Wed 8/19, 1:05 PM ET"},
+                {"0": "Thu 8/20, 1:05 PM ET"},
                 [{"name": "Adele Vance", "email": "adele@microsoft.com"}],
+            )
+        )
+        self.assertFalse(
+            cr.schedule_answer_is_safe(
+                certified,
+                {"0": "Thu 8/20, 1:05 PM ET"},
+                self.attendees,
+                duration_minutes=45,
             )
         )
         self.assertTrue(
@@ -622,12 +714,12 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         self.assertFalse(
             cr.schedule_answer_is_safe(
                 fallback,
-                {"0": "Wed 8/19, 1:05 PM ET"},
+                {"0": "Thu 8/20, 1:05 PM ET"},
                 self.attendees,
             )
         )
         self.assertIn(
-            "Wed 8/19, 1:05 PM ET",
+            "Thu 8/20, 1:05 PM ET",
             fallback["schedule_evidence"]["rejected_option_values"],
         )
 
@@ -640,7 +732,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 interaction,
                 self._events(),
                 self.attendees,
-                self._trusted_result(),
+                duration_minutes=25,
+                now="2026-08-19T12:00:00+00:00",
             )
         )
 
@@ -684,7 +777,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                         "tid": "tool-1",
                         "tn": "mcp__outlook_calendar__FindMeetingTimes",
                         "inp": json.dumps({
-                            "attendees": ["jay.padimiti@microsoft.com"]
+                            "attendees": ["jay.padimiti@microsoft.com"],
+                            "duration_minutes": 25,
                         }),
                     }),
                     ("tx", {
@@ -734,6 +828,7 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 lambda _text: None,
                 action_id=135,
                 schedule_people=self.attendees,
+                schedule_duration=25,
             )
 
         self.assertEqual(len(client.posts), 1)
@@ -745,7 +840,7 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         self.assertEqual(stored["questions"][0]["options"], [])
         self.assertFalse(stored["schedule_evidence"]["valid"])
 
-    def test_live_runner_does_not_trust_model_choices_without_tool_output(self):
+    def test_live_runner_corrects_then_surfaces_query_backed_choices(self):
         invalid = {
             "iid": "schedule-1",
             "q": [{
@@ -754,16 +849,13 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 "options": [{"label": "Wed 1 PM", "value": "Wed 1 PM"}],
             }],
         }
-        marker = '[avail:{"jay.padimiti@microsoft.com":"free"}]'
+        canonical = self._interaction()
         valid = {
             "iid": "schedule-2",
             "q": [{
                 "id": "slot",
                 "question": "Which verified time works?",
-                "options": [
-                    {"label": value, "value": value, "description": marker}
-                    for value in ("Wed 1 PM ET", "Thu 10 AM ET", "Fri 2 PM ET")
-                ],
+                "options": canonical["questions"][0]["options"],
             }],
         }
 
@@ -782,7 +874,8 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                         "tid": "tool-1",
                         "tn": "mcp__outlook_calendar__FindMeetingTimes",
                         "inp": json.dumps({
-                            "attendees": ["jay.padimiti@microsoft.com"]
+                            "attendees": ["jay.padimiti@microsoft.com"],
+                            "duration_minutes": 25,
                         }),
                     }),
                     ("tx", {
@@ -832,13 +925,15 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                 lambda _text: None,
                 action_id=135,
                 schedule_people=self.attendees,
+                schedule_duration=25,
             )
 
         self.assertEqual(len(client.posts), 1)
         stored = json.loads(store_question.call_args.args[1])
         self.assertEqual(stored["invocation_id"], "schedule-2")
-        self.assertFalse(stored["schedule_evidence"]["valid"])
-        self.assertEqual(stored["questions"][0]["options"], [])
+        self.assertTrue(stored["schedule_evidence"]["valid"])
+        self.assertTrue(stored["schedule_evidence"]["query_backed"])
+        self.assertEqual(len(stored["questions"][0]["options"]), 3)
 
 
 class TestExecutionToolApproval(unittest.TestCase):
@@ -1115,6 +1210,8 @@ class TestEmailToolApproval(unittest.TestCase):
 
 class TestCalendarToolApproval(unittest.TestCase):
     def setUp(self):
+        self._calendar_now_fn = cr._calendar_now_fn
+        cr._calendar_now_fn = lambda: "2026-08-13T12:00:00-04:00"
         self.conversation_id = "tenant:user:conversation"
         self.reviewed_draft = (
             "Here's the invitation, ready to go - nothing has been sent yet.\n\n"
@@ -1185,6 +1282,9 @@ class TestCalendarToolApproval(unittest.TestCase):
             "destination_ref": "rima.reyes@microsoft.com",
             "draft": self.reviewed_draft,
         }
+
+    def tearDown(self):
+        cr._calendar_now_fn = self._calendar_now_fn
 
     def _proposal_ta(self, body=None):
         event = {**self.event, "body": body or self.proposal_body}
@@ -1502,6 +1602,17 @@ class TestCalendarToolApproval(unittest.TestCase):
         self.assertIsInstance(approval["edited_input"], dict)
         self.assertEqual(approval["edited_input"]["importance"], "normal")
 
+    def test_calendar_approval_rechecks_that_start_is_future(self):
+        cr._calendar_now_fn = lambda: "2026-08-18T12:00:00-04:00"
+        self.assertIsNone(
+            cr._execution_tool_approval(
+                self.ta,
+                "calendar",
+                self.snapshot,
+                self.conversation_id,
+                approved_calendar_event=self.event,
+            )
+        )
     def test_rejects_calendar_request_drift(self):
         cases = [
             {**self.ta, "aid": ""},

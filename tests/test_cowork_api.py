@@ -1154,15 +1154,41 @@ class TestGetPreview(CoworkAPITestBase):
             "is_online_meeting": True,
         }
         action = create_task_action(tid)
+        selected = "fixture-selected-slot"
+        answered = json.dumps({
+            "kind": "interaction_answer",
+            "question_raw": "{}",
+            "answers": {"0": selected},
+            "interaction": {
+                "schedule_evidence": {
+                    "valid": True,
+                    "source": "FindMeetingTimes+interaction",
+                    "query_backed": True,
+                    "attendees": ["rima.reyes@microsoft.com"],
+                    "duration_minutes": 25,
+                    "slots": [{
+                        "value": selected,
+                        "start": "2026-08-17T15:05:00",
+                        "end": "2026-08-17T15:30:00",
+                        "timezone": "America/New_York",
+                        "availability": {
+                            "rima.reyes@microsoft.com": "free"
+                        },
+                    }],
+                }
+            },
+        })
         conn = get_connection()
         conn.execute(
-            "UPDATE task_actions SET state='ready', draft=?, tool_trace=? WHERE id=?",
+            "UPDATE task_actions SET state='ready', draft=?, tool_trace=?,"
+            "answered_interaction=?,had_interaction=1 WHERE id=?",
             (
                 reviewed,
                 json.dumps([{
                     "tool_name": "mcp__outlook_calendar__CreateEvent",
                     "input": json.dumps(event),
                 }]),
+                answered,
                 action["id"],
             ),
         )
@@ -1173,7 +1199,8 @@ class TestGetPreview(CoworkAPITestBase):
         preview = data["action"]["calendar_preview"]
 
         self.assertEqual(
-            set(preview), {"attendees", "date_time", "body_html"}
+            set(preview),
+            {"attendees", "date_time", "format", "subject", "body_html"},
         )
         self.assertEqual(preview["attendees"], ["rima.reyes@microsoft.com"])
         self.assertEqual(
@@ -1181,6 +1208,8 @@ class TestGetPreview(CoworkAPITestBase):
             "Monday, August 17, 2026 · 3:05 PM–3:30 PM · America/New_York",
         )
         self.assertIn("Current priorities", preview["body_html"])
+        self.assertEqual(preview["subject"], "Phil / Rima 1:1")
+        self.assertEqual(preview["format"], "Teams meeting")
         self.assertNotIn("When:", preview["body_html"])
         self.assertNotIn("Timezone reasoning", preview["body_html"])
 
@@ -1207,6 +1236,145 @@ class TestGetPreview(CoworkAPITestBase):
 
         _, data = self.get_preview(tid)
         self.assertNotIn("calendar_preview", data["action"])
+
+    def test_calendar_preview_is_bound_to_the_selected_certified_slot(self):
+        from src.handlers.cowork import _preview_calendar_event
+
+        event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-20T13:05:00",
+            "end": "2026-08-20T13:30:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": ["rima@microsoft.com"],
+            "is_online_meeting": True,
+            "body": "model proposal",
+        }
+        selected = "Thu 8/20, 1:05 PM ET"
+        record = {
+            "kind": "interaction_answer",
+            "question_raw": "{}",
+            "answers": {"0": selected},
+            "interaction": {
+                "schedule_evidence": {
+                    "valid": True,
+                    "source": "FindMeetingTimes+interaction",
+                    "query_backed": True,
+                    "attendees": ["rima@microsoft.com"],
+                    "duration_minutes": 25,
+                    "slots": [{
+                        "value": selected,
+                        "start": "2026-08-20T13:05:00-04:00",
+                        "end": "2026-08-20T13:30:00-04:00",
+                        "timezone": "Eastern Standard Time",
+                        "availability": {"rima@microsoft.com": "free"},
+                    }],
+                }
+            },
+        }
+        action = {
+            "action_type": "schedule-meeting",
+            "draft": (
+                "**Phil / Rima 1:1**\n\n**Agenda**\n"
+                "- Current priorities"
+            ),
+            "answered_interaction": json.dumps(record),
+            "tool_trace": json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "input": json.dumps(event),
+            }]),
+        }
+
+        self.assertIsNotNone(_preview_calendar_event(action))
+        missing_binding = {
+            **action,
+            "answered_interaction": None,
+            "had_interaction": 1,
+        }
+        self.assertIsNone(_preview_calendar_event(missing_binding))
+        drifted = json.loads(action["tool_trace"])
+        drifted[0]["input"] = json.dumps({
+            **event,
+            "start": "2026-08-20T14:05:00",
+            "end": "2026-08-20T14:30:00",
+        })
+        action["tool_trace"] = json.dumps(drifted)
+        self.assertIsNone(_preview_calendar_event(action))
+
+    def test_calendar_execution_requires_a_future_start(self):
+        from src.services.calendar_time import calendar_event_is_future
+
+        self.assertTrue(
+            calendar_event_is_future(
+                {
+                    "start": "2026-08-20T10:05:00",
+                    "time_zone": "Eastern Standard Time",
+                },
+                now="2026-08-19T12:00:00-04:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-08-18T10:05:00",
+                    "time_zone": "Eastern Standard Time",
+                },
+                now="2026-08-19T12:00:00-04:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-08-19T10:00:00",
+                    "time_zone": "India Standard Time",
+                },
+                now="2026-08-19T08:00:00+00:00",
+            )
+        )
+        self.assertTrue(
+            calendar_event_is_future(
+                {
+                    "start": "2026-12-15T10:00:00-05:00",
+                    "time_zone": "Eastern Standard Time",
+                },
+                now="2026-12-14T12:00:00+00:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-03-08T02:30:00",
+                    "time_zone": "Eastern Standard Time",
+                },
+                now="2026-03-07T12:00:00+00:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-11-01T01:30:00",
+                    "time_zone": "Eastern Standard Time",
+                },
+                now="2026-10-31T12:00:00+00:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-08-20T10:00:00-04:00",
+                    "time_zone": "India Standard Time",
+                },
+                now="2026-08-19T08:00:00+00:00",
+            )
+        )
+        self.assertFalse(
+            calendar_event_is_future(
+                {
+                    "start": "2026-08-20T10:00:00-04:00",
+                    "time_zone": "Mars/Olympus",
+                },
+                now="2026-08-19T08:00:00+00:00",
+            )
+        )
 
 
 # ------------------------------------------------------------- mark seen
@@ -1497,7 +1665,9 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         self._execute_transport_fn = getattr(
             cowork_handler, "EXECUTE_TRANSPORT_ENABLED_FN", None
         )
+        self._now_fn = getattr(cowork_handler, "NOW_FN", None)
         cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = lambda: True
+        cowork_handler.NOW_FN = lambda: "2026-08-13T12:00:00-04:00"
         self.started = []
         cowork_handler.EXECUTE_FN = lambda task_id, prompt, conversation_id, **kw: (
             self.started.append((task_id, prompt, conversation_id, kw))
@@ -1509,10 +1679,20 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
         cowork_handler.EXECUTE_FN = self._execute_fn
         cowork_handler.EXECUTE_TRANSPORT_ENABLED_FN = self._execute_transport_fn
+        cowork_handler.NOW_FN = self._now_fn
         super().tearDown()
 
     def _ready_action(self, tid, **overrides):
         from src.db import get_connection
+        from src.models import get_task, update_task
+
+        task = get_task(tid)
+        if (
+            overrides.get("action_type") == "schedule-meeting"
+            and task
+            and task.get("title") == "Send Sarah the deck"
+        ):
+            update_task(tid, title="Schedule a 25-minute meeting")
 
         action_id = self.make_action(tid, state="ready")
         values = {
@@ -1524,6 +1704,53 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             "destination_confirmed_at": "2026-08-11T12:00:00Z",
         }
         values.update(overrides)
+        if (
+            values.get("action_type") == "schedule-meeting"
+            and "answered_interaction" not in values
+            and values.get("tool_trace")
+        ):
+            from src.services.calendar_time import calendar_event_duration_minutes
+
+            trace = json.loads(values["tool_trace"])
+            candidates = [
+                item for item in trace
+                if "createevent" in str(item.get("tool_name") or "").lower()
+            ]
+            if len(candidates) == 1:
+                event = candidates[0].get("input")
+                event = json.loads(event) if isinstance(event, str) else event
+                if isinstance(event, dict):
+                    selected = "fixture-selected-slot"
+                    attendees = [
+                        str(email).strip().lower()
+                        for email in event.get("attendees") or []
+                    ]
+                    values["answered_interaction"] = json.dumps({
+                        "kind": "interaction_answer",
+                        "question_raw": "{}",
+                        "answers": {"0": selected},
+                        "interaction": {
+                            "schedule_evidence": {
+                                "valid": True,
+                                "source": "FindMeetingTimes+interaction",
+                                "query_backed": True,
+                                "attendees": attendees,
+                                "duration_minutes": calendar_event_duration_minutes(
+                                    event
+                                ),
+                                "slots": [{
+                                    "value": selected,
+                                    "start": event.get("start"),
+                                    "end": event.get("end"),
+                                    "timezone": event.get("time_zone"),
+                                    "availability": {
+                                        email: "free" for email in attendees
+                                    },
+                                }],
+                            }
+                        },
+                    })
+                    values["had_interaction"] = 1
         conn = get_connection()
         conn.execute(
             "UPDATE task_actions SET "
@@ -1595,7 +1822,7 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
         response = self._execute(tid)
         data = json.loads(response.body)
 
-        self.assertEqual(response.code, 202)
+        self.assertEqual(response.code, 202, response.body)
         self.assertAlmostEqual(data["action"]["credits_cumulative"], 42.5)
 
     def test_schedule_execution_rejects_attendee_drift_after_preview(self):
@@ -1637,6 +1864,68 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
             "The attendee list changed after this preview. Start over and "
             "review availability again before creating the meeting.",
         )
+
+    def test_execution_claim_rejects_concurrent_attendee_change(self):
+        import src.handlers.cowork as handler
+        from src.models import create_execution_action, update_task
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
+        self._ready_action(
+            tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            finding=(
+                "**Phil / Rima 1:1**\n"
+                "- **When:** Monday, August 17, 3:05-3:30 PM ET\n"
+                "- **Teams meeting:** included\n\n"
+                "**Agenda**\n- Quick 1:1 to sync up"
+            ),
+            draft=None,
+            tool_trace=json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": json.dumps({
+                    "subject": "Phil / Rima 1:1",
+                    "start": "2026-08-17T15:05:00",
+                    "end": "2026-08-17T15:30:00",
+                    "time_zone": "Eastern Standard Time",
+                    "attendees": ["rima@microsoft.com"],
+                    "is_online_meeting": True,
+                    "body": "model proposal",
+                }),
+            }]),
+        )
+        original = handler.create_execution_action
+
+        def change_then_claim(parent_action_id, snapshot):
+            update_task(
+                tid,
+                key_people=json.dumps([{
+                    "name": "Kanika Ramji",
+                    "email": "kanika@microsoft.com",
+                }]),
+            )
+            return create_execution_action(parent_action_id, snapshot)
+
+        handler.create_execution_action = change_then_claim
+        try:
+            response = self._execute(tid)
+        finally:
+            handler.create_execution_action = original
+
+        self.assertEqual(response.code, 409)
+        self.assertIn(
+            "changed after review",
+            json.loads(response.body)["error"],
+        )
+        self.assertEqual(self.started, [])
 
     def test_delivery_evidence_must_match_the_approved_action(self):
         from src.handlers.cowork import (
@@ -2080,7 +2369,10 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
         response = self._execute(calendar_tid)
 
-        self.assertEqual(response.code, 202)
+        self.assertEqual(response.code, 202, response.body)
+        self.assertTrue(
+            self.started[-1][3]["approved_calendar_event"]["is_online_meeting"]
+        )
         self.assertEqual(
             self.started[-1][3]["approved_calendar_event"],
             {
@@ -2125,10 +2417,92 @@ class TestExecuteApprovedAction(CoworkAPITestBase):
 
         response = self._execute(calendar_tid)
 
-        self.assertEqual(response.code, 202)
-        self.assertTrue(
-            self.started[-1][3]["approved_calendar_event"]["is_online_meeting"]
+        self.assertEqual(response.code, 202, response.body)
+
+    def test_calendar_execution_rejects_a_past_start_without_launching(self):
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
         )
+        event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-12T15:05:00",
+            "end": "2026-08-12T15:30:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": ["rima@microsoft.com"],
+            "is_online_meeting": True,
+            "body": "model proposal",
+        }
+        self._ready_action(
+            tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            finding=(
+                "**Phil / Rima 1:1**\n"
+                "- **When:** Wednesday, August 12, 3:05-3:30 PM ET\n"
+                "- **Teams meeting:** included\n\n"
+                "**Agenda**\n- Quick 1:1 to sync up"
+            ),
+            draft=None,
+            tool_trace=json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": json.dumps(event),
+            }]),
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertIn("time has passed", json.loads(response.body)["error"])
+        self.assertEqual(self.started, [])
+
+    def test_calendar_execution_rejects_duration_drift_without_launching(self):
+        tid = self.make_task(
+            title="Schedule a 45-minute meeting",
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Rima Reyes", "email": "rima@microsoft.com"},
+            ]),
+        )
+        event = {
+            "subject": "Phil / Rima 1:1",
+            "start": "2026-08-17T15:05:00",
+            "end": "2026-08-17T15:30:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": ["rima@microsoft.com"],
+            "is_online_meeting": True,
+            "body": "model proposal",
+        }
+        self._ready_action(
+            tid,
+            action_type="schedule-meeting",
+            delivery_channel=None,
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            finding=(
+                "**Phil / Rima 1:1**\n"
+                "- **When:** Monday, August 17, 3:05-3:30 PM ET\n"
+                "- **Teams meeting:** included\n\n"
+                "**Agenda**\n- Quick 1:1 to sync up"
+            ),
+            draft=None,
+            tool_trace=json.dumps([{
+                "tool_name": "mcp__outlook_calendar__CreateEvent",
+                "ok": True,
+                "input": json.dumps(event),
+            }]),
+        )
+
+        response = self._execute(tid)
+
+        self.assertEqual(response.code, 409)
+        self.assertIn("duration changed", json.loads(response.body)["error"])
+        self.assertEqual(self.started, [])
 
     def test_calendar_execution_rejects_missing_structured_preview(self):
         tid = self.make_task(
@@ -2967,6 +3341,9 @@ class TestRefineTurn(CoworkAPITestBase):
                     "cid": conversation_id,
                     "text": instruction,
                     "interaction_mode": kw.get("interaction_mode"),
+                    "action_id": kw.get("action_id"),
+                    "schedule_people": kw.get("schedule_people"),
+                    "schedule_duration": kw.get("schedule_duration"),
                 }
             )
             return cr_mod.preview_label(task_id)
@@ -2998,6 +3375,45 @@ class TestRefineTurn(CoworkAPITestBase):
         self.assertEqual(r.code, 202)
         self.assertEqual(len(self.continued), 1)
         self.assertEqual(self.continued[0]["cid"], "conv-abc")
+        self.assertIsNotNone(self.continued[0]["action_id"])
+
+    def test_schedule_refine_carries_certification_context(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self.make_task(
+            title="Schedule a 25-minute review",
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Rima Reyes",
+                "email": "rima@microsoft.com",
+            }]),
+        )
+        self.start(tid, FakeProc(stdout=GOOD_STDOUT))
+        self.get_preview(tid)
+        conn = get_connection()
+        selected = '{"kind":"interaction_answer","question_raw":"{}"}'
+        conn.execute(
+            "UPDATE task_actions SET conversation_id='conv-schedule',"
+            "answered_interaction=? WHERE task_id=?",
+            (selected, tid),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._refine(tid, "look next week")
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.continued[0]["schedule_people"],
+            [{"name": "Rima Reyes", "email": "rima@microsoft.com"}],
+        )
+        self.assertEqual(self.continued[0]["schedule_duration"], 25)
+        self.assertIsNotNone(self.continued[0]["action_id"])
+        self.assertEqual(
+            get_latest_task_action(tid)["answered_interaction"],
+            selected,
+        )
 
     def test_it_creates_a_new_row_linked_to_its_parent(self):
         """The audit chain: the original attempt survives."""
@@ -3200,7 +3616,8 @@ class TestInteractionAnswer(CoworkAPITestBase):
         tid = self._blocked()
         conn = get_connection()
         conn.execute(
-            "UPDATE tasks SET action_type='schedule-meeting',key_people=? WHERE id=?",
+            "UPDATE tasks SET title='Schedule a 25-minute review',"
+            "action_type='schedule-meeting',key_people=? WHERE id=?",
             (
                 json.dumps([{
                     "name": "Jay Padimiti",
@@ -3302,6 +3719,90 @@ class TestInteractionAnswer(CoworkAPITestBase):
             self.answers[-1][2]["0"],
         )
 
+    def test_schedule_answer_persists_the_selected_certified_slot(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self._blocked_schedule()
+        values = (
+            "Thu 8/20, 1:05 PM ET",
+            "Fri 8/21, 10:05 AM ET",
+            "Mon 8/24, 2:05 PM ET",
+        )
+        slots = [
+            {
+                "value": value,
+                "start": start,
+                "end": end,
+                "timezone": "Eastern Standard Time",
+                "availability": {"jay.padimiti@microsoft.com": "free"},
+            }
+            for value, start, end in (
+                (
+                    values[0],
+                    "2099-08-20T13:05:00-04:00",
+                    "2099-08-20T13:30:00-04:00",
+                ),
+                (
+                    values[1],
+                    "2099-08-21T10:05:00-04:00",
+                    "2099-08-21T10:30:00-04:00",
+                ),
+                (
+                    values[2],
+                    "2099-08-24T14:05:00-04:00",
+                    "2099-08-24T14:30:00-04:00",
+                ),
+            )
+        ]
+        interaction = {
+            "invocation_id": "invoke-1",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Pick a time",
+                "question": "Which time works?",
+                "multi_select": False,
+                "image_url": "",
+                "options": [
+                    {
+                        "value": value,
+                        "label": value,
+                        "description": "",
+                        "image_url": "",
+                    }
+                    for value in values
+                ],
+            }],
+            "schedule_evidence": {
+                "valid": True,
+                "source": "FindMeetingTimes+interaction",
+                "query_backed": True,
+                "attendees": ["jay.padimiti@microsoft.com"],
+                "duration_minutes": 25,
+                "slots": slots,
+            },
+        }
+        conn = get_connection()
+        action = get_latest_task_action(tid)
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps(interaction), action["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._answer_request(tid, {"0": values[0]})
+
+        self.assertEqual(response.code, 202)
+        stored = get_latest_task_action(tid)
+        record = json.loads(stored["answered_interaction"])
+        self.assertEqual(record["answers"], {"0": values[0]})
+        self.assertEqual(
+            record["interaction"]["schedule_evidence"]["slots"][0]["start"],
+            "2099-08-20T13:05:00-04:00",
+        )
+
     def test_schedule_slot_is_rejected_after_attendee_change(self):
         from src.db import get_connection
 
@@ -3313,9 +3814,9 @@ class TestInteractionAnswer(CoworkAPITestBase):
         interaction = json.loads(row["blocked_question"])
         interaction["schedule_evidence"] = {
             "valid": True,
-            "source": "FindMeetingTimes",
+            "source": "FindMeetingTimes+interaction",
             "attendees": ["jay.padimiti@microsoft.com"],
-            "working_hours_checked": True,
+            "query_backed": True,
         }
         conn.execute(
             "UPDATE task_actions SET blocked_question=? WHERE id=?",
@@ -3337,6 +3838,50 @@ class TestInteractionAnswer(CoworkAPITestBase):
         response = self._answer_request(
             tid, {"0": "Wed 8/19, 1:05 PM ET"}
         )
+
+        self.assertEqual(response.code, 409)
+        self.assertEqual(self.answers, [])
+
+    def test_schedule_slot_is_rejected_after_duration_change(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self._blocked_schedule()
+        action = get_latest_task_action(tid)
+        interaction = json.loads(action["blocked_question"])
+        selected = "Thu 8/20, 1:05 PM ET"
+        interaction["questions"][0]["options"] = [{
+            "value": selected,
+            "label": selected,
+            "description": "",
+        }]
+        interaction["schedule_evidence"] = {
+            "valid": True,
+            "source": "FindMeetingTimes+interaction",
+            "query_backed": True,
+            "attendees": ["jay.padimiti@microsoft.com"],
+            "duration_minutes": 25,
+            "slots": [{
+                "value": selected,
+                "start": "2099-08-20T13:05:00-04:00",
+                "end": "2099-08-20T13:30:00-04:00",
+                "timezone": "Eastern Standard Time",
+                "availability": {"jay.padimiti@microsoft.com": "free"},
+            }],
+        }
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps(interaction), action["id"]),
+        )
+        conn.execute(
+            "UPDATE tasks SET title='Schedule a 45-minute review' WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._answer_request(tid, {"0": selected})
 
         self.assertEqual(response.code, 409)
         self.assertEqual(self.answers, [])

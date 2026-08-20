@@ -137,6 +137,38 @@ class TestModels(unittest.TestCase):
         self.assertEqual(updated["priority"], 1)
         # updated_at should change (or at least not be None)
         self.assertIsNotNone(updated["updated_at"])
+        self.assertEqual(updated["cowork_revision"], task["cowork_revision"] + 1)
+
+    def test_non_cowork_task_update_does_not_increment_revision(self):
+        from src.models import create_task, update_task
+
+        task = create_task(title="Original")
+        updated = update_task(task["id"], parse_status="queued", priority=1)
+
+        self.assertEqual(updated["cowork_revision"], task["cowork_revision"])
+
+    def test_same_cowork_input_value_does_not_increment_revision(self):
+        from src.models import create_task, update_task
+
+        task = create_task(title="Original")
+        updated = update_task(task["id"], title="Original")
+
+        self.assertEqual(updated["cowork_revision"], task["cowork_revision"])
+
+    def test_same_action_type_with_changed_input_increments_revision(self):
+        from src.models import create_task, update_task_for_action_type
+
+        task = create_task(
+            title="Original",
+            action_type="schedule-meeting",
+        )
+        updated = update_task_for_action_type(
+            task["id"],
+            action_type="schedule-meeting",
+            title="Changed",
+        )
+
+        self.assertEqual(updated["cowork_revision"], task["cowork_revision"] + 1)
 
     def test_update_task_no_fields(self):
         from src.models import create_task, update_task

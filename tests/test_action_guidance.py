@@ -89,6 +89,7 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
         self.assertIn("ask_user", self.prompt)
         self.assertIn("three exact available times", self.prompt)
         self.assertIn("CreateEvent", self.prompt)
+        self.assertIn("[slot:", self.prompt)
         self.assertIn("[avail:", self.prompt)
         self.assertLess(len(self.prompt), 1000)
 
@@ -103,6 +104,64 @@ class TestSchedulingUsesNativeCalendarFlow(unittest.TestCase):
             self.prompt.lower(),
         )
         self.assertIn("only the selected time", self.prompt.lower())
+
+    def test_it_binds_slot_metadata_to_the_requested_duration(self):
+        prompt = compose_prompt(_task(
+            title="Schedule a 45-minute architecture review with Rima Reyes",
+        ))
+        self.assertIn("Times must be 45m", prompt)
+        hour_prompt = compose_prompt(_task(
+            title="Schedule a 1 hour architecture review with Rima Reyes",
+        ))
+        self.assertIn("Times must be 60m", hour_prompt)
+        word_prompt = compose_prompt(_task(
+            title="Arrange a five-minute sync with Rima Reyes",
+        ))
+        self.assertIn("Times must be 5m", word_prompt)
+        half_hour = compose_prompt(_task(
+            title="Arrange a half an hour sync with Rima Reyes",
+        ))
+        self.assertIn("Times must be 30m", half_hour)
+        two_hours = compose_prompt(_task(
+            title="Arrange a two-hour workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 120m", two_hours)
+        compound = compose_prompt(_task(
+            title="Arrange an hour and a half workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 90m", compound)
+        natural_compound = compose_prompt(_task(
+            title="Arrange a two and a half hours workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 150m", natural_compound)
+        hyphenated_compound = compose_prompt(_task(
+            title="Arrange an hour-and-a-half workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 90m", hyphenated_compound)
+        bare_compound = compose_prompt(_task(
+            title="Arrange an hour-and-a-half with Rima Reyes",
+        ))
+        self.assertIn("Times must be 90m", bare_compound)
+        twenty_five = compose_prompt(_task(
+            title="Arrange a twenty five minute review with Rima Reyes",
+        ))
+        self.assertIn("Times must be 25m", twenty_five)
+        forty_five = compose_prompt(_task(
+            title="Arrange a forty five minutes review with Rima Reyes",
+        ))
+        self.assertIn("Times must be 45m", forty_five)
+        mixed_units = compose_prompt(_task(
+            title="Arrange a 1 hour and 30 minutes workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 90m", mixed_units)
+        adjacent_units = compose_prompt(_task(
+            title="Arrange a 1 hour 30 minutes workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 90m", adjacent_units)
+        adjacent_word_units = compose_prompt(_task(
+            title="Arrange a two hour fifteen minute workshop with Rima Reyes",
+        ))
+        self.assertIn("Times must be 135m", adjacent_word_units)
 
     def test_it_does_not_reuse_stale_enrichment_slots(self):
         self.assertNotIn("Monday, August 17, 10:00-10:30 AM ET", self.prompt)

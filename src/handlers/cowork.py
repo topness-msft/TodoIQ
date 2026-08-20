@@ -65,12 +65,18 @@ from ..services.cowork_runner import (
     schedule_answer_is_safe,
     schedule_answers_for_recheck,
     schedule_attendees,
+    schedule_duration_minutes,
     schedule_interaction_is_certified,
     schedule_text_only_interaction,
     start_preview,
     start_execution,
 )
 from ..services.workspace_settings import api_transport_enabled
+from ..services.calendar_time import (
+    calendar_event_duration_minutes,
+    calendar_event_is_future,
+    calendar_event_matches_slot,
+)
 from ..services.runtime_mode import (
     DEMO_DISABLED_MESSAGE,
     cowork_execute_enabled,
@@ -97,6 +103,7 @@ CANCEL_FN = None
 ANSWER_FN = None
 EXECUTE_FN = None
 EXECUTE_TRANSPORT_ENABLED_FN = None
+NOW_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -474,7 +481,9 @@ def _enrich(action: dict) -> dict:
         task = get_task(action["task_id"])
         attendees = schedule_attendees(task) if task else []
         if not schedule_interaction_is_certified(
-            action["interaction_request"], attendees
+            action["interaction_request"],
+            attendees,
+            schedule_duration_minutes(task) if task else None,
         ):
             action["interaction_request"] = schedule_text_only_interaction(
                 action["interaction_request"], attendees
@@ -522,14 +531,27 @@ def _enrich(action: dict) -> dict:
         ):
             # Clear local-answer sentinels and externally answered questions
             # only after a readable runtime status confirms the run resumed.
-            cleared = clear_blocked_question_if_unchanged(
+            preserve_schedule_answer = (
+                action.get("action_type") == "schedule-meeting"
+                and _selected_schedule_slot(action)[0]
+            )
+            clear_args = (
                 action["id"],
                 action.get("blocked_question"),
                 action.get("answered_interaction"),
             )
+            cleared = (
+                clear_blocked_question_if_unchanged(
+                    *clear_args,
+                    preserve_answer=True,
+                )
+                if preserve_schedule_answer
+                else clear_blocked_question_if_unchanged(*clear_args)
+            )
             if cleared:
                 action["blocked_question"] = None
-                action["answered_interaction"] = None
+                if not preserve_schedule_answer:
+                    action["answered_interaction"] = None
                 action["interaction_request"] = None
 
     return action
@@ -807,6 +829,33 @@ def _tool_content_values(value) -> list[str]:
     return []
 
 
+def _selected_schedule_slot(action: dict) -> tuple[bool, dict | None]:
+    raw = action.get("answered_interaction")
+    if not raw:
+        return False, None
+    try:
+        record = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return False, None
+    if not isinstance(record, dict) or record.get("kind") != "interaction_answer":
+        return False, None
+    interaction = record.get("interaction")
+    evidence = interaction.get("schedule_evidence") if isinstance(
+        interaction, dict
+    ) else None
+    if not isinstance(evidence, dict) or evidence.get("query_backed") is not True:
+        return False, None
+    answers = record.get("answers")
+    if not isinstance(answers, dict):
+        return True, None
+    selected = {str(value).strip() for value in answers.values() if str(value).strip()}
+    matches = [
+        slot for slot in evidence.get("slots") or []
+        if isinstance(slot, dict) and str(slot.get("value") or "").strip() in selected
+    ]
+    return True, matches[0] if len(matches) == 1 else None
+
+
 def _preview_calendar_event(action: dict) -> dict | None:
     """Read the one structured CreateEvent proposal stored with the preview."""
     trace = action.get("tool_trace")
@@ -853,6 +902,14 @@ def _preview_calendar_event(action: dict) -> dict | None:
             approved["is_online_meeting"] = False
         else:
             return None
+    has_slot_binding, selected_slot = _selected_schedule_slot(action)
+    if not has_slot_binding:
+        return None
+    if (
+        selected_slot is None
+        or not calendar_event_matches_slot(approved, selected_slot)
+    ):
+        return None
     return approved
 
 
@@ -890,11 +947,15 @@ def _calendar_confirmation_preview(action: dict) -> dict | None:
             f"{clock(end)}"
         )
     timezone = str(event.get("time_zone") or "").strip()
-    if not timezone:
+    subject = str(event.get("subject") or "").strip()
+    online = event.get("is_online_meeting")
+    if not timezone or not subject or not isinstance(online, bool):
         return None
     return {
         "attendees": [str(value).strip().lower() for value in attendees],
         "date_time": f"{date_label} · {time_label} · {timezone}",
+        "format": "Teams meeting" if online else "Calendar event",
+        "subject": subject,
         "body_html": body_html,
     }
 
@@ -1035,9 +1096,11 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(400, "Invalid interaction mode")
         interaction_mode = "interaction"
         confirmed_schedule_people = None
+        confirmed_schedule_duration = None
         if task.get("action_type") == "schedule-meeting":
             confirmed = schedule_attendees(task)
             confirmed_schedule_people = confirmed
+            confirmed_schedule_duration = schedule_duration_minutes(task)
             uncertain_attendance = _uncertain_schedule_attendees(task)
             if uncertain_attendance:
                 names = ", ".join(uncertain_attendance)
@@ -1113,6 +1176,7 @@ class CoworkHandler(tornado.web.RequestHandler):
                 conversation_id=conversation_id,
                 action_id=action["id"],
                 schedule_people=confirmed_schedule_people,
+                schedule_duration=confirmed_schedule_duration,
             )
         except AlreadyRunning:
             return self._fail(409, "A preview is already running for this task")
@@ -1340,6 +1404,22 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                     "This meeting preview does not contain one complete calendar "
                     "event to approve. Start over and review a fresh preview.",
                 )
+            now = NOW_FN() if NOW_FN is not None else None
+            if not calendar_event_is_future(approved_calendar_event, now=now):
+                return self._fail(
+                    409,
+                    "The selected meeting time has passed. Start over and choose "
+                    "a current availability option.",
+                )
+            if (
+                calendar_event_duration_minutes(approved_calendar_event)
+                != schedule_duration_minutes(task)
+            ):
+                return self._fail(
+                    409,
+                    "The requested meeting duration changed after availability "
+                    "was checked. Start over and review fresh options.",
+                )
         else:
             approved_calendar_event = None
 
@@ -1471,6 +1551,7 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             destination_source=action.get("destination_source"),
             destination_confirmed_at=action.get("destination_confirmed_at"),
             delivery_channel=action.get("delivery_channel"),
+            answered_interaction=action.get("answered_interaction"),
             interaction_mode="interaction",
         )
 
@@ -1481,6 +1562,17 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
                 instruction,
                 interaction_mode="interaction",
                 log_dir=LOG_DIR_OVERRIDE,
+                action_id=new_action["id"],
+                schedule_people=(
+                    schedule_attendees(task)
+                    if task.get("action_type") == "schedule-meeting"
+                    else None
+                ),
+                schedule_duration=(
+                    schedule_duration_minutes(task)
+                    if task.get("action_type") == "schedule-meeting"
+                    else None
+                ),
             )
         except AlreadyRunning:
             return self._fail(409, "A preview is already running for this task")
@@ -1545,12 +1637,16 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         }
         if set(cleaned_answers) != expected_ids:
             return self._fail(400, "Every Cowork question requires an answer")
+        submitted_answers = dict(cleaned_answers)
         task = get_task(tid)
         if (
             task
             and task.get("action_type") == "schedule-meeting"
             and not schedule_answer_is_safe(
-                interaction, cleaned_answers, schedule_attendees(task)
+                interaction,
+                cleaned_answers,
+                schedule_attendees(task),
+                schedule_duration_minutes(task),
             )
         ):
             return self._fail(
@@ -1564,7 +1660,18 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             )
 
         previous_question = action.get("blocked_question")
-        if not claim_blocked_question_answer(action["id"], previous_question):
+        answer_record = json.dumps(
+            {
+                "kind": "interaction_answer",
+                "question_raw": previous_question,
+                "interaction": interaction,
+                "answers": submitted_answers,
+            },
+            separators=(",", ":"),
+        )
+        if not claim_blocked_question_answer(
+            action["id"], previous_question, answer_record
+        ):
             return self._fail(409, "That Cowork question was already answered")
 
         try:
@@ -1577,7 +1684,7 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         except Exception as exc:
             if isinstance(exc, CoworkAnswerRejected):
                 restore_claimed_blocked_question(
-                    action["id"], previous_question
+                    action["id"], previous_question, answer_record
                 )
                 logger.error("Cowork rejected interaction answer", exc_info=True)
                 return self._fail(
@@ -1607,7 +1714,7 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         action = get_latest_task_action(tid) or action
         if action.get("state") in {"previewing", "executing"}:
             action["blocked_question"] = ""
-            action["answered_interaction"] = previous_question
+            action["answered_interaction"] = answer_record
             action["interaction_request"] = None
             action["waiting_on_user"] = False
         self.set_status(202)

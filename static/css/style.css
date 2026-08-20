@@ -3177,12 +3177,24 @@ textarea.cw-draft {
 .cw-meeting-confirm-section > b {
     color: var(--text-primary); font-size: 13px; line-height: 1.45;
 }
+.cw-meeting-confirm-section > small {
+    grid-column: 2; color: var(--text-secondary); font-size: 11px;
+}
 .cw-meeting-confirm-section .cw-meeting-attendees {
     margin: 0;
 }
 .cw-meeting-confirm-body {
     color: var(--text-primary); font-size: 13px; line-height: 1.5;
 }
+.cw-meeting-confirm-content { min-width: 0; }
+.cw-meeting-confirm-subject {
+    display: grid; gap: 2px; margin-bottom: 8px;
+}
+.cw-meeting-confirm-subject small {
+    color: var(--text-secondary); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .05em;
+}
+.cw-meeting-confirm-subject b { font-size: 13px; }
 .cw-meeting-confirm-body > :first-child { margin-top: 0; }
 .cw-meeting-confirm-body > :last-child { margin-bottom: 0; }
 .cw-meeting-confirm-body ul { margin: 6px 0 0; padding-left: 18px; }
@@ -3208,6 +3220,7 @@ textarea.cw-draft {
 .cw-execute-confirm { min-width: 132px; }
 @media (max-width: 560px) {
     .cw-meeting-confirm-section { grid-template-columns: 1fr; gap: 6px; }
+    .cw-meeting-confirm-section > small { grid-column: 1; }
 }
 .cw-delivery-target {
     display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px;
@@ -3269,6 +3282,13 @@ textarea.cw-draft {
     margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-primary);
     background: var(--bg-primary); color: var(--text-primary);
 }
+.cw-query-backed-note {
+    display: flex; gap: 6px; align-items: baseline; margin: 10px 0;
+    padding: 8px 10px; border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text-secondary); font-size: 11px; line-height: 1.4;
+}
+.cw-query-backed-note b { color: var(--text-primary); white-space: nowrap; }
 .cw-answer-box { margin-top: 8px; min-height: 72px; }
 .cw-question-image {
     width: 40px; height: 40px; border-radius: 8px; object-fit: cover;
