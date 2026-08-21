@@ -249,6 +249,9 @@ def _seed_database(path):
     people["workshop"] = json.dumps([
         json.loads(people[key])[0] for key in ("steve", "rima", "adrian")
     ])
+    people["onboarding"] = json.dumps([
+        json.loads(people[key])[0] for key in ("rima", "steve")
+    ])
 
     create_task(
         "Find the current tester for the new Cowork API with Rima",
@@ -404,14 +407,22 @@ def _seed_database(path):
         "Schedule the Friday demo review with Bobby Chang",
         (
             "Bobby Chang should review the Riveter demo before Friday's audience "
-            "session. Find a 30-minute working-hours slot and include an agenda that "
+            "session. The Tuesday planning meeting and Bobby's later Teams update "
+            "agree on the review scope but show that no time has been selected. Find "
+            "a 25-minute working-hours slot and include an agenda that "
             "covers the opening task story, safe data boundaries, Cowork preview, "
             "and the closing adoption message."
         ),
-        priority=2, source_type="manual",
+        priority=2, source_type="meeting",
         source_id="demo::bobby::friday-demo-review",
+        source_date="2026-08-20T16:30:00Z",
+        source_snippet=(
+            "On August 20, meeting notes and Bobby Chang's Teams update aligned on "
+            "the Friday demo review. Current status: the scope is set, but no "
+            "25-minute time has been selected."
+        ),
         coaching_text=(
-            "Schedule a 30-minute review with Bobby and include the four demo "
+            "Schedule a 25-minute review with Bobby and include the four demo "
             "decision points in the invitation."
         ),
         action_type="schedule-meeting", key_people=people["bobby"],
@@ -614,6 +625,360 @@ def _seed_database(path):
         ),
         action_type="general", key_people=people["adrian"],
     )
+
+    source_pairs = {
+        "chat": ("Teams thread", "meeting notes"),
+        "meeting": ("planning meeting", "follow-up email"),
+        "email": ("email thread", "Teams notes"),
+    }
+
+    def seed_expanded_task(spec, ordinal):
+        person_keys = spec.get("people", (spec["person"],))
+        person_records = [json.loads(people[key])[0] for key in person_keys]
+        names = ", ".join(person["name"] for person in person_records)
+        first_source, second_source = source_pairs[spec["source_type"]]
+        day = spec.get("day", 20)
+        description = (
+            f"On August {day}, 2026, a {first_source} and {second_source} involving "
+            f"{names} were synthesized around {spec['context']}. Together, the "
+            "sources provide the surrounding decision context, identify what changed "
+            "after the original request, and distinguish confirmed facts from open "
+            f"work. Current state: {spec['state']} Next step: {spec['next_step']}"
+        )
+        source_snippet = (
+            f"On August {day}, the {first_source} and {second_source} involving "
+            f"{names} were combined. Current status: {spec['state']}"
+        )
+        create_task(
+            spec["title"],
+            description,
+            status=spec["status"],
+            priority=spec.get("priority", 3),
+            source_type=spec["source_type"],
+            source_id=f"demo::{spec['person']}::{spec['slug']}",
+            source_date=f"2026-08-{day:02d}T{9 + ordinal % 8:02d}:00:00Z",
+            source_url=(
+                teams_source_url(spec["person"], str(1787000000100 + ordinal))
+                if spec["source_type"] == "chat"
+                else None
+            ),
+            source_snippet=source_snippet,
+            coaching_text=spec["next_step"],
+            action_type=spec["action_type"],
+            key_people=json.dumps(person_records),
+            due_date=spec.get("due_date"),
+            user_notes=spec.get("user_notes"),
+        )
+
+    expanded_tasks = [
+        {
+            "title": "Ask Bobby for the remaining AIA delivery decision",
+            "person": "bobby", "slug": "aia-followup", "source_type": "chat",
+            "status": "suggested", "action_type": "follow-up", "day": 18,
+            "context": "the unresolved hands-on role for AI Architects during delivery",
+            "state": "Bobby clarified account assignment, but the delivery role is open.",
+            "next_step": "Send the prepared Teams question focused only on delivery ownership.",
+        },
+        {
+            "title": "Schedule the onboarding readiness review with Rima and Steve",
+            "person": "rima", "people": ("rima", "steve"),
+            "slug": "onboarding-review-schedule", "source_type": "meeting",
+            "status": "suggested", "action_type": "schedule-meeting", "day": 19,
+            "context": "customer onboarding readiness and the remaining workshop dependencies",
+            "state": "The readiness checklist is complete and needs a joint review.",
+            "next_step": "Choose a verified 25-minute slot and review the prepared agenda.",
+        },
+        {
+            "title": "Reply to Manuela with the consolidated search specification",
+            "person": "manuela", "slug": "search-spec-email", "source_type": "email",
+            "status": "suggested", "action_type": "respond-email", "day": 20,
+            "context": "the accepted customer-search behavior across dashboard entry points",
+            "state": "The requirements agree across both sources and await written confirmation.",
+            "next_step": "Review and send the prepared specification summary to Manuela.",
+        },
+        {
+            "title": "Confirm the launch-readiness owner with Luis",
+            "person": "luis", "slug": "launch-readiness-owner", "source_type": "chat",
+            "status": "suggested", "action_type": "follow-up", "day": 18,
+            "context": "the launch checklist and a gap in ownership for final customer validation",
+            "state": "Every launch item has an owner except final customer validation.",
+            "next_step": "Ask Luis to confirm the owner and completion date.",
+        },
+        {
+            "title": "Prepare Steve's workshop dependency brief",
+            "person": "steve", "slug": "workshop-dependencies", "source_type": "meeting",
+            "status": "suggested", "action_type": "prepare", "day": 19,
+            "context": "the workshop inventory, blocked content, and dependencies on program decisions",
+            "state": "Three dependencies remain unresolved before the workshop can be finalized.",
+            "next_step": "Prepare a one-page dependency brief with owners and decisions.",
+        },
+        {
+            "title": "Reply to Adrian with the approved customer story",
+            "person": "adrian", "slug": "customer-story-approval", "source_type": "email",
+            "status": "suggested", "action_type": "respond-email", "day": 20,
+            "context": "the executive customer story and revisions requested during review",
+            "state": "The revised story is approved and ready for Adrian's confirmation.",
+            "next_step": "Review the response summarizing the approved narrative and evidence.",
+        },
+        {
+            "title": "Prepare the objection library with Aamer",
+            "person": "aamer", "slug": "objection-library", "source_type": "chat",
+            "status": "suggested", "action_type": "prepare", "day": 18,
+            "context": "recurring account-team objections and the answers used in recent briefings",
+            "state": "The source material is collected but not organized by scenario.",
+            "next_step": "Build a concise objection library with evidence-backed responses.",
+        },
+        {
+            "title": "Schedule the adoption signal review with Rima",
+            "person": "rima", "slug": "adoption-review", "source_type": "meeting",
+            "status": "suggested", "action_type": "schedule-meeting", "day": 20,
+            "context": "early adoption signals and the measures needed for the next leadership update",
+            "state": "The signal list is ready and needs a decision on the reporting baseline.",
+            "next_step": "Find a 25-minute review slot and include the baseline decision.",
+        },
+        {
+            "title": "Follow up with Bobby on the partner handoff",
+            "person": "bobby", "slug": "partner-handoff", "source_type": "email",
+            "status": "suggested", "action_type": "follow-up", "day": 17,
+            "context": "the partner handoff package and an unanswered ownership question",
+            "state": "The package was delivered, but the receiving owner is not confirmed.",
+            "next_step": "Ask Bobby to confirm the receiving owner and handoff date.",
+        },
+        {
+            "title": "Review the dashboard taxonomy with Manuela",
+            "person": "manuela", "slug": "dashboard-taxonomy", "source_type": "meeting",
+            "status": "suggested", "action_type": "review-document", "day": 19,
+            "context": "customer filters, labels, and terminology across two dashboard views",
+            "state": "The taxonomy is mostly aligned with three labels still disputed.",
+            "next_step": "Review the disputed labels and record the accepted terms.",
+        },
+        {
+            "title": "Check Luis's feedback on the enablement package",
+            "person": "luis", "slug": "enablement-feedback", "source_type": "chat",
+            "status": "suggested", "action_type": "awaiting-response", "day": 20,
+            "context": "the enablement package sent after the customer presentation review",
+            "state": "Luis acknowledged receipt but has not provided the promised gap list.",
+            "next_step": "Check for the gap list before sending another reminder.",
+        },
+        {
+            "title": "Send Aamer the briefing preparation summary",
+            "person": "aamer", "slug": "briefing-prep-email", "source_type": "email",
+            "status": "active", "action_type": "respond-email", "day": 20,
+            "context": "the account briefing agenda, demo owners, and unresolved customer questions",
+            "state": "The briefing package is assembled and ready for Aamer's review.",
+            "next_step": "Review the prepared email and briefing summary before delivery.",
+        },
+        {
+            "title": "Send Rima the executive decision summary",
+            "person": "rima", "slug": "executive-summary", "source_type": "email",
+            "status": "active", "action_type": "respond-email", "day": 20,
+            "context": "the decisions made across the customer-list and onboarding reviews",
+            "state": "Five decisions are confirmed and two need executive escalation.",
+            "next_step": "Send Rima a concise summary separating decisions from escalations.",
+        },
+        {
+            "title": "Prepare the workshop ownership map with Steve",
+            "person": "steve", "slug": "ownership-map", "source_type": "meeting",
+            "status": "active", "action_type": "prepare", "day": 19,
+            "context": "workshop assets, program owners, and gaps found during inventory review",
+            "state": "Most assets have owners, with four cross-program gaps remaining.",
+            "next_step": "Complete the ownership map and flag the four gaps for Steve.",
+        },
+        {
+            "title": "Align the live demo narrative with Adrian",
+            "person": "adrian", "slug": "demo-narrative", "source_type": "chat",
+            "status": "active", "action_type": "follow-up", "day": 20,
+            "context": "the live demo story, executive audience needs, and the approved program message",
+            "state": "The opening and close are aligned; the middle proof point is unresolved.",
+            "next_step": "Ask Adrian to choose the strongest proof point for the middle section.",
+        },
+        {
+            "title": "Capture Bobby's field feedback for the pilot",
+            "person": "bobby", "slug": "field-feedback", "source_type": "chat",
+            "status": "active", "action_type": "follow-up", "day": 18,
+            "context": "pilot feedback from account teams and changes requested for the next run",
+            "state": "The main themes are clear but two examples need Bobby's detail.",
+            "next_step": "Request the two missing examples and add them to the pilot log.",
+        },
+        {
+            "title": "Validate search acceptance criteria with Manuela",
+            "person": "manuela", "slug": "filter-acceptance", "source_type": "meeting",
+            "status": "active", "action_type": "review-document", "day": 20,
+            "context": "search acceptance criteria, large-list behavior, and keyboard navigation",
+            "state": "The criteria are drafted and one keyboard behavior remains unclear.",
+            "next_step": "Resolve the keyboard behavior and approve the acceptance checklist.",
+        },
+        {
+            "title": "Reply to Luis with the rollout status",
+            "person": "luis", "slug": "rollout-update", "source_type": "email",
+            "status": "active", "action_type": "respond-email", "day": 20,
+            "context": "rollout sequencing, customer assignments, and the current launch risk",
+            "state": "The first wave is ready while one customer assignment remains blocked.",
+            "next_step": "Send Luis the wave status and the owner of the remaining blocker.",
+        },
+        {
+            "title": "Prepare Aamer's customer scenario set",
+            "person": "aamer", "slug": "customer-scenarios", "source_type": "chat",
+            "status": "active", "action_type": "prepare", "day": 19,
+            "context": "customer scenarios gathered from account chats and briefing notes",
+            "state": "Six scenarios are collected and need prioritization for the demo.",
+            "next_step": "Rank the scenarios and prepare the top three for Aamer.",
+        },
+        {
+            "title": "Review the dashboard specification with Adrian",
+            "person": "adrian", "slug": "dashboard-spec", "source_type": "meeting",
+            "status": "in_progress", "action_type": "review-document", "day": 20,
+            "context": "dashboard requirements, customer examples, and executive review flow",
+            "state": "The specification review is underway with two data questions open.",
+            "next_step": "Resolve the two data questions and finish the review notes.",
+        },
+        {
+            "title": "Build the measurement plan with Rima",
+            "person": "rima", "slug": "measurement-plan", "source_type": "email",
+            "status": "in_progress", "action_type": "prepare", "day": 19,
+            "context": "adoption measures, leadership reporting, and the evidence available today",
+            "state": "The draft measures exist and baseline definitions are being reconciled.",
+            "next_step": "Finalize baseline definitions and assign reporting owners.",
+        },
+        {
+            "title": "Wait for Steve's agenda approval",
+            "person": "steve", "slug": "agenda-approval", "source_type": "email",
+            "status": "waiting", "action_type": "awaiting-response", "day": 20,
+            "context": "the mapping workshop agenda and revisions from program planning",
+            "state": "The revised agenda is with Steve for final approval.",
+            "next_step": "Wait for approval before circulating the agenda.",
+        },
+        {
+            "title": "Wait for Bobby to confirm the pilot owner",
+            "person": "bobby", "slug": "pilot-owner", "source_type": "chat",
+            "status": "waiting", "action_type": "awaiting-response", "day": 19,
+            "context": "pilot follow-up ownership and the account-team handoff",
+            "state": "Bobby is checking which field lead will own the next pilot run.",
+            "next_step": "Wait for Bobby's owner confirmation before assigning follow-ups.",
+        },
+        {
+            "title": "Wait for Luis's customer confirmation",
+            "person": "luis", "slug": "customer-confirmation", "source_type": "chat",
+            "status": "waiting", "action_type": "awaiting-response", "day": 20,
+            "context": "the proposed customer assignment and the account team's readiness",
+            "state": "Luis is validating the proposed assignment with the account team.",
+            "next_step": "Wait for the account-team confirmation before updating coverage.",
+        },
+        {
+            "title": "Wait for Manuela's search-data sample",
+            "person": "manuela", "slug": "search-data", "source_type": "meeting",
+            "status": "waiting", "action_type": "awaiting-response", "day": 18,
+            "context": "search acceptance testing and the representative large customer list",
+            "state": "Manuela is preparing the sanitized sample needed for testing.",
+            "next_step": "Wait for the sample before running the acceptance review.",
+        },
+        {
+            "title": "Wait for Aamer's account-team inputs",
+            "person": "aamer", "slug": "account-input", "source_type": "email",
+            "status": "waiting", "action_type": "awaiting-response", "day": 20,
+            "context": "the briefing package and unanswered account-specific questions",
+            "state": "Aamer has requested the final inputs from the account team.",
+            "next_step": "Wait for the consolidated inputs before revising the briefing.",
+        },
+        {
+            "title": "Archive Rima's completed contact validation",
+            "person": "rima", "slug": "contact-validation", "source_type": "chat",
+            "status": "completed", "action_type": "general", "day": 18,
+            "context": "contact identity checks across the dashboard and meeting workflow",
+            "state": "All seven demo contacts are confirmed and render correctly.",
+            "next_step": "Retain the completed validation as demo evidence.",
+        },
+        {
+            "title": "Retain Bobby's completed demo checklist",
+            "person": "bobby", "slug": "demo-checklist", "source_type": "meeting",
+            "status": "completed", "action_type": "prepare", "day": 20,
+            "context": "the final demo checklist and findings from the rehearsal",
+            "state": "Every checklist item passed during the rehearsal.",
+            "next_step": "Keep the checklist available for presenter reference.",
+        },
+        {
+            "title": "Archive Luis's completed deck quality review",
+            "person": "luis", "slug": "deck-quality", "source_type": "email",
+            "status": "completed", "action_type": "review-document", "day": 19,
+            "context": "presentation quality feedback and the revisions made afterward",
+            "state": "Luis confirmed that every requested revision is complete.",
+            "next_step": "Retain the approval with the presentation history.",
+        },
+        {
+            "title": "Archive Steve's completed workshop inventory",
+            "person": "steve", "slug": "workshop-inventory", "source_type": "meeting",
+            "status": "completed", "action_type": "review-document", "day": 18,
+            "context": "the complete workshop inventory and ownership annotations",
+            "state": "The inventory is complete and all known assets are classified.",
+            "next_step": "Use the inventory as input to the mapping session.",
+        },
+        {
+            "title": "Archive Manuela's approved search copy",
+            "person": "manuela", "slug": "search-copy", "source_type": "email",
+            "status": "completed", "action_type": "review-document", "day": 20,
+            "context": "search labels, empty states, and accessibility wording",
+            "state": "Manuela approved the final copy across both dashboard views.",
+            "next_step": "Retain the approved wording for implementation reference.",
+        },
+        {
+            "title": "Dismiss Adrian's duplicate direction request",
+            "person": "adrian", "slug": "duplicate-direction", "source_type": "email",
+            "status": "dismissed", "action_type": "general", "day": 18,
+            "context": "an older direction request duplicated by the current FY27 response",
+            "state": "The active response fully supersedes this duplicate request.",
+            "next_step": "Keep this task dismissed and use the current response.",
+        },
+        {
+            "title": "Dismiss Aamer's superseded briefing outline",
+            "person": "aamer", "slug": "superseded-briefing", "source_type": "meeting",
+            "status": "dismissed", "action_type": "general", "day": 17,
+            "context": "an early briefing outline replaced by the consolidated account package",
+            "state": "The consolidated package contains every useful element from this outline.",
+            "next_step": "Keep the obsolete outline dismissed.",
+        },
+        {
+            "title": "Dismiss Bobby's stale pilot reminder",
+            "person": "bobby", "slug": "stale-reminder", "source_type": "chat",
+            "status": "dismissed", "action_type": "general", "day": 16,
+            "context": "an old pilot reminder superseded by the current owner-confirmation task",
+            "state": "The newer task tracks the same dependency with current context.",
+            "next_step": "Leave the stale reminder dismissed.",
+        },
+        {
+            "title": "Revisit the adoption baseline with Rima",
+            "person": "rima", "slug": "adoption-baseline", "source_type": "meeting",
+            "status": "snoozed", "action_type": "review-document", "day": 18,
+            "context": "the adoption baseline and data not available until the next reporting cycle",
+            "state": "The baseline decision cannot be completed until September data arrives.",
+            "next_step": "Revisit after the next reporting cycle closes.",
+        },
+        {
+            "title": "Revisit Luis's translation dependency",
+            "person": "luis", "slug": "translation-dependency", "source_type": "email",
+            "status": "snoozed", "action_type": "awaiting-response", "day": 17,
+            "context": "localized enablement assets and a dependency on the central translation team",
+            "state": "The central team has not published its September delivery schedule.",
+            "next_step": "Revisit when the translation schedule is available.",
+        },
+        {
+            "title": "Revisit the program-owner question with Steve",
+            "person": "steve", "slug": "program-owner", "source_type": "chat",
+            "status": "snoozed", "action_type": "awaiting-response", "day": 18,
+            "context": "cross-program workshop ownership and an upcoming leadership decision",
+            "state": "Ownership depends on a leadership decision planned for next week.",
+            "next_step": "Revisit after the leadership decision is recorded.",
+        },
+        {
+            "title": "Revisit Manuela's telemetry export review",
+            "person": "manuela", "slug": "telemetry-export", "source_type": "email",
+            "status": "snoozed", "action_type": "review-document", "day": 19,
+            "context": "search telemetry fields and an export not available until month end",
+            "state": "The review is blocked until the complete monthly export is generated.",
+            "next_step": "Revisit after the month-end telemetry export is available.",
+        },
+    ]
+    for ordinal, spec in enumerate(expanded_tasks, start=1):
+        seed_expanded_task(spec, ordinal)
 
     conn = get_connection()
     try:
@@ -869,6 +1234,80 @@ def _seed_database(path):
                 "output": "Demo-safe summary of the program-direction thread.",
             }],
         )
+        seed_cowork_result(
+            "demo::bobby::aia-followup",
+            finding=(
+                "The meeting notes and later Teams thread agree that Bobby already "
+                "clarified account assignment. Only the hands-on delivery role remains "
+                "open, so the draft asks one focused question."
+            ),
+            draft=(
+                "Hi Bobby — thanks for clarifying how AI Architects are assigned. "
+                "The one point still open in the meeting notes is the delivery role: "
+                "during build and deployment, should the architect stay hands-on or "
+                "shift to account-team guidance? A short rule of thumb would help us "
+                "finish the engagement model."
+            ),
+            destination_kind="one_to_one",
+            destination_ref="demo-teams-bobby-chang",
+            destination_display="Bobby Chang",
+            delivery_channel="teams",
+            tool_trace=[{
+                "tool_name": "mcp__teams__GetMessages",
+                "ok": True,
+                "output": "Demo-safe synthesis of meeting notes and Teams context.",
+            }],
+        )
+        seed_cowork_result(
+            "demo::manuela::search-spec-email",
+            finding=(
+                "The requirements meeting and follow-up email now agree on type-ahead, "
+                "large-list behavior, and consistent search across both dashboard views."
+            ),
+            draft=(
+                "Subject: Consolidated customer-search specification\n\n"
+                "Hi Manuela,\n\nI combined the requirements meeting with the follow-up "
+                "notes. The accepted specification covers type-ahead search, usable "
+                "large-list results, consistent matching across both dashboard entry "
+                "points, and keyboard-accessible selection. Please confirm that this "
+                "captures the final behavior so the team can use it as the acceptance "
+                "baseline.\n\nThanks"
+            ),
+            destination_kind="one_to_one",
+            destination_ref="manuela.pichler@example.invalid",
+            destination_display="Manuela Pichler",
+            delivery_channel="email",
+            tool_trace=[{
+                "tool_name": "mcp__outlook__GetMessage",
+                "ok": True,
+                "output": "Demo-safe synthesis of requirements notes and email.",
+            }],
+        )
+        seed_cowork_result(
+            "demo::aamer::briefing-prep-email",
+            finding=(
+                "The planning meeting and account-team email provide enough current "
+                "context to send Aamer a review-ready briefing package."
+            ),
+            draft=(
+                "Subject: Account-team briefing package for review\n\n"
+                "Hi Aamer,\n\nI consolidated the planning notes and the account-team "
+                "input into a briefing package covering scenario discovery, architecture "
+                "education, objection handling, and the demo sequence. Confirmed customer "
+                "needs are separated from open questions, with an owner beside every "
+                "follow-up. Please review the decision points before we circulate it.\n\n"
+                "Thanks"
+            ),
+            destination_kind="one_to_one",
+            destination_ref="aamer.kaleem@example.invalid",
+            destination_display="Aamer Kaleem",
+            delivery_channel="email",
+            tool_trace=[{
+                "tool_name": "mcp__outlook__GetMessage",
+                "ok": True,
+                "output": "Demo-safe synthesis of briefing notes and account email.",
+            }],
+        )
 
         workshop_attendees = [
             json.loads(people["workshop"])[index]["email"] for index in range(3)
@@ -998,6 +1437,145 @@ def _seed_database(path):
                         "time_zone": "UTC",
                         "attendees": workshop_attendees,
                         "body": workshop_draft,
+                        "content_type": "html",
+                        "is_online_meeting": True,
+                    },
+                    "output": "Not executed; deterministic review preview only.",
+                },
+            ],
+        )
+
+        onboarding_people = json.loads(people["onboarding"])
+        onboarding_attendees = [person["email"] for person in onboarding_people]
+        onboarding_availability = {
+            email: "free" for email in onboarding_attendees
+        }
+        onboarding_slots = (
+            (
+                "Option 1",
+                "2027-01-18T15:35:00+00:00",
+                "2027-01-18T16:00:00+00:00",
+                "Monday, January 18 · 15:35–16:00 UTC",
+            ),
+            (
+                "Option 2",
+                "2027-01-19T17:05:00+00:00",
+                "2027-01-19T17:30:00+00:00",
+                "Tuesday, January 19 · 17:05–17:30 UTC",
+            ),
+            (
+                "Option 3",
+                "2027-01-20T14:35:00+00:00",
+                "2027-01-20T15:00:00+00:00",
+                "Wednesday, January 20 · 14:35–15:00 UTC",
+            ),
+        )
+        onboarding_interaction = {
+            "invocation_id": "demo-onboarding-availability",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Choose a verified 25-minute time",
+                "question": "Which onboarding readiness review time should be used?",
+                "multi_select": False,
+                "image_url": "",
+                "options": [{
+                    "value": value,
+                    "label": label,
+                    "description": (
+                        "[slot:"
+                        + json.dumps(
+                            {"start": start, "end": end, "timezone": "UTC"},
+                            separators=(",", ":"),
+                        )
+                        + "] [avail:"
+                        + json.dumps(
+                            onboarding_availability, separators=(",", ":")
+                        )
+                        + "]"
+                    ),
+                    "image_url": "",
+                } for value, start, end, label in onboarding_slots],
+            }],
+        }
+        onboarding_interaction = certify_schedule_interaction(
+            onboarding_interaction,
+            [
+                (
+                    "ts",
+                    {
+                        "tid": "demo-onboarding-find-times",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "inp": json.dumps({
+                            "attendees": onboarding_attendees,
+                            "duration_minutes": 25,
+                        }),
+                    },
+                ),
+                (
+                    "tx",
+                    {
+                        "tid": "demo-onboarding-find-times",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "ok": True,
+                    },
+                ),
+            ],
+            onboarding_people,
+            duration_minutes=25,
+            start_offset_minutes=5,
+            now="2026-08-20T18:00:00+00:00",
+        )
+        if onboarding_interaction is None:
+            raise RuntimeError("Could not certify onboarding demo availability")
+        onboarding_selected = onboarding_interaction["schedule_evidence"]["slots"][0]
+        onboarding_answer = {
+            "kind": "interaction_answer",
+            "interaction": onboarding_interaction,
+            "answers": {"0": onboarding_selected["value"]},
+        }
+        onboarding_draft = (
+            "**Customer onboarding readiness review**\n\n"
+            "- **When:** Monday, January 18, 2027, 15:35–16:00 UTC\n"
+            "- **Attendees:** Rima Reyes, Steve Jeffery\n"
+            "- **Where:** Teams meeting\n"
+            "- **Agenda:** Review readiness evidence, resolve workshop dependencies, "
+            "and assign owners for the remaining launch decisions."
+        )
+        seed_cowork_result(
+            "demo::rima::onboarding-review-schedule",
+            finding=(
+                "The planning meeting and follow-up email show that Rima Reyes and "
+                "Steve Jeffery are free for three verified 25-minute options. No "
+                "calendar event has been created."
+            ),
+            draft=onboarding_draft,
+            destination_kind="meeting",
+            destination_ref=";".join(onboarding_attendees),
+            destination_display="Rima Reyes and Steve Jeffery",
+            delivery_channel=None,
+            blocked_question=json.dumps(
+                onboarding_interaction, separators=(",", ":")
+            ),
+            answered_interaction=json.dumps(
+                onboarding_answer, separators=(",", ":")
+            ),
+            tool_trace=[
+                {
+                    "tool_name": "mcp__outlook_calendar__FindMeetingTimes",
+                    "ok": True,
+                    "output": "Three demo-safe query-backed options.",
+                },
+                {
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "ok": False,
+                    "input": {
+                        "subject": "Customer onboarding readiness review",
+                        "start": onboarding_selected["start"],
+                        "end": onboarding_selected["end"],
+                        "time_zone": "UTC",
+                        "attendees": onboarding_attendees,
+                        "body": onboarding_draft,
                         "content_type": "html",
                         "is_online_meeting": True,
                     },

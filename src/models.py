@@ -995,7 +995,8 @@ def recover_stuck_previews() -> int:
             "completed_at = COALESCE("
             "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')), "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-            "WHERE state = 'previewing'"
+            "WHERE state = 'previewing' "
+            "AND (blocked_question IS NULL OR had_interaction = 0)"
         )
         execution_cursor = conn.execute(
             "UPDATE task_actions SET state = 'execute_unconfirmed', "

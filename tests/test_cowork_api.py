@@ -1438,6 +1438,77 @@ class TestGetPreview(CoworkAPITestBase):
             slot,
         ))
 
+    def test_finalise_recovers_text_schedule_options_before_selection(self):
+        from src.handlers import cowork as cowork_handler
+        from src.models import create_task_action
+
+        people = [
+            {"name": "Sally Shi", "email": "sally.shi@microsoft.com"},
+            {"name": "Azharullah Meer", "email": "ameer@microsoft.com"},
+        ]
+        tid = self.make_task(
+            title="Schedule Project Whale kickoff",
+            description="Find a 25-minute kickoff time.",
+            action_type="schedule-meeting",
+            key_people=json.dumps(people),
+        )
+        action = create_task_action(tid, action_type="schedule-meeting")
+        finding = (
+            "Here are two available 25-minute times:\n\n"
+            "**Option 1 — Monday, Aug 24, 1:05–1:30 PM EDT**\n"
+            '[slot:{"start":"2099-08-24T13:05:00-04:00",'
+            '"end":"2099-08-24T13:30:00-04:00",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"sally.shi@microsoft.com":"tentative"}] '
+            '[avail:{"ameer@microsoft.com":"free"}]\n\n'
+            "**Option 2 — Wednesday, Aug 26, 4:05–4:30 PM EDT**\n"
+            '[slot:{"start":"2099-08-26T16:05:00-04:00",'
+            '"end":"2099-08-26T16:30:00-04:00",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"sally.shi@microsoft.com":"free",'
+            '"ameer@microsoft.com":"tentative"}]'
+        )
+        result = {
+            "stdout": json.dumps({
+                "terminal_status": "ok",
+                "conversation_id": "conv-text-slots",
+                "tool_trace": [{
+                    "tool_name": "mcp__outlook_calendar__FindMeetingTimes",
+                    "ok": True,
+                    "input": json.dumps({
+                        "attendees": [
+                            "sally.shi@microsoft.com",
+                            "ameer@microsoft.com",
+                        ],
+                        "duration_minutes": 25,
+                    }),
+                }],
+                "text": finding,
+            }),
+            "stderr": "",
+            "error": None,
+            "exit_code": 0,
+            "cost_credits": 1,
+        }
+
+        with mock.patch.object(cowork_handler, "get_result", return_value=result), \
+                mock.patch.object(cowork_handler, "is_running", return_value=False), \
+                mock.patch.object(
+                    cowork_handler,
+                    "meeting_preferences",
+                    return_value={"default_minutes": 25, "start_offset_minutes": 5},
+                ):
+            updated = cowork_handler._finalise(action)
+
+        self.assertEqual(updated["state"], "previewing")
+        self.assertIsNone(updated["error"])
+        interaction = json.loads(updated["blocked_question"])
+        self.assertEqual(len(interaction["schedule_evidence"]["slots"]), 2)
+        self.assertEqual(
+            set(interaction["schedule_evidence"]["attendees"]),
+            {"sally.shi@microsoft.com", "ameer@microsoft.com"},
+        )
+
     def test_finalise_rejects_shortened_event_shifted_inside_selected_slot(self):
         from src.db import get_connection
         from src.handlers import cowork as cowork_handler

@@ -3117,10 +3117,12 @@ def _parse_aq_interaction(data):
     return {"invocation_id": invocation_id, "questions": questions}
 
 
-_AVAILABILITY_MARKER_RE = re.compile(
-    r"\[avail:(\{.*\})\]\s*$", re.I
-)
+_AVAILABILITY_MARKER_RE = re.compile(r"\[avail:(\{.*?\})\]", re.I)
 _SLOT_MARKER_RE = re.compile(r"\[slot:(\{.*?\})\]", re.I)
+_SCHEDULE_OPTION_RE = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s*)?\*{0,2}Option\s+\d+\s*"
+    r"(?::|[—–-])\s*(.+?)\*{0,2}\s*$"
+)
 _FIND_MEETING_TIMES_TOOL = "mcp__outlook_calendar__FindMeetingTimes"
 _ATTENDEE_CLARIFICATION_RE = re.compile(
     r"\b(?:attendee|attendees|invitee|invitees|who should attend|which people)\b",
@@ -3247,6 +3249,33 @@ def _parse_slot_marker(description, duration_minutes, now):
     }
 
 
+def _parse_availability_markers(description):
+    availability = {}
+    matches = list(_AVAILABILITY_MARKER_RE.finditer(description))
+    if not matches:
+        return None
+    for match in matches:
+        try:
+            marker = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(marker, dict):
+            return None
+        for email, status in marker.items():
+            normalized_email = str(email).strip().lower()
+            normalized_status = str(status).strip().lower()
+            if (
+                not normalized_email
+                or (
+                    normalized_email in availability
+                    and availability[normalized_email] != normalized_status
+                )
+            ):
+                return None
+            availability[normalized_email] = normalized_status
+    return availability
+
+
 def certify_schedule_interaction(
     interaction,
     events,
@@ -3311,17 +3340,9 @@ def certify_schedule_interaction(
     instants = set()
     for option in options:
         description = str(option.get("description") or "")
-        match = _AVAILABILITY_MARKER_RE.search(description)
-        if not match:
+        normalized = _parse_availability_markers(description)
+        if normalized is None:
             return None
-        try:
-            availability = json.loads(match.group(1))
-        except (json.JSONDecodeError, TypeError):
-            return None
-        normalized = {
-            str(email).strip().lower(): str(status).strip().lower()
-            for email, status in availability.items()
-        } if isinstance(availability, dict) else {}
         if set(normalized) != set(expected):
             return None
         if any(status not in {"free", "tentative"} for status in normalized.values()):
@@ -3355,6 +3376,87 @@ def certify_schedule_interaction(
         "slots": slots,
     }
     return certified
+
+
+def schedule_interaction_from_text(
+    text,
+    tool_trace,
+    attendees,
+    *,
+    duration_minutes,
+    start_offset_minutes=None,
+    now=None,
+):
+    """Recover query-backed schedule choices emitted as assistant text."""
+    source = str(text or "")
+    headings = list(_SCHEDULE_OPTION_RE.finditer(source))
+    if not 1 <= len(headings) <= 3:
+        return None
+    options = []
+    for index, heading in enumerate(headings):
+        block_end = (
+            headings[index + 1].start()
+            if index + 1 < len(headings)
+            else len(source)
+        )
+        description = source[heading.end():block_end].strip()
+        if (
+            not _SLOT_MARKER_RE.search(description)
+            or _parse_availability_markers(description) is None
+        ):
+            return None
+        options.append({
+            "label": heading.group(1).strip(),
+            "value": f"slot-{index + 1}",
+            "description": description,
+        })
+
+    events = []
+    if all(
+        isinstance(event, (list, tuple)) and len(event) == 2
+        for event in tool_trace or []
+    ):
+        events = list(tool_trace)
+    else:
+        for index, event in enumerate(tool_trace or []):
+            if (
+                not isinstance(event, dict)
+                or event.get("tool_name") != _FIND_MEETING_TIMES_TOOL
+                or event.get("ok") is not True
+            ):
+                continue
+            tool_id = f"text-recovery-{index}"
+            events.extend([
+                ("ts", {
+                    "tid": tool_id,
+                    "tn": _FIND_MEETING_TIMES_TOOL,
+                    "inp": event.get("input"),
+                }),
+                ("tx", {
+                    "tid": tool_id,
+                    "tn": _FIND_MEETING_TIMES_TOOL,
+                    "ok": True,
+                }),
+            ])
+
+    stable_source = json.dumps(options, sort_keys=True, separators=(",", ":"))
+    interaction = {
+        "invocation_id": str(uuid.uuid5(uuid.NAMESPACE_URL, stable_source)),
+        "questions": [{
+            "header": "Choose a meeting time",
+            "question": "Which available time should I use for the meeting?",
+            "multi_select": False,
+            "options": options,
+        }],
+    }
+    return certify_schedule_interaction(
+        interaction,
+        events,
+        attendees,
+        duration_minutes=duration_minutes,
+        start_offset_minutes=start_offset_minutes,
+        now=now,
+    )
 
 
 def schedule_text_only_interaction(interaction, attendees):

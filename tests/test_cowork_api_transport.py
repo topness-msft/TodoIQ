@@ -519,6 +519,43 @@ class TestScheduleInteractionCertification(unittest.TestCase):
                     option_count,
                 )
 
+    def test_certifies_split_per_attendee_availability_markers(self):
+        attendees = [
+            {"name": "Sally Shi", "email": "sally.shi@microsoft.com"},
+            {"name": "Azharullah Meer", "email": "ameer@microsoft.com"},
+        ]
+        interaction = self._interaction()
+        option = interaction["questions"][0]["options"][0]
+        option["description"] = (
+            '[slot:{"start":"2099-08-20T13:05:00-04:00",'
+            '"end":"2099-08-20T13:30:00-04:00",'
+            '"timezone":"Eastern Standard Time"}] '
+            '[avail:{"sally.shi@microsoft.com":"tentative"}] '
+            '[avail:{"ameer@microsoft.com":"free"}]'
+        )
+        interaction["questions"][0]["options"] = [option]
+
+        certified = cr.certify_schedule_interaction(
+            interaction,
+            self._events([
+                "sally.shi@microsoft.com",
+                "ameer@microsoft.com",
+            ]),
+            attendees,
+            duration_minutes=25,
+            start_offset_minutes=5,
+            now="2026-08-19T12:00:00+00:00",
+        )
+
+        self.assertIsNotNone(certified)
+        self.assertEqual(
+            certified["schedule_evidence"]["slots"][0]["availability"],
+            {
+                "sally.shi@microsoft.com": "tentative",
+                "ameer@microsoft.com": "free",
+            },
+        )
+
     def test_rejects_slots_that_ignore_configured_start_offset(self):
         for start, end in (
             ("2099-08-20T13:00:00-04:00", "2099-08-20T13:25:00-04:00"),

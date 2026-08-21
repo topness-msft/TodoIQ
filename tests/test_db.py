@@ -371,6 +371,25 @@ class TestTaskActionsSchema(unittest.TestCase):
         row = self.conn.execute("SELECT state FROM task_actions").fetchone()
         self.assertEqual(row["state"], "failed")
 
+    def test_restart_recovery_preserves_a_parked_interaction(self):
+        import src.db as db_module
+        from src.models import recover_stuck_previews
+
+        self._insert(
+            state="previewing",
+            blocked_question='{"invocation_id":"stable","questions":[]}',
+            had_interaction=1,
+        )
+        self.conn.commit()
+        original = db_module.DB_PATH
+        db_module.DB_PATH = self.tmp.name
+        try:
+            self.assertEqual(recover_stuck_previews(), 0)
+        finally:
+            db_module.DB_PATH = original
+        row = self.conn.execute("SELECT state FROM task_actions").fetchone()
+        self.assertEqual(row["state"], "previewing")
+
     def test_restart_recovery_marks_execution_delivery_unconfirmed(self):
         import src.db as db_module
         from src.models import recover_stuck_previews

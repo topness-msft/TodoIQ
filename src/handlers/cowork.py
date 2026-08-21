@@ -56,6 +56,7 @@ from ..services.cowork_runner import (
     get_cached_cowork_island,
     handoff_status,
     is_running,
+    meeting_preferences,
     new_conversation_id,
     parse_cowork_output,
     parse_execution_output,
@@ -66,6 +67,7 @@ from ..services.cowork_runner import (
     schedule_answers_for_recheck,
     schedule_attendees,
     schedule_duration_minutes,
+    schedule_interaction_from_text,
     schedule_interaction_is_attendee_clarification,
     schedule_interaction_is_certified,
     schedule_text_only_interaction,
@@ -708,7 +710,28 @@ def _finalise(action: dict) -> dict:
         expected_duration = schedule_duration_minutes(task) if task else None
         candidate = {**action, **fields}
         approved_event = _preview_calendar_event(candidate)
-        if (
+        has_slot_binding, _ = _selected_schedule_slot(candidate)
+        recovered = None
+        if approved_event is None and not has_slot_binding and task:
+            recovered = schedule_interaction_from_text(
+                parsed.get("finding") or parsed.get("raw_text"),
+                trace,
+                schedule_attendees(task),
+                duration_minutes=expected_duration,
+                start_offset_minutes=(
+                    meeting_preferences() or {}
+                ).get("start_offset_minutes", 0),
+            )
+        if recovered:
+            fields.update({
+                "state": "previewing",
+                "error": None,
+                "blocked_question": json.dumps(
+                    recovered, separators=(",", ":")
+                ),
+                "had_interaction": 1,
+            })
+        elif (
             approved_event is None
             or calendar_event_duration_minutes(approved_event) != expected_duration
         ):

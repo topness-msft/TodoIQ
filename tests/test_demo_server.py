@@ -80,7 +80,7 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
 
     conn = sqlite3.connect(demo_db)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 17
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 55
         task_statuses = dict(
             conn.execute(
                 "SELECT status,COUNT(*) FROM tasks GROUP BY status"
@@ -129,22 +129,22 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
             "SELECT DISTINCT created_at,updated_at FROM tasks"
         ).fetchall()
         source_rows = conn.execute(
-            "SELECT source_id,source_type,source_url,source_date,source_snippet,"
+            "SELECT id,source_id,source_type,source_url,source_date,source_snippet,"
             "description,key_people FROM tasks"
         ).fetchall()
     finally:
         conn.close()
     assert task_statuses == {
-        "suggested": 7,
-        "active": 4,
-        "in_progress": 1,
-        "waiting": 1,
-        "completed": 1,
-        "dismissed": 2,
-        "snoozed": 1,
+        "suggested": 18,
+        "active": 12,
+        "in_progress": 3,
+        "waiting": 6,
+        "completed": 6,
+        "dismissed": 5,
+        "snoozed": 5,
     }
-    assert source_types == {"chat", "email", "meeting", "manual"}
-    assert all(source_type_counts[source] >= 3 for source in ("chat", "meeting", "email"))
+    assert source_types == {"chat", "email", "meeting"}
+    assert all(source_type_counts[source] >= 12 for source in ("chat", "meeting", "email"))
     assert {
         "follow-up",
         "respond-email",
@@ -154,8 +154,9 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         "review-document",
     }.issubset(action_types)
     assert action_states == {"ready"}
-    assert action_count == 3
-    assert titles == {
+    assert action_count == 7
+    assert len(titles) == 55
+    assert {
         "Find the current tester for the new Cowork API with Rima",
         "Follow up with Luis on the generated customer presentations",
         "Confirm Manuela's PPCC distribution list preference",
@@ -173,7 +174,7 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         "Review the Power Up asset transition with Luis",
         "Dismiss the superseded AMR kickoff follow-up with Bobby",
         "Dismiss the outdated FY27 guidance request to Adrian",
-    }
+    }.issubset(titles)
     assert [item["status"] for item in suggestion_activity].count(
         "likely_resolved"
     ) == 2
@@ -200,7 +201,7 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         for person in people
     )
     assert any(person["alternatives"] for person in people)
-    assert len(suggestion_sources) == 16
+    assert len(suggestion_sources) >= 51
     assert all(summary.startswith("On ") for summary in suggestion_sources)
     assert timestamps == [("2026-08-20T18:00:00Z", "2026-08-20T18:00:00Z")]
     approved_oids = {
@@ -208,11 +209,14 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
         "11111111-1111-4111-8111-111111111111",
         "22222222-2222-4222-8222-222222222222",
         "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
         "55555555-5555-4555-8555-555555555555",
+        "66666666-6666-4666-8666-666666666666",
+        "77777777-7777-4777-8777-777777777777",
     }
     chat_urls = []
     for (
-        source_id, source_type, source_url, source_date, source_snippet,
+        task_id, source_id, source_type, source_url, source_date, source_snippet,
         description, key_people,
     ) in source_rows:
         assert source_id.startswith("demo::")
@@ -249,8 +253,16 @@ def test_demo_reset_is_isolated_and_deterministic(tmp_path):
                 source_snippet.startswith(('"', "“"))
                 and source_snippet.endswith(('"', "”"))
             )
-    assert len(chat_urls) == 6
-    assert len(set(chat_urls)) == 6
+        if task_id > 17 or source_id == "demo::bobby::friday-demo-review":
+            assert source_snippet is not None
+            assert "Current status:" in source_snippet
+            source_mentions = sum(
+                token in source_snippet.lower()
+                for token in ("teams", "meeting", "email", "notes", "document")
+            )
+            assert source_mentions >= 2
+    assert len(chat_urls) == 18
+    assert len(set(chat_urls)) == 18
 
 
 def test_demo_prebuilt_cowork_actions_are_reviewable_and_safe(tmp_path):
@@ -270,12 +282,26 @@ def test_demo_prebuilt_cowork_actions_are_reviewable_and_safe(tmp_path):
         "demo::luis::customer-assignment",
         "demo::adrian::fy27-direction",
         "demo::steve::workshop-mapping",
+        "demo::bobby::aia-followup",
+        "demo::manuela::search-spec-email",
+        "demo::aamer::briefing-prep-email",
+        "demo::rima::onboarding-review-schedule",
     }
     expected = {
         "demo::luis::customer-assignment": ("follow-up", "teams", "Luis Camino"),
         "demo::adrian::fy27-direction": ("respond-email", "email", "Adrian Maclean"),
         "demo::steve::workshop-mapping": (
             "schedule-meeting", None, "Steve Jeffery, Rima Reyes, and Adrian Maclean"
+        ),
+        "demo::bobby::aia-followup": ("follow-up", "teams", "Bobby Chang"),
+        "demo::manuela::search-spec-email": (
+            "respond-email", "email", "Manuela Pichler"
+        ),
+        "demo::aamer::briefing-prep-email": (
+            "respond-email", "email", "Aamer Kaleem"
+        ),
+        "demo::rima::onboarding-review-schedule": (
+            "schedule-meeting", None, "Rima Reyes and Steve Jeffery"
         ),
     }
     write_tools = ("send", "postmessage", "createevent")
@@ -359,6 +385,40 @@ def test_demo_meeting_action_has_certified_availability_matrix(tmp_path):
     assert event["start"] == evidence["slots"][0]["start"]
     assert event["end"] == evidence["slots"][0]["end"]
     assert event["is_online_meeting"] is True
+
+
+def test_demo_second_meeting_action_has_certified_availability_matrix(tmp_path):
+    result = _run(tmp_path, "reset")
+    assert result.returncode == 0, result.stderr
+    conn = sqlite3.connect(tmp_path / "demo" / "riveter-demo.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        task = conn.execute(
+            "SELECT * FROM tasks "
+            "WHERE source_id='demo::rima::onboarding-review-schedule'"
+        ).fetchone()
+        action = conn.execute(
+            "SELECT * FROM task_actions WHERE task_id=?", (task["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    attendees = cowork_runner.schedule_attendees(dict(task))
+    assert len(attendees) == 2
+    assert action["had_interaction"] == 1
+    interaction = json.loads(action["blocked_question"])
+    assert cowork_runner.schedule_interaction_is_certified(
+        interaction, attendees, duration_minutes=25
+    )
+    evidence = interaction["schedule_evidence"]
+    assert len(evidence["slots"]) == 3
+    attendee_emails = {person["email"] for person in attendees}
+    for slot in evidence["slots"]:
+        start = datetime.fromisoformat(slot["start"])
+        end = datetime.fromisoformat(slot["end"])
+        assert start.minute in {5, 35}
+        assert (end - start).total_seconds() == 25 * 60
+        assert set(slot["availability"]) == attendee_emails
 
 
 def test_demo_stop_refuses_unrelated_reused_pid(tmp_path):
@@ -527,7 +587,7 @@ def test_demo_server_routes_are_live_and_sync_skills_stay_forbidden(tmp_path):
             chat_tasks = [
                 task for task in payload["tasks"] if task["source_type"] == "chat"
             ]
-            assert len(chat_tasks) == 6
+            assert len(chat_tasks) == 18
             assert all(
                 task["source_url"].startswith(
                     "https://teams.microsoft.com/l/message/"
