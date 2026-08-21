@@ -66,6 +66,7 @@ from ..services.cowork_runner import (
     schedule_answers_for_recheck,
     schedule_attendees,
     schedule_duration_minutes,
+    schedule_interaction_is_attendee_clarification,
     schedule_interaction_is_certified,
     schedule_text_only_interaction,
     start_preview,
@@ -477,6 +478,9 @@ def _enrich(action: dict) -> dict:
     if (
         action.get("action_type") == "schedule-meeting"
         and action.get("interaction_request")
+        and not schedule_interaction_is_attendee_clarification(
+            action["interaction_request"]
+        )
     ):
         task = get_task(action["task_id"])
         attendees = schedule_attendees(task) if task else []

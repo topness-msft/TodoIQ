@@ -204,273 +204,813 @@ def _seed_database(path):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     from src.db import get_connection, init_db
-    from src.models import create_task
+    from src.models import create_task, create_task_action
+    from src.services.cowork_runner import certify_schedule_interaction
 
     conn = get_connection()
     init_db(conn)
     conn.close()
 
-    people = {
-        "meeting": json.dumps([
-            {
-                "name": "Bobby Chang",
-                "email": "bobby.chang@microsoft.com",
-                "aad_object_id": "dbebad9c-cce5-4aa8-9df7-d4a43a80db03",
-            },
-            {
-                "name": "Em D'Arcy",
-                "email": "emdarcy@microsoft.com",
-                "aad_object_id": "f5a69d2c-b748-407e-aa01-f6f3c6ac9250",
-            },
-        ]),
-        "raj": json.dumps([{
-            "name": "Raj Gopalakrishnan",
-            "email": "rajgopal@microsoft.com",
-            "aad_object_id": "fe1c66c5-49f4-49ab-b275-0c1eb2d2cbf6",
-        }]),
-        "exec_pane": json.dumps([
-            {
-                "name": "Adrian Maclean",
-                "email": "adrian.maclean@microsoft.com",
-                "aad_object_id": "de428c82-dd53-45dc-b71d-1e15084805ed",
-            },
-            {
-                "name": "Srini Raghavan",
-                "email": "srini.raghavan@microsoft.com",
-                "aad_object_id": "0431fcd9-f1c7-49f5-8d9f-1ba00fc5b7cc",
-            },
-        ]),
+    people = {}
+    people_data = {
+        "rima": ("Rima Reyes", "rima.reyes", "11111111-1111-4111-8111-111111111111"),
+        "bobby": ("Bobby Chang", "bobby.chang", "22222222-2222-4222-8222-222222222222"),
+        "luis": ("Luis Camino", "luis.camino", "33333333-3333-4333-8333-333333333333"),
+        "steve": ("Steve Jeffery", "steve.jeffery", "44444444-4444-4444-8444-444444444444"),
+        "manuela": ("Manuela Pichler", "manuela.pichler", "55555555-5555-4555-8555-555555555555"),
+        "adrian": ("Adrian Maclean", "adrian.maclean", "66666666-6666-4666-8666-666666666666"),
+        "aamer": ("Aamer Kaleem", "aamer.kaleem", "77777777-7777-4777-8777-777777777777"),
     }
+    demo_self_oid = "00000000-0000-4000-8000-000000000000"
+
+    def teams_source_url(person_key, message_id):
+        person_oid = people_data[person_key][2]
+        conversation_id = f"19:{person_oid}_{demo_self_oid}@unq.gbl.spaces"
+        return (
+            f"https://teams.microsoft.com/l/message/{conversation_id}/{message_id}"
+            "?context=%7B%22contextType%22%3A%22chat%22%7D"
+        )
+
+    for key, (name, email_name, object_id) in people_data.items():
+        alternatives = []
+        if key == "aamer":
+            alternatives = [{
+                "name": "Aamer K.",
+                "email": "aamer.k@example.invalid",
+                "role": "Possible directory match",
+            }]
+        people[key] = json.dumps([{
+            "name": name,
+            "email": f"{email_name}@example.invalid",
+            "aad_object_id": object_id,
+            "role": "Confirmed demo identity",
+            "alternatives": alternatives,
+        }])
+    people["workshop"] = json.dumps([
+        json.loads(people[key])[0] for key in ("steve", "rima", "adrian")
+    ])
+
     create_task(
-        "Review the demo run-of-show",
-        "Confirm the opening story, live task flow, and closing call to action.",
-        status="suggested",
-        priority=3,
-        source_type="manual",
-        source_id="demo::run-of-show",
-        coaching_text="Review the flow and accept it when the demo sequence is ready.",
-        action_type="review-document",
-    )
-    create_task(
-        "Follow up on the Kickstarter pilot feedback from Raj",
+        "Find the current tester for the new Cowork API with Rima",
         (
-            "On Tuesday, August 18, Raj Gopalakrishnan shared early reactions to "
-            "the Kickstarter adoption materials in Teams and said he had several "
-            "pilot notes to review. No follow-up is visible, so the next step is "
-            "to collect his remaining feedback and agree on the next revision."
+            "Rima Reyes was asked to identify the person currently exercising the "
+            "Todo workflow so a newly available Cowork API build can be validated. "
+            "A later project update names a tester, but the handoff and validation "
+            "window still need to be confirmed before the task can be closed."
         ),
-        status="suggested",
-        priority=3,
-        source_type="chat",
-        source_id="chat::rajgopal@microsoft.com::pilot-feedback",
+        status="suggested", priority=4, source_type="chat",
+        source_id="demo::rima::cowork-api-tester",
+        source_date="2026-08-17T16:25:00Z",
+        source_url=teams_source_url("rima", "1787000000001"),
         source_snippet=(
-            "On Tuesday, August 18, Raj Gopalakrishnan said in Teams that he had "
-            "several pilot notes about the Kickstarter adoption materials. No "
-            "later response or review meeting is visible."
+            "On August 17, a project chat asked Rima Reyes to identify the current "
+            "Todo workflow tester for a newly available Cowork API build."
         ),
         coaching_text=(
-            "Draft a short Teams follow-up asking Raj for the remaining pilot "
-            "feedback and the most important revision."
+            "Review the detected update, confirm the named tester with Rima, and "
+            "record the validation owner and target date."
         ),
-        action_type="follow-up",
-        key_people=people["raj"],
+        action_type="awaiting-response", key_people=people["rima"],
+        due_date="2026-08-21",
+    )
+    create_task(
+        "Follow up with Luis on the generated customer presentations",
+        (
+            "Luis Camino was given refreshed customer-onboarding and Lighthouse "
+            "presentation sets and asked to flag anything missing. A newer review "
+            "note indicates the presentation set was checked and accepted, making "
+            "this a strong candidate to dismiss rather than send another reminder."
+        ),
+        status="suggested", priority=4, source_type="chat",
+        source_id="demo::luis::presentation-review",
+        source_date="2026-08-18T14:10:00Z",
+        source_url=teams_source_url("luis", "1787000000002"),
+        source_snippet=(
+            "On August 18, Luis Camino received refreshed customer presentations "
+            "with a request to identify gaps; a later review note records approval."
+        ),
+        coaching_text="The follow-up appears resolved; verify the review note and dismiss it.",
+        action_type="awaiting-response", key_people=people["luis"],
+    )
+    create_task(
+        "Confirm Manuela's PPCC distribution list preference",
+        (
+            "Manuela Pichler was asked whether she wanted to join the PPCC "
+            "distribution list. A later activity summary records her preference "
+            "and indicates that the membership update was completed, so the "
+            "original unanswered-message suggestion now appears resolved."
+        ),
+        status="suggested", priority=4, source_type="chat",
+        source_id="demo::manuela::distribution-preference",
+        source_date="2026-08-20T17:29:00Z",
+        source_url=teams_source_url("manuela", "1787000000003"),
+        source_snippet=(
+            "On August 20, Manuela Pichler was asked for her PPCC distribution-list "
+            "preference; subsequent activity records both her answer and the update."
+        ),
+        coaching_text="Verify the membership note, then dismiss this resolved suggestion.",
+        action_type="awaiting-response", key_people=people["manuela"],
+    )
+    create_task(
+        "Clarify the AIA engagement model with Bobby",
+        (
+            "Bobby Chang responded to a discussion about how AI Architects engage "
+            "with accounts, but two operational questions remain open: whether "
+            "architects are assigned to named accounts and how hands-on they should "
+            "be during building and deployment. A recent update may answer one part."
+        ),
+        status="suggested", priority=4, source_type="chat",
+        source_id="demo::bobby::aia-engagement-model",
+        source_date="2026-08-18T15:40:00Z",
+        source_url=teams_source_url("bobby", "1787000000004"),
+        source_snippet=(
+            "On August 18, Bobby Chang provided broader engagement-model context "
+            "without clearly resolving account assignment and delivery expectations."
+        ),
+        coaching_text=(
+            "Check the recent activity, then draft a concise Teams follow-up for "
+            "only the remaining unanswered engagement-model question."
+        ),
+        action_type="follow-up", key_people=people["bobby"],
         due_date="2026-08-24",
     )
     create_task(
-        "Check whether Adrian replied about the executive pane layout",
+        "Coordinate the five-customer dashboard examples with Adrian",
         (
-            "On Wednesday, August 19, Adrian Maclean replied to the executive "
-            "pane email thread and confirmed that the revised layout works. He "
-            "said no further changes are needed before the review, so this task "
-            "appears complete."
+            "A dashboard review left a concrete follow-up to align with Adrian "
+            "Maclean on five representative customer examples. The working session "
+            "should settle the customer mix, required CRM and domain attributes, "
+            "and which examples best demonstrate the executive review experience."
         ),
-        status="suggested",
-        priority=3,
-        source_type="email",
-        source_id="email::adrian.maclean@microsoft.com::exec-pane-reply",
+        status="suggested", priority=2, source_type="meeting",
+        source_id="demo::adrian::dashboard-examples",
+        source_date="2026-08-19T15:00:00Z",
         source_snippet=(
-            "On Wednesday, August 19, Adrian Maclean replied by email that the "
-            "revised executive pane layout works and no further changes are "
-            "needed before the review."
-        ),
-        coaching_text="This suggestion appears resolved and can be dismissed.",
-        action_type="awaiting-response",
-        key_people=people["exec_pane"],
-    )
-    create_task(
-        "Confirm the demo video assets are ready to use",
-        (
-            "On Wednesday, August 19, Bobby Chang and Em D'Arcy confirmed during "
-            "the demo preparation meeting that the final screenshots and title "
-            "card were delivered to the shared folder. The previously outstanding "
-            "asset request therefore appears complete."
-        ),
-        status="suggested",
-        priority=3,
-        source_type="meeting",
-        source_id="meeting::demo-video-assets::delivered",
-        source_snippet=(
-            "On Wednesday, August 19, Bobby Chang and Em D'Arcy reported in the "
-            "demo preparation meeting that all final video assets were in the "
-            "shared folder and ready to use."
-        ),
-        coaching_text="This suggestion appears resolved and can be dismissed.",
-        action_type="follow-up",
-        key_people=people["meeting"],
-    )
-    create_task(
-        "Review the run-of-show timing with Em D'Arcy",
-        (
-            "On Thursday, August 20, Em D'Arcy asked during the demo planning "
-            "meeting for a final timing pass before the live introduction. Check "
-            "the six-slide pacing and confirm the handoff to the product demo."
-        ),
-        status="suggested",
-        priority=2,
-        source_type="meeting",
-        source_id="meeting::emdarcy@microsoft.com::run-of-show-timing",
-        source_snippet=(
-            "On Thursday, August 20, Em D'Arcy asked during the demo planning "
-            "meeting for one final timing pass before the Riveter introduction."
+            "On August 19, a dashboard review assigned an alignment with Adrian "
+            "Maclean on five customer examples and their required data."
         ),
         coaching_text=(
-            "Prepare a concise timing review focused on slide pacing and the "
-            "handoff to the live demo."
+            "Draft a Teams follow-up that proposes five example categories and asks "
+            "Adrian to confirm the customer and data mix."
         ),
-        action_type="prepare",
-        key_people=json.dumps([json.loads(people["meeting"])[1]]),
+        action_type="follow-up", key_people=people["adrian"],
+        due_date="2026-08-24",
+    )
+    create_task(
+        "Prepare the account-team briefing with Aamer",
+        (
+            "Aamer Kaleem asked for an account-team briefing that combines scenario "
+            "discovery, architecture education, objection handling, and a focused "
+            "demo plan. Build a review-ready agenda that distinguishes confirmed "
+            "customer needs from open questions and assigns owners for each section."
+        ),
+        status="suggested", priority=1, source_type="meeting",
+        source_id="demo::aamer::account-briefing",
+        source_date="2026-08-20T13:00:00Z",
+        source_snippet=(
+            "On August 20, a planning meeting assigned Aamer Kaleem and the account "
+            "team a structured briefing covering scenarios, architecture, and demos."
+        ),
+        coaching_text=(
+            "Prepare a briefing outline with objectives, open questions, demo "
+            "sequence, decision points, and named follow-up owners."
+        ),
+        action_type="prepare", key_people=people["aamer"],
+        due_date="2026-08-25",
+    )
+    create_task(
+        "Schedule the Lighthouse workshop mapping session with Steve",
+        (
+            "Steve Jeffery is needed in a working session to map existing workshops "
+            "and activities into the FY27 Lighthouse program structure. Find a "
+            "25-minute slot, include a draft inventory and decision criteria in the "
+            "agenda, and make the desired ownership decisions explicit."
+        ),
+        status="suggested", priority=2, source_type="meeting",
+        source_id="demo::steve::workshop-mapping",
+        source_date="2026-08-19T16:00:00Z",
+        source_snippet=(
+            "On August 19, the program-direction meeting requested a workshop "
+            "mapping session with Steve Jeffery to settle the FY27 structure."
+        ),
+        coaching_text=(
+            "Find a 25-minute working-hours slot with Steve, Rima, and Adrian and "
+            "draft a decision-led agenda for mapping workshops into Lighthouse."
+        ),
+        action_type="schedule-meeting", key_people=people["workshop"],
+        due_date="2026-08-24",
+    )
+    create_task(
+        "Schedule the Friday demo review with Bobby Chang",
+        (
+            "Bobby Chang should review the Riveter demo before Friday's audience "
+            "session. Find a 30-minute working-hours slot and include an agenda that "
+            "covers the opening task story, safe data boundaries, Cowork preview, "
+            "and the closing adoption message."
+        ),
+        priority=2, source_type="manual",
+        source_id="demo::bobby::friday-demo-review",
+        coaching_text=(
+            "Schedule a 30-minute review with Bobby and include the four demo "
+            "decision points in the invitation."
+        ),
+        action_type="schedule-meeting", key_people=people["bobby"],
         due_date="2026-08-21",
     )
     create_task(
-        "Schedule the Friday demo review with Bobby Chang and Em D'Arcy",
-        "Find a 30-minute time this week to walk through the Friday Riveter demo.",
-        priority=2,
-        source_type="manual",
-        source_id="demo::bobby-em-schedule",
-        coaching_text=(
-            "Find a 30-minute working-hours slot with Bobby Chang and Em D'Arcy "
-            "this week and prepare a focused demo-review agenda."
-        ),
-        action_type="schedule-meeting",
-        key_people=people["meeting"],
-        due_date="2026-08-21",
-    )
-    create_task(
-        "Send Raj the complete Kickstarter adoption materials in Teams",
+        "Reply to Adrian with the FY27 program direction",
         (
-            "Reply to Raj Gopalakrishnan with the complete Kickstarter adoption "
-            "module and the fuller deck he asked about."
+            "Adrian Maclean requested a concise statement of the FY27 program shape "
+            "before the team chooses a path for a customer engagement. Respond by "
+            "email with the current program boundaries, what remains undecided, and "
+            "the decision the account team can safely make now."
         ),
-        priority=2,
-        source_type="chat",
-        source_id="chat::rajgopal@microsoft.com::1786489142550",
-        source_url=(
-            "https://teams.microsoft.com/l/message/"
-            "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
-            "fe1c66c549f449abb2750c1eb2d2cbf6@unq.gbl.spaces/"
-            "1786489142550?context=%7B%22contextType%22:%22chat%22%7D"
-        ),
+        priority=2, source_type="email",
+        source_id="demo::adrian::fy27-direction",
+        source_date="2026-08-19T11:30:00Z",
         source_snippet=(
-            "The adoption module only has seven slides. Is there a more complete "
-            "set available?"
+            "On August 19, Adrian Maclean requested FY27 program guidance needed "
+            "before the account team can select an engagement path."
         ),
         coaching_text=(
-            "Send Raj Gopalakrishnan the complete Kickstarter adoption resources "
-            "and directly answer his question about the fuller deck."
+            "Draft a direct email response with the current direction, known "
+            "constraints, and one explicit next decision."
         ),
-        action_type="follow-up",
-        key_people=people["raj"],
+        action_type="respond-email", key_people=people["adrian"],
         due_date="2026-08-21",
     )
     create_task(
-        "Reply to Adrian about Srini's executive pane",
+        "Send Luis the customer-assignment update in Teams",
         (
-            "Respond to Adrian Maclean about tuning Srini Raghavan's executive "
-            "pane so it shows agent status, progress, and blockers clearly."
+            "Luis Camino still needs a clear update on Lighthouse customer coverage "
+            "after the squad kickoff surfaced an assignment gap. Send a Teams note "
+            "that explains what has been checked, identifies the current assignment "
+            "owner, and gives Luis a concrete date for the final answer."
         ),
-        priority=2,
-        source_type="email",
-        source_id="email::adrian.maclean@microsoft.com::exec-pane",
+        priority=2, source_type="chat",
+        source_id="demo::luis::customer-assignment",
+        source_date="2026-08-18T12:15:00Z",
+        source_url=teams_source_url("luis", "1787000000005"),
         source_snippet=(
-            "Can we report what agents and progress are deployed, then show the "
-            "blockers on the remaining work?"
+            "On August 18, a squad kickoff identified that Luis Camino did not yet "
+            "have confirmed Lighthouse customer assignments."
         ),
         coaching_text=(
-            "Reply to Adrian Maclean with a concise proposal for improving Srini "
-            "Raghavan's executive pane and the next iteration."
+            "Draft a short Teams update for Luis with the current owner, remaining "
+            "dependency, and expected decision date."
         ),
-        action_type="respond-email",
-        key_people=people["exec_pane"],
+        action_type="follow-up", key_people=people["luis"],
         due_date="2026-08-21",
     )
     create_task(
-        "Waiting on the final demo video assets",
-        "The latest screenshots and title card are still being finalized.",
-        status="waiting",
-        priority=3,
-        source_type="manual",
-        source_id="demo::video-assets",
-        action_type="awaiting-response",
-        user_notes="Check again Thursday afternoon.",
+        "Prepare the Lighthouse customer-list rationale with Rima",
+        (
+            "Rima Reyes is reviewing the Lighthouse customer list and needs a clear "
+            "explanation for every inclusion and omission. Prepare a decision table "
+            "that records the selection criteria, the evidence available for each "
+            "customer, and the owner for resolving any missing information."
+        ),
+        priority=2, source_type="meeting",
+        source_id="demo::rima::customer-list-rationale",
+        source_date="2026-08-18T13:00:00Z",
+        source_snippet=(
+            "On August 18, the leadership standup assigned Rima Reyes a review of "
+            "the Lighthouse customer list and its inclusion criteria."
+        ),
+        coaching_text=(
+            "Prepare a concise customer decision table and highlight only the "
+            "omissions that still need leadership input."
+        ),
+        action_type="prepare", key_people=people["rima"],
+        due_date="2026-08-22",
     )
     create_task(
-        "Finish the isolated demo environment",
-        "The fictional database, live integrations, and demo URL are ready.",
-        status="completed",
-        priority=2,
-        source_type="manual",
-        source_id="demo::environment-complete",
-        action_type="general",
+        "Review the dashboard customer examples with Aamer",
+        (
+            "Aamer Kaleem requested five representative dashboard examples that "
+            "show useful customer, CRM, and domain signals without overwhelming the "
+            "reviewer. The example set is being assembled now; compare each example "
+            "against the agreed narrative and document any missing data."
+        ),
+        status="in_progress", priority=2, source_type="meeting",
+        source_id="demo::aamer::dashboard-example-review",
+        source_date="2026-08-19T15:15:00Z",
+        source_snippet=(
+            "On August 19, Aamer Kaleem requested five dashboard examples that "
+            "demonstrate customer, CRM, and domain signals together."
+        ),
+        coaching_text=(
+            "Review the five-example draft, flag narrative or data gaps, and record "
+            "a clear accept-or-revise decision for each example."
+        ),
+        action_type="review-document", key_people=people["aamer"],
+        due_date="2026-08-24",
     )
     create_task(
-        "Send the outdated demo script",
-        "This version was superseded by the live run-of-show.",
-        status="dismissed",
-        priority=5,
-        source_type="manual",
-        source_id="demo::outdated-script",
-        action_type="general",
+        "Wait for Steve's Lighthouse workshop invitation",
+        (
+            "Steve Jeffery is coordinating the workshop-to-program mapping session, "
+            "and the next move depends on the calendar invitation and draft agenda. "
+            "Keep the mapping inventory ready, but do not send a duplicate invite; "
+            "check again after the agreed planning window."
+        ),
+        status="waiting", priority=3, source_type="email",
+        source_id="demo::steve::workshop-invitation",
+        source_date="2026-08-19T16:20:00Z",
+        source_snippet=(
+            "On August 19, the program thread recorded that Steve Jeffery would "
+            "coordinate the mapping-session invitation and initial agenda."
+        ),
+        coaching_text=(
+            "Wait for the invitation, then verify that the agenda includes the "
+            "inventory, mapping criteria, and ownership decisions."
+        ),
+        action_type="awaiting-response", key_people=people["steve"],
+        user_notes="Check after Monday's program planning window.",
     )
     create_task(
-        "Check pilot adoption metrics",
-        "Review the first-week dashboard after launch.",
-        status="snoozed",
-        priority=4,
-        source_type="manual",
-        source_id="demo::adoption-metrics",
-        action_type="general",
+        "Document Manuela's customer-search requirements",
+        (
+            "Manuela Pichler helped define searchable customer selection for both "
+            "the main dashboard and customer views. The agreed requirements now "
+            "cover type-ahead behavior, large-list usability, and consistent search "
+            "results across both entry points, and the review notes are complete."
+        ),
+        status="completed", priority=3, source_type="meeting",
+        source_id="demo::manuela::customer-search-requirements",
+        source_date="2026-08-20T14:00:00Z",
+        source_snippet=(
+            "On August 20, Manuela Pichler confirmed the customer-search behavior "
+            "needed across the main dashboard and customer views."
+        ),
+        coaching_text=(
+            "The requirements are documented and accepted; retain this completed "
+            "task as context for later implementation work."
+        ),
+        action_type="review-document", key_people=people["manuela"],
+    )
+    create_task(
+        "Review the Power Up asset transition with Luis",
+        (
+            "A flagged program thread involving Luis Camino discusses whether Power "
+            "Up learning assets should transition into another enablement program, "
+            "but it does not establish a direct owner or immediate decision. Keep "
+            "the review snoozed until the program team clarifies ownership."
+        ),
+        status="snoozed", priority=4, source_type="email",
+        source_id="demo::luis::asset-transition",
+        source_date="2026-08-16T10:00:00Z",
+        source_snippet=(
+            "On August 16, a program email involving Luis Camino raised a possible "
+            "learning-asset transition without assigning a concrete owner."
+        ),
+        coaching_text=(
+            "Revisit only when program ownership is clarified; avoid creating an "
+            "unowned follow-up from an informational thread."
+        ),
+        action_type="review-document", key_people=people["luis"],
+        due_date="2026-09-01",
+    )
+    create_task(
+        "Dismiss the superseded AMR kickoff follow-up with Bobby",
+        (
+            "An earlier squad-status check appeared to need Bobby Chang's response, "
+            "but the consolidated kickoff summary now records every squad's status. "
+            "The individual reminder would duplicate the completed rollup and has "
+            "therefore been dismissed as superseded."
+        ),
+        status="dismissed", priority=5, source_type="chat",
+        source_id="demo::bobby::superseded-kickoff-follow-up",
+        source_date="2026-08-18T18:00:00Z",
+        source_url=teams_source_url("bobby", "1787000000006"),
+        source_snippet=(
+            "On August 18, a consolidated kickoff summary replaced the earlier "
+            "individual status request associated with Bobby Chang."
+        ),
+        coaching_text=(
+            "No action is needed because the consolidated summary contains the "
+            "required kickoff status."
+        ),
+        action_type="general", key_people=people["bobby"],
+    )
+    create_task(
+        "Dismiss the outdated FY27 guidance request to Adrian",
+        (
+            "A previous request asked Adrian Maclean for an early FY27 program view, "
+            "but a later planning artifact replaced that request with an approved "
+            "direction and current decision log. The old request is retained only "
+            "to demonstrate dismissed-task history."
+        ),
+        status="dismissed", priority=5, source_type="email",
+        source_id="demo::adrian::outdated-guidance-request",
+        source_date="2026-08-15T09:00:00Z",
+        source_snippet=(
+            "On August 15, an early guidance request to Adrian Maclean was "
+            "superseded by the approved program direction and decision log."
+        ),
+        coaching_text=(
+            "No response is needed; use the current program-direction task instead "
+            "of reopening this superseded request."
+        ),
+        action_type="general", key_people=people["adrian"],
     )
 
     conn = get_connection()
     try:
-        resolved_suggestions = {
-            "email::adrian.maclean@microsoft.com::exec-pane-reply": {
-                "status": "likely_resolved",
+        suggestion_activity = {
+            "demo::rima::cowork-api-tester": {
+                "status": "activity_detected",
                 "summary": (
-                    "Adrian replied that the revised executive pane layout works "
-                    "and no further changes are needed."
+                    "A later project update names a likely tester, but the handoff "
+                    "and validation date still need confirmation."
                 ),
-                "checked_at": "2026-08-20T09:00:00Z",
+                "checked_at": "2026-08-20T18:00:00Z",
             },
-            "meeting::demo-video-assets::delivered": {
+            "demo::luis::presentation-review": {
                 "status": "likely_resolved",
                 "summary": (
-                    "The latest meeting update says all final video assets were "
-                    "delivered to the shared folder."
+                    "A later review note says the refreshed customer presentation "
+                    "set was checked and accepted."
                 ),
-                "checked_at": "2026-08-20T09:00:00Z",
+                "checked_at": "2026-08-20T18:00:00Z",
+            },
+            "demo::manuela::distribution-preference": {
+                "status": "likely_resolved",
+                "summary": (
+                    "Subsequent activity records Manuela's preference and completion "
+                    "of the distribution-list update."
+                ),
+                "checked_at": "2026-08-20T18:00:00Z",
+            },
+            "demo::bobby::aia-engagement-model": {
+                "status": "may_be_resolved",
+                "summary": (
+                    "A recent engagement-model update may answer the account "
+                    "assignment question, but delivery expectations remain unclear."
+                ),
+                "checked_at": "2026-08-20T18:00:00Z",
             },
         }
-        for source_id, activity in resolved_suggestions.items():
+        narrative_details = {
+            "demo::rima::cowork-api-tester": (
+                "As of August 20, 2026, a likely tester is named but the handoff "
+                "and validation window are not confirmed.",
+                "Confirm the tester and target date with Rima Reyes.",
+            ),
+            "demo::luis::presentation-review": (
+                "As of August 20, 2026, a later review note indicates that Luis "
+                "Camino accepted the refreshed presentation set.",
+                "Verify the review note and dismiss the resolved suggestion.",
+            ),
+            "demo::manuela::distribution-preference": (
+                "As of August 20, 2026, Manuela Pichler's preference and the "
+                "membership update are both recorded.",
+                "Verify the update and dismiss the resolved suggestion.",
+            ),
+            "demo::bobby::aia-engagement-model": (
+                "As of August 20, 2026, account assignment may be clarified, but "
+                "Bobby Chang's delivery expectations remain open.",
+                "Ask Bobby only for the remaining delivery-model decision.",
+            ),
+            "demo::adrian::dashboard-examples": (
+                "As of August 20, 2026, the five-example customer and data mix "
+                "still needs Adrian Maclean's agreement.",
+                "Send Adrian the proposed categories and request confirmation.",
+            ),
+            "demo::aamer::account-briefing": (
+                "As of August 20, 2026, Aamer Kaleem's briefing outline has not "
+                "yet been assembled for account-team review.",
+                "Prepare the agenda, open questions, demo sequence, and owners.",
+            ),
+            "demo::steve::workshop-mapping": (
+                "As of August 20, 2026, Steve Jeffery, Rima Reyes, and Adrian "
+                "Maclean have three verified scheduling options.",
+                "Review the proposed time and agenda without creating the event.",
+            ),
+            "demo::bobby::friday-demo-review": (
+                "As of August 20, 2026, Bobby Chang's Friday review is required "
+                "but has not been placed on the calendar.",
+                "Review the proposed invitation and choose whether to schedule it.",
+            ),
+            "demo::adrian::fy27-direction": (
+                "As of August 20, 2026, Adrian Maclean still needs the approved "
+                "program boundaries and the remaining account decision.",
+                "Review the prepared email response before any delivery.",
+            ),
+            "demo::luis::customer-assignment": (
+                "As of August 20, 2026, Luis Camino's account match is still being "
+                "confirmed by the program lead.",
+                "Review the prepared Teams update before any delivery.",
+            ),
+            "demo::rima::customer-list-rationale": (
+                "As of August 20, 2026, Rima Reyes is still validating the "
+                "evidence behind customer inclusions and omissions.",
+                "Complete the decision table and escalate missing evidence.",
+            ),
+            "demo::aamer::dashboard-example-review": (
+                "As of August 20, 2026, Aamer Kaleem's five examples are being "
+                "reviewed and several data gaps remain.",
+                "Record an accept-or-revise decision for each example.",
+            ),
+            "demo::steve::workshop-invitation": (
+                "As of August 20, 2026, Steve Jeffery's invitation and draft "
+                "agenda have not arrived.",
+                "Wait through the planning window, then verify the invitation.",
+            ),
+            "demo::manuela::customer-search-requirements": (
+                "As of August 20, 2026, Manuela Pichler's search requirements are "
+                "documented, reviewed, and complete.",
+                "Retain the completed task as implementation context.",
+            ),
+            "demo::luis::asset-transition": (
+                "As of August 20, 2026, the thread involving Luis Camino still "
+                "does not assign a transition owner.",
+                "Keep the review snoozed until program ownership is clarified.",
+            ),
+            "demo::bobby::superseded-kickoff-follow-up": (
+                "As of August 20, 2026, the consolidated kickoff summary has "
+                "replaced the individual request associated with Bobby Chang.",
+                "Leave the duplicate reminder dismissed.",
+            ),
+            "demo::adrian::outdated-guidance-request": (
+                "As of August 20, 2026, the approved decision log supersedes the "
+                "earlier guidance request to Adrian Maclean.",
+                "Use the current FY27 response task and keep this request dismissed.",
+            ),
+        }
+        for source_id, (current_state, next_step) in narrative_details.items():
+            conn.execute(
+                "UPDATE tasks SET description=description || ? || ? WHERE source_id=?",
+                (
+                    f" Current state: {current_state}",
+                    f" Next step: {next_step}",
+                    source_id,
+                ),
+            )
+        for source_id, activity in suggestion_activity.items():
             conn.execute(
                 "UPDATE tasks SET waiting_activity=? WHERE source_id=?",
                 (json.dumps(activity), source_id),
             )
+        conn.execute(
+            "UPDATE tasks SET created_at=?,updated_at=?",
+            ("2026-08-20T18:00:00Z", "2026-08-20T18:00:00Z"),
+        )
         conn.commit()
+        conn.close()
+        conn = None
+
+        def seed_cowork_result(
+            source_id,
+            *,
+            finding,
+            draft,
+            destination_kind,
+            destination_ref,
+            destination_display,
+            delivery_channel,
+            tool_trace,
+            blocked_question=None,
+            answered_interaction=None,
+        ):
+            lookup_conn = get_connection()
+            try:
+                task_id = lookup_conn.execute(
+                    "SELECT id FROM tasks WHERE source_id=?", (source_id,)
+                ).fetchone()[0]
+            finally:
+                lookup_conn.close()
+            action = create_task_action(
+                task_id,
+                intent="Review the deterministic demo result without executing it.",
+                notes_snapshot="Safe demo preview; no external write was performed.",
+                destination_kind=destination_kind,
+                destination_ref=destination_ref,
+                destination_display=destination_display,
+                delivery_channel=delivery_channel,
+                destination_source="auto_key_people",
+                blocked_question=blocked_question,
+                answered_interaction=answered_interaction,
+            )
+            _set_action_result(
+                action["id"],
+                state="ready",
+                finding=finding,
+                draft=draft,
+                tool_trace=json.dumps(tool_trace),
+            )
+            update_conn = get_connection()
+            try:
+                update_conn.execute(
+                    "UPDATE task_actions SET destination_kind=?,destination_ref=?,"
+                    "destination_display=?,delivery_channel=?,destination_source=?,"
+                    "had_interaction=?,created_at=?,updated_at=? WHERE id=?",
+                    (
+                        destination_kind,
+                        destination_ref,
+                        destination_display,
+                        delivery_channel,
+                        "auto_key_people",
+                        int(blocked_question is not None),
+                        "2026-08-20T18:00:00Z",
+                        "2026-08-20T18:00:00Z",
+                        action["id"],
+                    ),
+                )
+                update_conn.commit()
+            finally:
+                update_conn.close()
+            return action["id"]
+
+        seed_cowork_result(
+            "demo::luis::customer-assignment",
+            finding=(
+                "The squad kickoff established that Luis still needs a confirmed "
+                "Lighthouse assignment. The reviewable next step is a concise Teams "
+                "update naming the current owner and decision date."
+            ),
+            draft=(
+                "Hi Luis — I checked on the Lighthouse assignment gap from the squad "
+                "kickoff. The program lead is confirming the account match, and I "
+                "will send you the final assignment by Monday. I will also make sure "
+                "you have the account context and the right squad contact."
+            ),
+            destination_kind="one_to_one",
+            destination_ref="demo-teams-luis-camino",
+            destination_display="Luis Camino",
+            delivery_channel="teams",
+            tool_trace=[{
+                "tool_name": "mcp__teams__GetMessages",
+                "ok": True,
+                "output": "Demo-safe summary of the assignment discussion.",
+            }],
+        )
+        seed_cowork_result(
+            "demo::adrian::fy27-direction",
+            finding=(
+                "The current program notes support a short response that separates "
+                "confirmed FY27 boundaries from the one account decision still open."
+            ),
+            draft=(
+                "Subject: FY27 program direction and next account decision\n\n"
+                "Hi Adrian,\n\nThe current direction is to map existing workshops "
+                "into the Lighthouse structure while keeping customer-specific "
+                "delivery decisions with the account team. The remaining decision "
+                "is which engagement path best fits this account. I suggest we use "
+                "the mapping session to confirm that choice and its owner.\n\nThanks"
+            ),
+            destination_kind="one_to_one",
+            destination_ref="adrian.maclean@example.invalid",
+            destination_display="Adrian Maclean",
+            delivery_channel="email",
+            tool_trace=[{
+                "tool_name": "mcp__outlook__GetMessage",
+                "ok": True,
+                "output": "Demo-safe summary of the program-direction thread.",
+            }],
+        )
+
+        workshop_attendees = [
+            json.loads(people["workshop"])[index]["email"] for index in range(3)
+        ]
+        availability = {email: "free" for email in workshop_attendees}
+        slot_values = (
+            (
+                "Option 1",
+                "2027-01-11T10:05:00+00:00",
+                "2027-01-11T10:30:00+00:00",
+                "Monday, January 11 · 10:05–10:30 UTC",
+            ),
+            (
+                "Option 2",
+                "2027-01-12T13:35:00+00:00",
+                "2027-01-12T14:00:00+00:00",
+                "Tuesday, January 12 · 13:35–14:00 UTC",
+            ),
+            (
+                "Option 3",
+                "2027-01-13T15:05:00+00:00",
+                "2027-01-13T15:30:00+00:00",
+                "Wednesday, January 13 · 15:05–15:30 UTC",
+            ),
+        )
+        workshop_interaction = {
+            "invocation_id": "demo-workshop-availability",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Choose a verified 25-minute time",
+                "question": "Which Lighthouse workshop mapping time should be used?",
+                "multi_select": False,
+                "image_url": "",
+                "options": [{
+                    "value": value,
+                    "label": label,
+                    "description": (
+                        "[slot:"
+                        + json.dumps(
+                            {"start": start, "end": end, "timezone": "UTC"},
+                            separators=(",", ":"),
+                        )
+                        + "] [avail:"
+                        + json.dumps(availability, separators=(",", ":"))
+                        + "]"
+                    ),
+                    "image_url": "",
+                } for value, start, end, label in slot_values],
+            }],
+        }
+        workshop_interaction = certify_schedule_interaction(
+            workshop_interaction,
+            [
+                (
+                    "ts",
+                    {
+                        "tid": "demo-find-times",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "inp": json.dumps({
+                            "attendees": workshop_attendees,
+                            "duration_minutes": 25,
+                        }),
+                    },
+                ),
+                (
+                    "tx",
+                    {
+                        "tid": "demo-find-times",
+                        "tn": "mcp__outlook_calendar__FindMeetingTimes",
+                        "ok": True,
+                    },
+                ),
+            ],
+            json.loads(people["workshop"]),
+            duration_minutes=25,
+            start_offset_minutes=5,
+            now="2026-08-20T18:00:00+00:00",
+        )
+        if workshop_interaction is None:
+            raise RuntimeError("Could not certify deterministic demo availability")
+        selected_slot = workshop_interaction["schedule_evidence"]["slots"][0]
+        workshop_answer = {
+            "kind": "interaction_answer",
+            "interaction": workshop_interaction,
+            "answers": {"0": selected_slot["value"]},
+        }
+        workshop_draft = (
+            "**Lighthouse workshop mapping**\n\n"
+            "- **When:** Monday, January 11, 2027, 10:05–10:30 UTC\n"
+            "- **Attendees:** Steve Jeffery, Rima Reyes, Adrian Maclean\n"
+            "- **Where:** Teams meeting\n"
+            "- **Agenda:** Map existing workshops into the FY27 Lighthouse "
+            "structure, confirm decision criteria, and assign owners."
+        )
+        seed_cowork_result(
+            "demo::steve::workshop-mapping",
+            finding=(
+                "All three confirmed attendees are free for three query-backed "
+                "25-minute options. The first option is selected in this reviewable "
+                "preview, but no calendar event has been created."
+            ),
+            draft=workshop_draft,
+            destination_kind="meeting",
+            destination_ref=";".join(workshop_attendees),
+            destination_display="Steve Jeffery, Rima Reyes, and Adrian Maclean",
+            delivery_channel=None,
+            blocked_question=json.dumps(
+                workshop_interaction, separators=(",", ":")
+            ),
+            answered_interaction=json.dumps(
+                workshop_answer, separators=(",", ":")
+            ),
+            tool_trace=[
+                {
+                    "tool_name": "mcp__outlook_calendar__FindMeetingTimes",
+                    "ok": True,
+                    "output": "Three demo-safe query-backed options.",
+                },
+                {
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "ok": False,
+                    "input": {
+                        "subject": "Lighthouse workshop mapping",
+                        "start": selected_slot["start"],
+                        "end": selected_slot["end"],
+                        "time_zone": "UTC",
+                        "attendees": workshop_attendees,
+                        "body": workshop_draft,
+                        "content_type": "html",
+                        "is_online_meeting": True,
+                    },
+                    "output": "Not executed; deterministic review preview only.",
+                },
+            ],
+        )
+        conn = get_connection()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA journal_mode=DELETE")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def reset():

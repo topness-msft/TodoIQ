@@ -482,6 +482,7 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             self._events(),
             self.attendees,
             duration_minutes=25,
+            start_offset_minutes=5,
             now="2026-08-19T12:00:00+00:00",
         )
 
@@ -494,6 +495,57 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             "FindMeetingTimes+interaction",
         )
         self.assertTrue(certified["schedule_evidence"]["query_backed"])
+        self.assertEqual(certified["schedule_evidence"]["start_offset_minutes"], 5)
+
+    def test_certifies_one_or_two_valid_slots(self):
+        for option_count in (1, 2):
+            with self.subTest(option_count=option_count):
+                interaction = self._interaction()
+                interaction["questions"][0]["options"] = (
+                    interaction["questions"][0]["options"][:option_count]
+                )
+                certified = cr.certify_schedule_interaction(
+                    interaction,
+                    self._events(),
+                    self.attendees,
+                    duration_minutes=25,
+                    start_offset_minutes=5,
+                    now="2026-08-19T12:00:00+00:00",
+                )
+
+                self.assertIsNotNone(certified)
+                self.assertEqual(
+                    len(certified["schedule_evidence"]["slots"]),
+                    option_count,
+                )
+
+    def test_rejects_slots_that_ignore_configured_start_offset(self):
+        for start, end in (
+            ("2099-08-20T13:00:00-04:00", "2099-08-20T13:25:00-04:00"),
+            ("2099-08-20T13:30:00-04:00", "2099-08-20T13:55:00-04:00"),
+        ):
+            with self.subTest(start=start):
+                interaction = self._interaction()
+                interaction["questions"][0]["options"][0]["description"] = (
+                    "[slot:"
+                    + json.dumps({
+                        "start": start,
+                        "end": end,
+                        "timezone": "Eastern Standard Time",
+                    }, separators=(",", ":"))
+                    + '] [avail:{"jay.padimiti@microsoft.com":"free"}]'
+                )
+
+                self.assertIsNone(
+                    cr.certify_schedule_interaction(
+                        interaction,
+                        self._events(),
+                        self.attendees,
+                        duration_minutes=25,
+                        start_offset_minutes=5,
+                        now="2026-08-19T12:00:00+00:00",
+                    )
+                )
 
     def test_rejects_unknown_timezone_and_incomplete_calendar_coverage(self):
         self.assertIsNone(
@@ -673,6 +725,7 @@ class TestScheduleInteractionCertification(unittest.TestCase):
             self._events(),
             self.attendees,
             duration_minutes=25,
+            start_offset_minutes=5,
             now="2026-08-19T12:00:00+00:00",
         )
         self.assertTrue(
@@ -747,6 +800,116 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         self.assertIn("Try Thursday at 2 PM", prepared["0"])
         self.assertIn("do not create an event yet", prepared["0"])
 
+    def test_attendee_clarification_is_not_treated_as_uncertified_time_choices(self):
+        interaction = {
+            "invocation_id": "attendees-1",
+            "questions": [{
+                "id": "0",
+                "header": "Confirm attendees",
+                "question": "Who should attend this meeting?",
+                "multi_select": False,
+                "options": [
+                    {
+                        "value": "Amit and Audrey",
+                        "label": "Amit and Audrey",
+                        "description": "Keep Aamer optional.",
+                    },
+                    {
+                        "value": "Everyone",
+                        "label": "Everyone",
+                        "description": "Invite all confirmed chat members.",
+                    },
+                ],
+            }],
+        }
+
+        self.assertTrue(
+            cr.schedule_interaction_is_attendee_clarification(interaction)
+        )
+        self.assertTrue(
+            cr.schedule_answer_is_safe(
+                interaction,
+                {"0": "Amit and Audrey"},
+                self.attendees,
+                duration_minutes=25,
+            )
+        )
+
+    def test_live_runner_surfaces_attendee_clarification_without_slot_correction(self):
+        attendee_question = {
+            "iid": "attendees-1",
+            "q": [{
+                "id": "0",
+                "header": "Confirm attendees",
+                "question": "Who should attend this meeting?",
+                "options": [{
+                    "value": "Amit and Audrey",
+                    "label": "Amit and Audrey",
+                    "description": "Keep Aamer optional.",
+                }],
+            }],
+        }
+
+        class Response:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                for kind, data in (
+                    ("aq", attendee_question),
+                    ("rl", {"st": "ok"}),
+                ):
+                    yield "event: " + kind
+                    yield "data: " + json.dumps(data)
+                    yield ""
+
+        class Client:
+            def __init__(self):
+                self.posts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response()
+
+            def post(self, _url, **kwargs):
+                self.posts.append(kwargs["json"])
+                return mock.Mock(status_code=202)
+
+        client = Client()
+        with mock.patch.object(
+            cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
+        ), mock.patch.object(cr, "_api_http_client_fn", return_value=client), \
+                mock.patch(
+                    "src.models.set_blocked_question_if_missing"
+                ) as store_question:
+            cr._api_run_default(
+                "schedule it",
+                None,
+                lambda _text: None,
+                action_id=135,
+                schedule_people=self.attendees,
+                schedule_duration=25,
+            )
+
+        self.assertEqual(client.posts, [])
+        stored = json.loads(store_question.call_args.args[1])
+        self.assertEqual(stored["invocation_id"], "attendees-1")
+        self.assertEqual(
+            stored["questions"][0]["options"][0]["value"],
+            "Amit and Audrey",
+        )
+        self.assertNotIn("schedule_evidence", stored)
+
     def test_live_runner_corrects_once_then_surfaces_text_only(self):
         invalid = {
             "iid": "schedule-1",
@@ -819,6 +982,11 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         with mock.patch.object(
             cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
         ), mock.patch.object(cr, "_api_http_client_fn", return_value=client), \
+                mock.patch.object(
+                    cr,
+                    "meeting_preferences",
+                    return_value={"default_minutes": 25, "start_offset_minutes": 5},
+                ), \
                 mock.patch(
                     "src.models.set_blocked_question_if_missing"
                 ) as store_question:
@@ -916,6 +1084,11 @@ class TestScheduleInteractionCertification(unittest.TestCase):
         with mock.patch.object(
             cr, "_api_auth_fn", return_value=("token", "https://api", "t", "u")
         ), mock.patch.object(cr, "_api_http_client_fn", return_value=client), \
+                mock.patch.object(
+                    cr,
+                    "meeting_preferences",
+                    return_value={"default_minutes": 25, "start_offset_minutes": 5},
+                ), \
                 mock.patch(
                     "src.models.set_blocked_question_if_missing"
                 ) as store_question:

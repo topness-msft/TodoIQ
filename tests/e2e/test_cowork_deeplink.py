@@ -55,6 +55,7 @@ class TestCoworkDeepLink:
             )
             page.evaluate(
                 f"""
+                tasks.find(task => task.id === {task_id}).parse_status = 'parsed';
                 _cwActions[{task_id}] = {{
                     id: {task_id}, task_id: {task_id}, state: 'ready',
                     finding: 'Found', draft: 'Draft',
@@ -96,6 +97,7 @@ class TestCoworkDeepLink:
                 f"""
                 const task = tasks.find(item => item.id === {task_id});
                 Object.assign(task, {{
+                    parse_status: 'parsed',
                     cw_loaded: true, cw_state: 'ready', cw_seen_at: 'seen',
                     cw_finding: 'Found', cw_draft: 'Draft',
                     cw_dest_kind: 'none', cw_conversation_id: '{CONV_ID}'

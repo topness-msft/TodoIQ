@@ -54,3 +54,17 @@ def test_attendance_uncertainty_requires_an_explicit_ambiguity_signal():
 
 def test_exact_guest_members_still_require_confirmation():
     assert "Guest or external membership profiles" in COMMAND
+
+
+def test_exact_teams_membership_upgrades_manual_source_and_persists_context():
+    assert "set `source_type` to `chat`" in COMMAND
+    assert "source_snippet" in COMMAND
+    step4 = COMMAND[COMMAND.index("## Step 4"):]
+    assert "source_type=?" in step4
+    assert "source_snippet=?" in step4
+
+
+def test_failed_teams_membership_stays_retryable_without_partial_persistence():
+    assert "leave `source_type` unchanged" in COMMAND
+    assert "set `parse_status` back to `unparsed`" in COMMAND
+    assert "Do not persist a partial member" in COMMAND

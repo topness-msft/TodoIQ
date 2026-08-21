@@ -3852,12 +3852,20 @@ function cwOpenLink(a, label, title) {
 }
 
 function cwDestBlock(action, task) {
-    var d = CW_DEST[action.destination_kind] || CW_DEST['unknown'];
+    var isMeeting = !!(task && task.action_type === 'schedule-meeting');
+    var d = isMeeting
+        ? {risky: false, label: 'Calendar invite',
+           note: CW_ACTION_NOTE['schedule-meeting']}
+        : (CW_DEST[action.destination_kind] || CW_DEST['unknown']);
     var conv = action.conversation_id || '';
-    var risky = d.risky || !!action.is_broadcast;
+    var risky = !isMeeting && (d.risky || !!action.is_broadcast);
     var confirmed = !!action.destination_confirmed_at;
-    var display = action.destination_display || action.destination_ref || d.label;
-    var chan = CW_CHANNEL[action.delivery_channel] || null;
+    var meetingDestination = isMeeting
+        ? cwMeetingDestination(cwMeetingPeople(task))
+        : null;
+    var display = (meetingDestination && meetingDestination.display)
+        || action.destination_display || action.destination_ref || d.label;
+    var chan = isMeeting ? null : (CW_CHANNEL[action.delivery_channel] || null);
     // A channel with no recipient is a voice preference, not a destination. Its
     // note says "...to this recipient", so applying it where none is bound both
     // contradicts the line above it and displaces the standing instruction to
@@ -3875,14 +3883,14 @@ function cwDestBlock(action, task) {
     // Link straight to the conversation this is drafted for, so checking who
     // is actually in it is one click rather than a hunt through Teams.
     var srcUrl = (task && task.source_url) || '';
-    var openLink = srcUrl
+    var openLink = srcUrl && !isMeeting
         ? '<a class="cw-dest-open" href="' + cwEscapeAttr(srcUrl) + '" '
           + 'target="_blank" rel="noopener noreferrer" '
           + 'data-testid="dest-open">Open chat</a>'
         : '';
     return '<div class="cw-dest' + (risky ? ' is-risky' : '') + '">'
         + '<span class="d-icon">' + (risky ? '&#9888;' : '&#8627;') + '</span>'
-        + '<span><b>Drafted for:</b> '
+        + '<span><b>' + (isMeeting ? 'Invitees:' : 'Drafted for:') + '</b> '
         + '<span data-testid="' + (risky ? 'dest-risky' : 'dest-safe') + '">'
         + '<span data-testid="dest-status">' + escapeHtml(display) + '</span></span>'
         + (chan ? '<span class="cw-dest-chan" data-testid="dest-channel-chip">'
@@ -3893,9 +3901,11 @@ function cwDestBlock(action, task) {
         + (confirmed
             ? '<span class="cw-dest-badge" data-testid="dest-confirmed">&#10003; audience confirmed</span>'
             : '')
-        + '<button class="cw-dest-btn" type="button" data-testid="dest-change-btn" '
-        + 'onclick="cwOpenDestPicker(' + action.task_id + ')">'
-        + (confirmed ? 'Change' : 'Set destination') + '</button>'
+        + (isMeeting ? '' : (
+            '<button class="cw-dest-btn" type="button" data-testid="dest-change-btn" '
+            + 'onclick="cwOpenDestPicker(' + action.task_id + ')">'
+            + (confirmed ? 'Change' : 'Set destination') + '</button>'
+        ))
         + '</span>'
         + (conv ? '<button class="cw-debug-id" type="button" title="'
           + cwEscapeAttr(conv) + '" aria-label="Cowork troubleshooting ID">&#9432;</button>' : '')
@@ -4774,7 +4784,7 @@ function cwInteractionFields(taskId, interaction) {
                         + escapeAttr(option.value) + '" aria-pressed="' + selected + '" '
                         + 'onclick="cwChooseOption(' + taskId + ', this)">'
                         + cwChoiceVisual(option) + '<span class="cw-choice-copy"><b>'
-                        + escapeHtml(option.label) + '</b>'
+                        + escapeHtml(cwCleanChoiceDescription(option.label)) + '</b>'
                         + (option.description
                             ? '<small class="sr-only">'
                                 + escapeHtml(cwCleanChoiceDescription(option.description))
@@ -4845,8 +4855,7 @@ function cwInteractionFields(taskId, interaction) {
 
         function cwCleanChoiceDescription(description) {
             return String(description || '')
-                .replace(/\[slot:\{[^\]]+\}\]\s*/g, '')
-                .replace(/\[avail:\{[^\]]+\}\]\s*$/g, '')
+                .replace(/\[(?:slot|avail):\{[^\]]+\}\]\s*/g, '')
                 .trim();
         }
 
@@ -4860,7 +4869,7 @@ function cwInteractionFields(taskId, interaction) {
         function cwAvailabilityMatrix(taskId, question, value) {
             var attendees = cwSelectedAttendees(taskId);
             var options = question.options || [];
-            if (attendees.length < 2 || options.length < 2) return '';
+            if (attendees.length < 2 || options.length < 1) return '';
             var expected = attendees.map(function(person) { return person.email; }).sort();
             var rows = [];
             for (var i = 0; i < options.length; i += 1) {
@@ -4901,7 +4910,7 @@ function cwInteractionFields(taskId, interaction) {
                     + escapeAttr(row.option.value) + '" aria-pressed="' + pressed + '" '
                     + 'onclick="cwChooseOption(' + taskId + ', this)">'
                     + '<span class="cw-avail-time" role="rowheader" data-testid="cw-avail-row-label">'
-                    + escapeHtml(row.option.label) + '</span>'
+                    + escapeHtml(cwCleanChoiceDescription(row.option.label)) + '</span>'
                     + row.statuses.map(function(status, index) {
                         var label = status === 'tentative' ? 'Tentative'
                             : status[0].toUpperCase() + status.slice(1);

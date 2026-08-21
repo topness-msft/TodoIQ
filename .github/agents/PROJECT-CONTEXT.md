@@ -107,11 +107,31 @@ Cowork-powered draft, approval, and direct-action flows.
   | `/static/js/dashboard.js` | GET | 200 | Current static feature bundle served |
 
 - Demo verification additionally requires:
-  - exactly 12 seeded tasks, zero action rows after reset
-  - statuses: 5 suggested, 3 active; 1 each waiting, snoozed, completed, dismissed
-  - two suggested tasks carry deterministic `likely_resolved` activity
-  - active scenarios: Bobby Chang + Em D'Arcy scheduling, Raj Gopalakrishnan
-    Teams materials, Adrian Maclean email about Srini Raghavan
+  - exactly 17 seeded tasks and exactly 3 prebuilt action rows in `ready` state
+  - statuses: 7 suggested, 4 active, 2 dismissed; 1 each in progress, waiting,
+    snoozed, and completed
+  - four suggested tasks carry deterministic activity summaries; exactly two are
+    `likely_resolved`, with one each `activity_detected` and `may_be_resolved`
+  - source types cover chat, email, meeting, and manual tasks; action types cover
+    scheduling, Teams follow-up, email response, preparation, document review,
+    and awaiting-response flows
+  - chat/Teams, meeting, and email each have at least 3 source records
+  - prebuilt Cowork results cover one Teams delivery draft, one email delivery
+    draft, and one meeting scheduling preview; none has execution, destination
+    confirmation, delivery confirmation, or successful write-tool evidence
+  - the scheduling preview has Steve Jeffery, Rima Reyes, and Adrian Maclean as
+    confirmed attendees plus three query-backed 25-minute UTC options beginning
+    at 5 or 35 minutes past the hour
+  - all demo contacts are limited to Rima Reyes, Bobby Chang, Luis Camino, Steve
+    Jeffery, Manuela Pichler, Adrian Maclean, and Aamer Kaleem, with fictional
+    confirmed identity fields and UI-compatible alternatives arrays
+  - every task uses the fixed `2026-08-20T18:00:00Z` seed timestamp and every
+    source ID uses the `demo::` namespace; all 6 chat tasks use approved
+    fabricated `teams.microsoft.com/l/message/` URL shapes that
+    `parse_source_url` classifies as one-to-one, while non-chat URLs remain null
+  - every description is a substantive narrative naming a key person and
+    recording an August 2026 date, surrounding context, current state, and next
+    step; source summaries are dated narrative context rather than isolated quotes
   - `data/demo/settings.json` has `cowork_api_transport: true`
   - sync and standalone skill POST routes return 403
   - parsing, Cowork session, and approved execution flags are present on the

@@ -603,6 +603,73 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
     }
 
 
+def test_single_verified_time_stays_structured_and_hides_metadata(page: Page, base_url):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule the one available review"},
+    )
+    task_id = created.json()["task"]["id"]
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                {name: 'Bobby Chang', email: 'bobby.chang@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                interaction_request: {
+                    invocation_id: 'matrix-one',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'FindMeetingTimes+interaction',
+                        query_backed: true,
+                        attendees: [
+                            'bobby.chang@microsoft.com',
+                            'rima.reyes@microsoft.com'
+                        ]
+                    },
+                    questions: [{
+                        id: '0',
+                        question: 'Only one verified time is open. Should I book it?',
+                        options: [{
+                            value: 'Thu 3:35',
+                            label: 'Thu Aug 20 · 3:35 PM [slot:{"start":"2099-08-20T15:35:00-04:00","end":"2099-08-20T16:00:00-04:00","timezone":"Eastern Standard Time"}]',
+                            description: '[slot:{"start":"2099-08-20T15:35:00-04:00","end":"2099-08-20T16:00:00-04:00","timezone":"Eastern Standard Time"}] [avail:{"rima.reyes@microsoft.com":"free","bobby.chang@microsoft.com":"tentative"}]'
+                        }]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"matrix-one"}',
+                conversation_id: 't:u:matrix-one'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    expect(page.get_by_test_id("cw-avail-matrix")).to_be_visible()
+    expect(page.get_by_test_id("cw-avail-row")).to_have_count(1)
+    expect(page.get_by_test_id("cw-avail-cell")).to_have_count(2)
+    expect(page.get_by_test_id("cw-avail-row-label")).not_to_contain_text("[slot:")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "cowork-availability-single-slot.png"),
+        full_page=True,
+    )
+
+
 def test_invalid_availability_matrix_falls_back_to_time_pills(page: Page, base_url):
     page.goto(base_url + "/")
     page.evaluate(

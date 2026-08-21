@@ -1245,11 +1245,10 @@ class TestSchedulingDestinationNote:
         finally:
             _delete_task(page, base_url, task_id)
 
-    def test_a_broadcast_warning_still_outranks_the_scheduling_note(
+    def test_scheduling_uses_calendar_attendees_not_source_chat_audience(
         self, page: Page, base_url
     ):
-        """Safety must never be traded away for nicer copy. A group chat still
-        has to say everyone would see it, scheduling or not."""
+        """A Teams source can identify attendees, but the action targets a calendar."""
         task_id = _seed_task(page, base_url)
         try:
             page.goto(base_url + "/")
@@ -1273,8 +1272,21 @@ class TestSchedulingDestinationNote:
                 renderDetailPane(t);
                 """
             )
-            expect(page.get_by_test_id("dest-note")).to_contain_text("Everyone")
-            expect(page.get_by_test_id("dest-risky")).to_be_visible()
+            expect(page.get_by_test_id("dest-note")).to_contain_text("invite")
+            expect(page.get_by_test_id("dest-note")).not_to_contain_text("chat")
+            expect(page.get_by_test_id("dest-status")).to_have_text(
+                "Rima Reyes, Greg Howard"
+            )
+            expect(page.get_by_test_id("dest-risky")).to_have_count(0)
+            expect(page.get_by_test_id("dest-safe")).to_be_visible()
+            expect(page.get_by_test_id("dest-change-btn")).to_have_count(0)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR,
+                    "meeting-calendar-attendees-not-chat.png",
+                ),
+                full_page=True,
+            )
         finally:
             _delete_task(page, base_url, task_id)
 

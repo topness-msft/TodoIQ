@@ -3122,6 +3122,10 @@ _AVAILABILITY_MARKER_RE = re.compile(
 )
 _SLOT_MARKER_RE = re.compile(r"\[slot:(\{.*?\})\]", re.I)
 _FIND_MEETING_TIMES_TOOL = "mcp__outlook_calendar__FindMeetingTimes"
+_ATTENDEE_CLARIFICATION_RE = re.compile(
+    r"\b(?:attendee|attendees|invitee|invitees|who should attend|which people)\b",
+    re.I,
+)
 _UNKNOWN_TIMEZONE_RE = re.compile(
     r"(?:(?:time\s*zone|timezone).{0,32}(?:unknown|unconfirmed|not visible|"
     r"unavailable|uncertain|unclear|cannot|can't|could not|couldn't)|"
@@ -3249,6 +3253,7 @@ def certify_schedule_interaction(
     attendees,
     *,
     duration_minutes,
+    start_offset_minutes=None,
     now=None,
 ):
     """Certify query-backed, model-derived schedule choices."""
@@ -3264,6 +3269,10 @@ def certify_schedule_interaction(
     now_value = _parse_now(now)
     if now_value is None:
         return None
+    if start_offset_minutes is None:
+        start_offset_minutes = (
+            meeting_preferences() or {}
+        ).get("start_offset_minutes", 0)
     if not isinstance(interaction, dict):
         return None
     questions = interaction.get("questions")
@@ -3274,7 +3283,7 @@ def certify_schedule_interaction(
     if (
         question.get("multi_select")
         or not isinstance(options, list)
-        or len(options) != 3
+        or not 1 <= len(options) <= 3
     ):
         return None
     visible_text = " ".join(
@@ -3296,7 +3305,7 @@ def certify_schedule_interaction(
     if _UNKNOWN_TIMEZONE_RE.search(visible_text):
         return None
     values = [str(option.get("value") or "").strip() for option in options]
-    if any(not value for value in values) or len(set(values)) != 3:
+    if any(not value for value in values) or len(set(values)) != len(options):
         return None
     slots = []
     instants = set()
@@ -3318,7 +3327,14 @@ def certify_schedule_interaction(
         if any(status not in {"free", "tentative"} for status in normalized.values()):
             return None
         slot = _parse_slot_marker(description, duration_minutes, now_value)
-        if not slot or slot["instant"] in instants:
+        slot_start = (
+            datetime.fromisoformat(slot["start"]) if slot else None
+        )
+        if (
+            not slot
+            or slot_start.minute % 30 != start_offset_minutes % 30
+            or slot["instant"] in instants
+        ):
             return None
         instants.add(slot["instant"])
         slots.append({
@@ -3335,6 +3351,7 @@ def certify_schedule_interaction(
         "attendees": expected,
         "query_backed": True,
         "duration_minutes": duration_minutes,
+        "start_offset_minutes": start_offset_minutes,
         "slots": slots,
     }
     return certified
@@ -3369,6 +3386,32 @@ def schedule_text_only_interaction(interaction, attendees):
     return fallback
 
 
+def schedule_interaction_is_attendee_clarification(interaction) -> bool:
+    """Identify attendee questions so slot certification does not consume them."""
+    questions = interaction.get("questions") if isinstance(
+        interaction, dict
+    ) else None
+    if not isinstance(questions, list) or not questions:
+        return False
+    visible_prompt = " ".join(
+        str(value or "")
+        for question in questions
+        if isinstance(question, dict)
+        for value in (question.get("header"), question.get("question"))
+    )
+    has_slot_marker = any(
+        _SLOT_MARKER_RE.search(str(option.get("description") or ""))
+        for question in questions
+        if isinstance(question, dict)
+        for option in question.get("options") or []
+        if isinstance(option, dict)
+    )
+    return bool(
+        _ATTENDEE_CLARIFICATION_RE.search(visible_prompt)
+        and not has_slot_marker
+    )
+
+
 def schedule_interaction_is_certified(
     interaction,
     attendees,
@@ -3392,11 +3435,11 @@ def schedule_interaction_is_certified(
             and duration != duration_minutes
         )
         or not isinstance(slots, list)
-        or len(slots) != 3
+        or not 1 <= len(slots) <= 3
     ):
         return False
     now = datetime.now(timezone.utc)
-    return all(
+    parsed_slots = [
         _parse_slot_marker(
             "[slot:" + json.dumps({
                 "start": slot.get("start"),
@@ -3408,7 +3451,22 @@ def schedule_interaction_is_certified(
         )
         for slot in slots
         if isinstance(slot, dict)
-    ) and all(isinstance(slot, dict) for slot in slots)
+    ]
+    start_offset = evidence.get("start_offset_minutes")
+    if start_offset is None:
+        start_offset = (meeting_preferences() or {}).get("start_offset_minutes")
+    if start_offset is None and parsed_slots and parsed_slots[0]:
+        start_offset = datetime.fromisoformat(parsed_slots[0]["start"]).minute % 30
+    return (
+        isinstance(start_offset, int)
+        and not isinstance(start_offset, bool)
+        and len(parsed_slots) == len(slots)
+        and all(parsed_slots)
+        and all(
+            datetime.fromisoformat(slot["start"]).minute % 30 == start_offset % 30
+            for slot in parsed_slots
+        )
+    )
 
 
 def schedule_answer_is_safe(
@@ -3437,6 +3495,8 @@ def schedule_answer_is_safe(
         }
         if answer and answer in option_values:
             selected_option = True
+    if schedule_interaction_is_attendee_clarification(interaction):
+        return True
     if not selected_option:
         return True
     return schedule_interaction_is_certified(
@@ -4341,12 +4401,21 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                         interaction = _parse_aq_interaction(data)
                         if not interaction:
                             continue
-                        if schedule_people:
+                        if (
+                            schedule_people
+                            and not schedule_interaction_is_attendee_clarification(
+                                interaction
+                            )
+                        ):
+                            schedule_start_offset = (
+                                meeting_preferences() or {}
+                            ).get("start_offset_minutes", 0)
                             certified = certify_schedule_interaction(
                                 interaction,
                                 events,
                                 schedule_people,
                                 duration_minutes=schedule_duration,
+                                start_offset_minutes=schedule_start_offset,
                             )
                             if certified:
                                 interaction = certified
@@ -4354,7 +4423,9 @@ def _api_run_default(prompt, config, on_progress, conversation_id=None,
                                 correction = (
                                     "Recheck with FindMeetingTimes using every confirmed "
                                     "attendee email. Offer exactly three returned slots "
-                                    "with offset-aware [slot] metadata and complete "
+                                    f"that start {schedule_start_offset} minutes after "
+                                    "the hour or half-hour, with offset-aware [slot] "
+                                    "metadata and complete "
                                     "free/tentative [avail] evidence, or ask a text-only "
                                     "clarification. Do not say a timezone is unknown."
                                 )

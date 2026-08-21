@@ -120,8 +120,18 @@ when exact lookup fails.
    when membership and email are exact. Additional people found only through
    name search follow the Step 2c certainty rule.
 7. If exact membership/profile lookup fails, lacks an email, or is ambiguous, leave
-   the person unresolved and record the failure in the task description. Never
-   continue scheduling with an empty `key_people` list.
+   the person unresolved and record the failure in the task description. Exact
+   Teams-link resolution is all-or-nothing: every internal membership row must
+   resolve to one email-backed directory profile. Do not persist a partial member
+   list, do not continue to Step 3 or Step 4, leave `source_type` unchanged,
+   set `parse_status` back to `unparsed`, store the failure in `error_message`, and
+   continue with the next task so a later `/todo-parse` can retry. Never continue
+   scheduling with an empty or partial `key_people` list.
+8. When exact membership succeeds for every member, set `source_type` to `chat`
+   and create `source_snippet` as a concise narrative summary of the recent
+   conversation: date, who asked, relevant context, current state, and next step.
+   Do not store a raw quote, membership JSON, or machine identifiers in the
+   snippet.
 
 When several confirmed attendees remain, Cowork's existing availability matrix
 shows the time choices across every person. Before proposing times, use calendar
@@ -157,7 +167,13 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   ```
   Store as a JSON string in the `key_people` column. If WorkIQ can't resolve, store `[{"name": "John", "alternatives": [], "unresolved": true}]`.
 - **OOO check** (full parse only, not coaching-only re-parse): After resolving key_people, check if any key person is currently out of office. For the **first** (primary) person in key_people, call `ask_work_iq` with: "Check [full name]'s current presence and availability status. Are they showing as Out of Office in Teams or Outlook? Do they have an OOO status, automatic reply, or Out of Office presence set? Also check if I've received any recent automatic reply or OOO email from them. If they are OOO, when are they returning?" If they ARE out of office, set `waiting_activity` to: `{"status": "out_of_office", "return_date": "YYYY-MM-DD", "summary": "[OOO details]", "checked_at": "[now]"}` (use null for return_date if unknown). If they are NOT out of office, leave `waiting_activity` as null. This ensures the OOO badge shows immediately on the dashboard.
-- **source_type**: Do NOT change this field. Tasks entered via the dashboard are always 'manual'. Tasks created by /todo-refresh already have the correct source_type set from WorkIQ. Leave the existing value as-is.
+- **source_type**: Preserve the existing value except for a manually entered
+  `teams.microsoft.com` chat/message link whose Step 2d exact membership lookup
+  succeeded for every member. For that verified case, set `source_type` to
+  `chat`. If lookup fails or is partial, leave `source_type` unchanged and follow
+  the retryable failure path in Step 2d.
+- **source_snippet**: For a verified Teams-link parse, persist the substantive
+  narrative summary produced in Step 2d. Otherwise preserve the existing value.
 - **source_url**: Do NOT change or clear this field. A manually pasted Teams link is preserved here so the parsed task still links to the original conversation.
 - **related_meeting**: If a meeting is mentioned, describe it. Use WorkIQ if helpful: call `ask_work_iq` with "What meetings do I have related to [topic]?" **Important:** After resolving people in the key_people step, always use their full resolved names (e.g. "Jane Doe" not "Jane") in all subsequent WorkIQ queries for more precise results.
 - **action_type**: Classify the task into one of these action types based on intent:
@@ -348,11 +364,13 @@ conn.execute(
            key_people=?, related_meeting=?,
            coaching_text=?, action_type=?, skill_output=?,
            waiting_activity=?, is_quick_hit=?,
+           source_type=?, source_snippet=?,
            suggestion_refreshed_at=?, parse_status='parsed', updated_at=?
        WHERE id=?""",
     (title, description, priority, due_date, key_people,
      related_meeting, coaching_text, action_type, skill_output,
-     waiting_activity, is_quick_hit, now, now, task_id)
+     waiting_activity, is_quick_hit, source_type, source_snippet,
+     now, now, task_id)
 )
 conn.commit()
 conn.close()
