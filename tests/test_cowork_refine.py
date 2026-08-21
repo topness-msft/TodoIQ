@@ -64,6 +64,24 @@ class TestRefinePromptIsMinimal(unittest.TestCase):
         self.assertIn("[INTERACTION]", prompt)
         self.assertLess(prompt.index("[INTERACTION]"), prompt.index("[OUTPUT]"))
 
+    def test_it_omits_schedule_correction_without_a_duration(self):
+        prompt = compose_refine_prompt(
+            "Continue using exactly 2099-08-20T13:05:00-04:00 "
+            "to 2099-08-20T13:30:00-04:00.",
+            schedule_duration=None,
+        )
+        self.assertNotIn("[SCHEDULE CORRECTION]", prompt)
+        self.assertNotIn("fresh FindMeetingTimes", prompt)
+
+    def test_it_adds_schedule_correction_for_a_free_form_change(self):
+        prompt = compose_refine_prompt(
+            "Try a different week.",
+            schedule_duration=25,
+        )
+        self.assertIn("[SCHEDULE CORRECTION]", prompt)
+        self.assertIn("fresh FindMeetingTimes", prompt)
+        self.assertIn("25 minutes", prompt)
+
     def test_an_empty_instruction_is_rejected(self):
         for bad in ("", "   ", None):
             with self.subTest(bad=bad):

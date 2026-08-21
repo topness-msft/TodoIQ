@@ -4474,10 +4474,15 @@ class TestInteractionAnswer(CoworkAPITestBase):
         self.assertEqual(response.code, 202)
         self.assertEqual(self.answers, [])
         self.assertEqual(len(self.continuations), 1)
+        args, kwargs = self.continuations[0]
+        self.assertEqual(kwargs["schedule_duration"], 25)
         child = get_latest_task_action(tid)
         self.assertEqual(child["parent_action_id"], action["id"])
         self.assertIsNone(child["answered_interaction"])
         self.assertIn("Re-run FindMeetingTimes", child["redirect_text"])
+        self.assertIn("[SCHEDULE CORRECTION]", child["composed_prompt"])
+        self.assertIn("fresh FindMeetingTimes", child["composed_prompt"])
+        self.assertIn("25 minutes", child["composed_prompt"])
 
     def test_schedule_answer_persists_the_selected_certified_slot(self):
         from src.db import get_connection
@@ -4639,10 +4644,14 @@ class TestInteractionAnswer(CoworkAPITestBase):
         self.assertEqual(args[:2], (tid, "t:u:blocked"))
         self.assertIn("2099-08-20T13:05:00-04:00", args[2])
         self.assertIn("2099-08-20T13:30:00-04:00", args[2])
-        self.assertEqual(kwargs["schedule_duration"], 25)
+        self.assertIsNone(kwargs["schedule_duration"])
         child = get_latest_task_action(tid)
         self.assertEqual(child["parent_action_id"], parent["id"])
         self.assertIn("2099-08-20T13:05:00-04:00", child["redirect_text"])
+        self.assertIn("2099-08-20T13:05:00-04:00", child["composed_prompt"])
+        self.assertIn("2099-08-20T13:30:00-04:00", child["composed_prompt"])
+        self.assertNotIn("[SCHEDULE CORRECTION]", child["composed_prompt"])
+        self.assertNotIn("fresh FindMeetingTimes", child["composed_prompt"])
         record = json.loads(child["answered_interaction"])
         self.assertEqual(record["answers"], {"0": selected})
 

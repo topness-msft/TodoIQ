@@ -1895,7 +1895,9 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 composed_prompt=compose_refine_prompt(
                     instruction,
                     interaction_mode="interaction",
-                    schedule_duration=schedule_duration,
+                    schedule_duration=(
+                        None if selected_slot else schedule_duration
+                    ),
                 ),
                 conversation_id=action["conversation_id"],
                 island_url=action.get("island_url"),
@@ -1919,7 +1921,9 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                     log_dir=LOG_DIR_OVERRIDE,
                     action_id=new_action["id"],
                     schedule_people=schedule_attendees(task),
-                    schedule_duration=schedule_duration,
+                    schedule_duration=(
+                        None if selected_slot else schedule_duration
+                    ),
                 )
             except AlreadyRunning:
                 update_task_action(
