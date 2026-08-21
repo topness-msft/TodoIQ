@@ -1504,6 +1504,7 @@ class TestGetPreview(CoworkAPITestBase):
         self.assertIsNone(updated["error"])
         interaction = json.loads(updated["blocked_question"])
         self.assertEqual(len(interaction["schedule_evidence"]["slots"]), 2)
+        self.assertEqual(interaction["questions"][0]["id"], "0")
         self.assertEqual(
             set(interaction["schedule_evidence"]["attendees"]),
             {"sally.shi@microsoft.com", "ameer@microsoft.com"},
@@ -4265,7 +4266,6 @@ class TestInteractionAnswer(CoworkAPITestBase):
         interaction = {
             "invocation_id": "invoke-1",
             "questions": [{
-                "id": "0",
                 "producer_id": "slot",
                 "header": "Pick a time",
                 "question": "Which time works?",

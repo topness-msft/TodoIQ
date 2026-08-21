@@ -574,12 +574,28 @@ def _decode_interaction_request(raw):
     if not raw:
         return None
     if isinstance(raw, dict):
-        return raw
-    try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+        value = raw
+    else:
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(value, dict):
         return None
-    return value if isinstance(value, dict) else None
+    questions = value.get("questions")
+    if isinstance(questions, list):
+        value = dict(value)
+        value["questions"] = [
+            {
+                **question,
+                "id": str(question.get("id") or index),
+                "producer_id": str(question.get("producer_id") or ""),
+            }
+            if isinstance(question, dict)
+            else question
+            for index, question in enumerate(questions)
+        ]
+    return value
 
 
 def _recover_blocked_question(action):

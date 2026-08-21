@@ -3443,6 +3443,8 @@ def schedule_interaction_from_text(
     interaction = {
         "invocation_id": str(uuid.uuid5(uuid.NAMESPACE_URL, stable_source)),
         "questions": [{
+            "id": "0",
+            "producer_id": "",
             "header": "Choose a meeting time",
             "question": "Which available time should I use for the meeting?",
             "multi_select": False,
