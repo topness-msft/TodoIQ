@@ -1625,6 +1625,269 @@ class TestGetPreview(CoworkAPITestBase):
         self.assertEqual(updated["state"], "ready")
         self.assertIsNone(updated["error"])
 
+    def test_selected_certified_schedule_auto_executes_after_preview_validation(self):
+        from src.db import get_connection
+        from src.handlers import cowork as cowork_handler
+        from src.models import create_task_action, get_latest_task_action
+
+        attendees = [
+            "jay.padimiti@microsoft.com",
+            "rima.reyes@microsoft.com",
+        ]
+        tid = self.make_task(
+            title="Schedule the launch review",
+            description="Schedule a 25-minute launch review.",
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Jay Padimiti", "email": attendees[0]},
+                {"name": "Rima Reyes", "email": attendees[1]},
+            ]),
+        )
+        selected = "Thursday, Aug 20, 1:05 PM ET"
+        slot = {
+            "value": selected,
+            "start": "2099-08-20T13:05:00-04:00",
+            "end": "2099-08-20T13:30:00-04:00",
+            "timezone": "Eastern Standard Time",
+            "availability": {email: "free" for email in attendees},
+        }
+        answered = json.dumps({
+            "kind": "interaction_answer",
+            "question_raw": "{}",
+            "answers": {"0": selected},
+            "interaction": {
+                "schedule_evidence": {
+                    "valid": True,
+                    "source": "FindMeetingTimes+interaction",
+                    "query_backed": True,
+                    "attendees": attendees,
+                    "duration_minutes": 25,
+                    "slots": [slot],
+                },
+            },
+        })
+        destination_ref = json.dumps(attendees, separators=(",", ":"))
+        action = create_task_action(
+            tid,
+            action_type="schedule-meeting",
+            conversation_id="tenant:user:schedule",
+            destination_kind="group",
+            destination_ref=destination_ref,
+            destination_display="Jay Padimiti, Rima Reyes",
+            destination_source="auto_key_people",
+            answered_interaction=answered,
+            interaction_mode="interaction",
+        )
+        event = {
+            "subject": "Launch review",
+            "start": slot["start"],
+            "end": slot["end"],
+            "time_zone": slot["timezone"],
+            "attendees": attendees,
+            "body": "Review launch readiness and next steps.",
+            "is_online_meeting": True,
+        }
+        result = {
+            "stdout": json.dumps({
+                "terminal_status": "ok",
+                "conversation_id": action["conversation_id"],
+                "tool_trace": [{
+                    "tool_name": "mcp__outlook_calendar__CreateEvent",
+                    "ok": True,
+                    "input": json.dumps(event),
+                }],
+                "text": (
+                    "**Launch review**\n\n"
+                    "**Agenda**\n- Review launch readiness\n- Confirm next steps"
+                ),
+            }),
+            "stderr": "",
+            "error": None,
+            "exit_code": 0,
+            "cost_credits": 1,
+        }
+        started = []
+
+        with mock.patch.object(cowork_handler, "get_result", return_value=result), \
+                mock.patch.object(cowork_handler, "is_running", return_value=False), \
+                mock.patch.object(
+                    cowork_handler,
+                    "start_execution",
+                    side_effect=lambda *args, **kwargs: started.append((args, kwargs)),
+                ):
+            updated = cowork_handler._finalise(action)
+            cowork_handler._finalise(action)
+
+        self.assertEqual(updated["state"], "executing")
+        self.assertEqual(len(started), 1)
+        execution = get_latest_task_action(tid)
+        self.assertEqual(execution["parent_action_id"], action["id"])
+        self.assertEqual(execution["state"], "executing")
+        self.assertIsNotNone(execution["destination_confirmed_at"])
+        args, kwargs = started[0]
+        self.assertEqual(args[0], tid)
+        self.assertEqual(args[2], action["conversation_id"])
+        self.assertEqual(kwargs["approval_kind"], "calendar")
+        self.assertEqual(
+            {
+                key: kwargs["approved_calendar_event"][key]
+                for key in event
+            },
+            event,
+        )
+        conn = get_connection()
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM task_actions WHERE parent_action_id=?",
+                (action["id"],),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_selected_schedule_does_not_auto_execute_after_attendee_drift(self):
+        from src.handlers import cowork as cowork_handler
+
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Rima Reyes",
+                "email": "rima.reyes@microsoft.com",
+            }]),
+        )
+        selected = "Thursday, Aug 20, 1:05 PM ET"
+        event = {
+            "subject": "Launch review",
+            "start": "2099-08-20T13:05:00-04:00",
+            "end": "2099-08-20T13:30:00-04:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": ["jay.padimiti@microsoft.com"],
+            "body": "Review launch readiness.",
+            "is_online_meeting": True,
+        }
+        action = {
+            "id": 999,
+            "task_id": tid,
+            "action_type": "schedule-meeting",
+            "state": "ready",
+            "destination_ref": "jay.padimiti@microsoft.com",
+            "destination_display": "Jay Padimiti",
+            "answered_interaction": json.dumps({
+                "kind": "interaction_answer",
+                "answers": {"0": selected},
+                "interaction": {
+                    "schedule_evidence": {
+                        "valid": True,
+                        "query_backed": True,
+                        "attendees": ["jay.padimiti@microsoft.com"],
+                        "duration_minutes": 25,
+                        "slots": [{
+                            "value": selected,
+                            "start": event["start"],
+                            "end": event["end"],
+                            "timezone": event["time_zone"],
+                        }],
+                    },
+                },
+            }),
+        }
+        started = []
+
+        with mock.patch.object(
+            cowork_handler,
+            "start_execution",
+            side_effect=lambda *args, **kwargs: started.append((args, kwargs)),
+        ):
+            updated = cowork_handler._auto_execute_selected_schedule(
+                action, cowork_handler.get_task(tid), event
+            )
+
+        self.assertIs(updated, action)
+        self.assertEqual(started, [])
+
+    def test_selected_schedule_launch_failure_is_execute_unconfirmed(self):
+        from src.db import get_connection
+        from src.handlers import cowork as cowork_handler
+        from src.models import create_task_action, get_latest_task_action
+
+        attendee = "rima.reyes@microsoft.com"
+        tid = self.make_task(
+            action_type="schedule-meeting",
+            key_people=json.dumps([{
+                "name": "Rima Reyes",
+                "email": attendee,
+            }]),
+        )
+        selected = "Thursday, Aug 20, 1:05 PM ET"
+        event = {
+            "subject": "Launch review",
+            "start": "2099-08-20T13:05:00-04:00",
+            "end": "2099-08-20T13:30:00-04:00",
+            "time_zone": "Eastern Standard Time",
+            "attendees": [attendee],
+            "body": "Review launch readiness.",
+            "is_online_meeting": True,
+        }
+        action = create_task_action(
+            tid,
+            action_type="schedule-meeting",
+            conversation_id="tenant:user:schedule-failure",
+            destination_kind="one_to_one",
+            destination_ref=attendee,
+            destination_display="Rima Reyes",
+            destination_source="auto_key_people",
+            answered_interaction=json.dumps({
+                "kind": "interaction_answer",
+                "answers": {"0": selected},
+                "interaction": {
+                    "schedule_evidence": {
+                        "valid": True,
+                        "query_backed": True,
+                        "attendees": [attendee],
+                        "duration_minutes": 25,
+                        "slots": [{
+                            "value": selected,
+                            "start": event["start"],
+                            "end": event["end"],
+                            "timezone": event["time_zone"],
+                        }],
+                    },
+                },
+            }),
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='ready',finding=? WHERE id=?",
+            ("**Launch review**\n\n**Agenda**\n- Review launch readiness", action["id"]),
+        )
+        conn.commit()
+        conn.close()
+        action = get_latest_task_action(tid)
+        task = cowork_handler.get_task(tid)
+        self.assertEqual(cowork_handler._unresolved_schedule_people(task), [])
+        self.assertEqual(
+            cowork_handler._schedule_destination(
+                cowork_handler.schedule_attendees(task)
+            ),
+            (attendee, "Rima Reyes"),
+        )
+        self.assertEqual(action["destination_ref"], attendee)
+        self.assertEqual(action["destination_display"], "Rima Reyes")
+        self.assertTrue(cowork_handler._selected_schedule_slot(action)[0])
+
+        with mock.patch.object(
+            cowork_handler,
+            "start_execution",
+            side_effect=RuntimeError("calendar transport unavailable"),
+        ):
+            updated = cowork_handler._auto_execute_selected_schedule(
+                action, task, event
+            )
+
+        self.assertEqual(updated["state"], "execute_unconfirmed")
+        self.assertEqual(updated["parent_action_id"], action["id"])
+        self.assertIn("Could not create the selected meeting", updated["error"])
+
     def test_calendar_execution_requires_a_future_start(self):
         from src.services.calendar_time import calendar_event_is_future
 

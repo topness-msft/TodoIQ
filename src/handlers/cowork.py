@@ -627,6 +627,87 @@ def _schedule_blocked_question_recovery(action):
     return None
 
 
+def _auto_execute_selected_schedule(action, task, approved_event):
+    """Create a selected certified meeting without asking for a second approval."""
+    if (
+        action.get("state") != "ready"
+        or not approved_event
+        or not task
+        or task.get("action_type") != "schedule-meeting"
+    ):
+        return action
+    has_slot_binding, _ = _selected_schedule_slot(action)
+    if not has_slot_binding:
+        return action
+    unresolved = _unresolved_schedule_people(task)
+    current_ref, current_display = _schedule_destination(schedule_attendees(task))
+    if (
+        unresolved
+        or not current_ref
+        or action.get("destination_ref") != current_ref
+        or action.get("destination_display") != current_display
+        or not calendar_event_is_future(
+            approved_event, now=NOW_FN() if NOW_FN is not None else None
+        )
+        or calendar_event_duration_minutes(approved_event)
+        != schedule_duration_minutes(task)
+    ):
+        return action
+
+    if not action.get("destination_confirmed_at"):
+        action = confirm_destination(
+            action["id"],
+            None,
+            current_ref,
+            current_display,
+            "schedule_selection",
+        ) or action
+    if not action.get("destination_confirmed_at"):
+        return action
+
+    approved_snapshot = {
+        "parent_action_id": action["id"],
+        "draft": final_action_draft(action),
+        "destination_ref": action.get("destination_ref") or "",
+        "destination_display": action.get("destination_display") or "",
+        "delivery_channel": action.get("delivery_channel") or "",
+        "destination_confirmed_at": action.get("destination_confirmed_at") or "",
+    }
+    execution = create_execution_action(action["id"], approved_snapshot)
+    if not execution:
+        return action
+    prompt = compose_execution_prompt(execution)
+    execution = update_task_action(
+        execution["id"],
+        frozenset({"composed_prompt"}),
+        composed_prompt=prompt,
+    ) or execution
+    try:
+        start_execution(
+            action["task_id"],
+            prompt,
+            execution["conversation_id"],
+            approval_kind="calendar",
+            approved_snapshot=approved_snapshot,
+            approved_calendar_event=approved_event,
+            action_id=execution["id"],
+            log_dir=LOG_DIR_OVERRIDE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("could not auto-create selected calendar meeting")
+        message = (
+            f"Could not create the selected meeting: {exc}. Delivery could not "
+            "be confirmed. Check the calendar before retrying."
+        )
+        return update_task_action(
+            execution["id"],
+            frozenset({"state", "error"}),
+            state="execute_unconfirmed",
+            error=message,
+        ) or execution
+    return execution
+
+
 def _finalise(action: dict) -> dict:
     """Fold a finished subprocess result into the action row.
 
@@ -760,6 +841,15 @@ def _finalise(action: dict) -> dict:
 
     updated = update_task_action(action["id"], frozenset(fields), **fields)
     row = updated or action
+
+    if row.get("action_type") == "schedule-meeting":
+        task = get_task(row["task_id"])
+        approved_event = _preview_calendar_event(row)
+        auto_execution = _auto_execute_selected_schedule(
+            row, task, approved_event
+        )
+        if auto_execution.get("id") != row.get("id"):
+            return auto_execution
 
     # Only an unambiguous 1:1 is safe to confirm without the user looking. Any
     # broadcast audience stays unconfirmed until it is reviewed in the picker.
@@ -1771,9 +1861,10 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 instruction = (
                     "Continue the scheduling preview using exactly this certified "
                     f"slot: {selected_slot['start']} to {selected_slot['end']} "
-                    f"({selected_slot['timezone']}). Prepare the calendar event "
-                    "preview with the existing confirmed attendees, title, and "
-                    "agenda, but do not create or send it yet."
+                    f"({selected_slot['timezone']}). Prepare the exact calendar "
+                    "event with the existing confirmed attendees, title, and "
+                    "agenda for immediate creation after Riveter validates it. "
+                    "Do not ask for another confirmation."
                 )
                 child_answer = answer_record
             else:
