@@ -3885,6 +3885,38 @@ class TestEnrichExecutingState(CoworkAPITestBase):
         )
         self.assertEqual(len(self.store_calls), 1)
 
+    def test_completed_schedule_preview_prefers_persisted_chooser(self):
+        self.handler.HANDOFF_FN = lambda _cid: (_ for _ in ()).throw(
+            AssertionError("completed chooser must not consult runtime status")
+        )
+        interaction = {
+            "invocation_id": "certified-slots",
+            "questions": [{
+                "question": "Which time?",
+                "options": [{"value": "slot-1", "label": "Monday 1:05 PM"}],
+            }],
+        }
+        action = {
+            "id": 9004,
+            "task_id": 1,
+            "state": "previewing",
+            "action_type": "schedule-meeting",
+            "terminal_status": "ok",
+            "conversation_id": "tenant:user:completed",
+            "destination_kind": "none",
+            "blocked_question": json.dumps(interaction),
+        }
+
+        with mock.patch.object(
+            self.handler, "schedule_interaction_is_certified", return_value=True
+        ):
+            enriched = self.handler._enrich(action)
+
+        self.assertIs(enriched["waiting_on_user"], True)
+        self.assertEqual(
+            enriched["interaction_request"]["invocation_id"], "certified-slots"
+        )
+
 
 class TestInteractionAnswer(CoworkAPITestBase):
     def setUp(self):

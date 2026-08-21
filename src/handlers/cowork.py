@@ -509,6 +509,13 @@ def _enrich(action: dict) -> dict:
         action["interaction_request"] = None
     elif action.get("state") == "previewing" and demo_mode():
         action["waiting_on_user"] = bool(action.get("interaction_request"))
+    elif (
+        action.get("state") == "previewing"
+        and action.get("action_type") == "schedule-meeting"
+        and action.get("terminal_status") == "ok"
+        and action.get("interaction_request")
+    ):
+        action["waiting_on_user"] = True
     elif action.get("state") == "previewing" and action.get("conversation_id"):
         try:
             status = (HANDOFF_FN or handoff_status)(action["conversation_id"])
