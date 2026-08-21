@@ -124,6 +124,7 @@ class BlockedRunTest(unittest.TestCase):
             "invocation_id": "execution-question",
             "questions": [{
                 "id": "0",
+                "producer_id": "",
                 "question": "Use the earlier draft or cancel?",
                 "options": [],
             }],

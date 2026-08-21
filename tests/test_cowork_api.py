@@ -1809,7 +1809,11 @@ class TestGetPreview(CoworkAPITestBase):
     def test_selected_schedule_launch_failure_is_execute_unconfirmed(self):
         from src.db import get_connection
         from src.handlers import cowork as cowork_handler
-        from src.models import create_task_action, get_latest_task_action
+        from src.models import (
+            confirm_destination,
+            create_task_action,
+            get_latest_task_action,
+        )
 
         attendee = "rima.reyes@microsoft.com"
         tid = self.make_task(
@@ -1863,6 +1867,13 @@ class TestGetPreview(CoworkAPITestBase):
         )
         conn.commit()
         conn.close()
+        self.assertIsNotNone(confirm_destination(
+            action["id"],
+            None,
+            attendee,
+            "Rima Reyes",
+            "schedule_selection",
+        ))
         action = get_latest_task_action(tid)
         task = cowork_handler.get_task(tid)
         self.assertEqual(cowork_handler._unresolved_schedule_people(task), [])
@@ -1875,8 +1886,35 @@ class TestGetPreview(CoworkAPITestBase):
         self.assertEqual(action["destination_ref"], attendee)
         self.assertEqual(action["destination_display"], "Rima Reyes")
         self.assertTrue(cowork_handler._selected_schedule_slot(action)[0])
+        execution = create_task_action(
+            tid,
+            action_type="schedule-meeting",
+            conversation_id=action["conversation_id"],
+            destination_kind=action["destination_kind"],
+            destination_ref=action["destination_ref"],
+            destination_display=action["destination_display"],
+            destination_source=action["destination_source"],
+            destination_confirmed_at=action["destination_confirmed_at"],
+            parent_action_id=action["id"],
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET state='executing' WHERE id=?",
+            (execution["id"],),
+        )
+        conn.commit()
+        conn.close()
+        execution = get_latest_task_action(tid)
 
         with mock.patch.object(
+            cowork_handler, "create_execution_action", return_value=execution
+        ), mock.patch.object(
+            cowork_handler, "calendar_event_is_future", return_value=True
+        ), mock.patch.object(
+            cowork_handler, "calendar_event_duration_minutes", return_value=25
+        ), mock.patch.object(
+            cowork_handler, "schedule_duration_minutes", return_value=25
+        ), mock.patch.object(
             cowork_handler,
             "start_execution",
             side_effect=RuntimeError("calendar transport unavailable"),
@@ -4149,6 +4187,24 @@ class TestEnrichExecutingState(CoworkAPITestBase):
         )
         self.assertEqual(len(self.store_calls), 1)
 
+    def test_decode_normalizes_numeric_and_missing_question_ids(self):
+        decoded = self.handler._decode_interaction_request(json.dumps({
+            "invocation_id": "legacy",
+            "questions": [
+                {"id": 0, "question": "First?", "options": []},
+                {"question": "Second?", "options": []},
+            ],
+        }))
+
+        self.assertEqual(
+            [question["id"] for question in decoded["questions"]],
+            ["0", "1"],
+        )
+        self.assertEqual(
+            [question["producer_id"] for question in decoded["questions"]],
+            ["", ""],
+        )
+
     def test_completed_schedule_preview_prefers_persisted_chooser(self):
         self.handler.HANDOFF_FN = lambda _cid: (_ for _ in ()).throw(
             AssertionError("completed chooser must not consult runtime status")
@@ -4179,6 +4235,12 @@ class TestEnrichExecutingState(CoworkAPITestBase):
         self.assertIs(enriched["waiting_on_user"], True)
         self.assertEqual(
             enriched["interaction_request"]["invocation_id"], "certified-slots"
+        )
+        self.assertEqual(
+            enriched["interaction_request"]["questions"][0]["id"], "0"
+        )
+        self.assertEqual(
+            enriched["interaction_request"]["questions"][0]["producer_id"], ""
         )
 
 
@@ -4292,6 +4354,42 @@ class TestInteractionAnswer(CoworkAPITestBase):
     def test_it_answers_the_same_live_conversation(self):
         tid = self._blocked()
         response = self._answer_request(tid)
+        self.assertEqual(response.code, 202)
+        self.assertEqual(
+            self.answers,
+            [("t:u:blocked", "invoke-1", {"0": "Use A"})],
+        )
+        body = json.loads(response.body)
+        self.assertFalse(body["action"]["waiting_on_user"])
+        self.assertEqual(body["action"]["blocked_question"], "")
+
+    def test_it_answers_a_legacy_idless_question_using_the_normalized_id(self):
+        from src.db import get_connection
+
+        tid = self._blocked()
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, blocked_question FROM task_actions WHERE task_id=?",
+            (tid,),
+        ).fetchone()
+        interaction = json.loads(row["blocked_question"])
+        interaction["questions"][0].pop("id")
+        interaction["questions"][0].pop("producer_id")
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=? WHERE id=?",
+            (json.dumps(interaction), row["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        visible = json.loads(
+            self.fetch(f"/api/tasks/{tid}/cowork").body
+        )["action"]["interaction_request"]
+        self.assertEqual(visible["questions"][0]["id"], "0")
+        self.assertEqual(visible["questions"][0]["producer_id"], "")
+
+        response = self._answer_request(tid, {"0": "Use A"})
+
         self.assertEqual(response.code, 202)
         self.assertEqual(
             self.answers,
@@ -4420,8 +4518,6 @@ class TestInteractionAnswer(CoworkAPITestBase):
         interaction = {
             "invocation_id": "invoke-1",
             "questions": [{
-                "id": "0",
-                "producer_id": "slot",
                 "header": "Pick a time",
                 "question": "Which time works?",
                 "multi_select": False,
