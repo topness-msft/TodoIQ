@@ -3280,13 +3280,14 @@ textarea.cw-draft {
 .cw-refine-actions { display: flex; gap: 14px; padding-top: 8px; }
 .cw-blocked-question {
     margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-primary);
-    background: var(--bg-primary); color: var(--text-primary);
+    border-radius: 8px; background: var(--bg-primary); color: var(--text-primary);
 }
 .cw-query-backed-note {
     display: flex; gap: 6px; align-items: baseline; margin: 10px 0;
     padding: 8px 10px; border-left: 3px solid var(--accent);
     background: color-mix(in srgb, var(--accent) 7%, transparent);
     color: var(--text-secondary); font-size: 11px; line-height: 1.4;
+    border-radius: 8px;
 }
 .cw-query-backed-note b { color: var(--text-primary); white-space: nowrap; }
 .cw-answer-box { margin-top: 8px; min-height: 72px; }
