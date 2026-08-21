@@ -497,7 +497,29 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
                             'greg.howard@microsoft.com',
                             'rima.reyes@microsoft.com',
                             'sarah.chen@microsoft.com'
-                        ]
+                        ],
+                        slots: [{
+                            value: 'Mon 10:05',
+                            availability: {
+                                'rima.reyes@microsoft.com': 'free',
+                                'greg.howard@microsoft.com': 'tentative',
+                                'sarah.chen@microsoft.com': 'tentative'
+                            }
+                        }, {
+                            value: 'Tue 1:05',
+                            availability: {
+                                'rima.reyes@microsoft.com': 'free',
+                                'greg.howard@microsoft.com': 'free',
+                                'sarah.chen@microsoft.com': 'free'
+                            }
+                        }, {
+                            value: 'Wed 3:05',
+                            availability: {
+                                'rima.reyes@microsoft.com': 'free',
+                                'greg.howard@microsoft.com': 'free',
+                                'sarah.chen@microsoft.com': 'tentative'
+                            }
+                        }]
                     },
                     questions: [{
                         id: '0',
@@ -511,9 +533,9 @@ def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url
                             label: 'Tue Aug 18 · 1:05 PM',
                             description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"free"}]'
                         }, {
-                            value: 'Wed 3:05',
+                            value: ' Wed 3:05 ',
                             label: 'Wed Aug 19 · 3:05 PM',
-                            description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free","sarah.chen@microsoft.com":"tentative"}]'
+                            description: '[avail:{"rima.reyes@microsoft.com":"busy"}] Agenda: review launch readiness.'
                         }]
                     }]
                 },
@@ -648,7 +670,7 @@ def test_single_verified_time_stays_structured_and_hides_metadata(page: Page, ba
                         options: [{
                             value: 'Thu 3:35',
                             label: 'Thu Aug 20 · 3:35 PM [slot:{"start":"2099-08-20T15:35:00-04:00","end":"2099-08-20T16:00:00-04:00","timezone":"Eastern Standard Time"}]',
-                            description: '[slot:{"start":"2099-08-20T15:35:00-04:00","end":"2099-08-20T16:00:00-04:00","timezone":"Eastern Standard Time"}] [avail:{"rima.reyes@microsoft.com":"free","bobby.chang@microsoft.com":"tentative"}]'
+                            description: '[slot:{"start":"2099-08-20T15:35:00-04:00","end":"2099-08-20T16:00:00-04:00","timezone":"Eastern Standard Time"}] [avail:{"rima.reyes@microsoft.com":"free"}] [avail:{"bobby.chang@microsoft.com":"tentative"}] Agenda: review launch readiness.'
                         }]
                     }]
                 },
@@ -661,6 +683,8 @@ def test_single_verified_time_stays_structured_and_hides_metadata(page: Page, ba
     )
 
     expect(page.get_by_test_id("cw-avail-matrix")).to_be_visible()
+    expect(page.get_by_test_id("cw-choice-grid")).to_have_count(0)
+    expect(page.get_by_test_id("cw-avail-row-label")).not_to_contain_text("Agenda")
     expect(page.get_by_test_id("cw-avail-row")).to_have_count(1)
     expect(page.get_by_test_id("cw-avail-cell")).to_have_count(2)
     expect(page.get_by_test_id("cw-avail-row-label")).not_to_contain_text("[slot:")
@@ -692,6 +716,61 @@ def test_invalid_availability_matrix_falls_back_to_time_pills(page: Page, base_u
                         value: 'A',
                         label: 'Monday',
                         description: '[avail:{"rima.reyes@microsoft.com":"free"}]'
+                    }, {
+                        value: 'B',
+                        label: 'Tuesday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"free","greg.howard@microsoft.com":"free"}]'
+                    }]
+                }]
+            });
+        }"""
+    )
+
+    expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
+    expect(page.get_by_test_id("cw-choice")).to_have_count(2)
+
+    page.evaluate(
+        """() => {
+            document.body.innerHTML = cwInteractionFields(98, {
+                schedule_evidence: {
+                    slots: [{
+                        value: 'Different option',
+                        availability: {
+                            'rima.reyes@microsoft.com': 'free',
+                            'greg.howard@microsoft.com': 'free'
+                        }
+                    }]
+                },
+                questions: [{
+                    id: '0',
+                    question: 'Which time?',
+                    options: [{
+                        value: 'A',
+                        label: 'Monday',
+                        description: ''
+                    }, {
+                        value: 'B',
+                        label: 'Tuesday',
+                        description: ''
+                    }]
+                }]
+            });
+        }"""
+    )
+
+    expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
+    expect(page.get_by_test_id("cw-choice")).to_have_count(2)
+
+    page.evaluate(
+        """() => {
+            document.body.innerHTML = cwInteractionFields(98, {
+                questions: [{
+                    id: '0',
+                    question: 'Which time?',
+                    options: [{
+                        value: 'A',
+                        label: 'Monday',
+                        description: '[avail:{"rima.reyes@microsoft.com":"free"}] [avail:{"rima.reyes@microsoft.com":"tentative","greg.howard@microsoft.com":"free"}]'
                     }, {
                         value: 'B',
                         label: 'Tuesday',

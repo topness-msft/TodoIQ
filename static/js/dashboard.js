@@ -4765,7 +4765,7 @@ function cwInteractionFields(taskId, interaction) {
         var value = buffered[id] || '';
         var input;
         if (question.options && question.options.length) {
-            var availability = cwAvailabilityMatrix(taskId, question, value);
+            var availability = cwAvailabilityMatrix(taskId, question, value, evidence);
             var selectedValues = value.split('\n').filter(Boolean);
             var usesKnownOptions = selectedValues.length > 0
                 && selectedValues.every(function(selectedValue) {
@@ -4835,11 +4835,7 @@ function cwInteractionFields(taskId, interaction) {
             return attendees;
         }
 
-        function cwParseAvailability(description) {
-            var match = String(description || '').match(/\[avail:(\{[^\]]+\})\]\s*$/);
-            if (!match) return null;
-            var parsed;
-            try { parsed = JSON.parse(match[1]); } catch (_err) { return null; }
+        function cwNormalizeAvailability(parsed) {
             if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return null;
             var statuses = {};
             var allowed = ['free', 'tentative'];
@@ -4847,10 +4843,31 @@ function cwInteractionFields(taskId, interaction) {
                 if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
                 var email = String(key).trim().toLowerCase();
                 var status = String(parsed[key]).trim().toLowerCase();
-                if (!email || allowed.indexOf(status) === -1) return null;
+                if (!email || allowed.indexOf(status) === -1
+                        || (statuses[email] && statuses[email] !== status)) return null;
                 statuses[email] = status;
             }
             return statuses;
+        }
+
+        function cwParseAvailability(description) {
+            var marker = /\[avail:(\{[^\]]+\})\]/g;
+            var statuses = {};
+            var match;
+            var found = false;
+            while ((match = marker.exec(String(description || ''))) !== null) {
+                var parsed;
+                try { parsed = JSON.parse(match[1]); } catch (_err) { return null; }
+                parsed = cwNormalizeAvailability(parsed);
+                if (!parsed) return null;
+                found = true;
+                for (var email in parsed) {
+                    if (!Object.prototype.hasOwnProperty.call(parsed, email)) continue;
+                    if (statuses[email] && statuses[email] !== parsed[email]) return null;
+                    statuses[email] = parsed[email];
+                }
+            }
+            return found ? statuses : null;
         }
 
         function cwCleanChoiceDescription(description) {
@@ -4866,14 +4883,25 @@ function cwInteractionFields(taskId, interaction) {
                 .toUpperCase();
         }
 
-        function cwAvailabilityMatrix(taskId, question, value) {
+        function cwAvailabilityMatrix(taskId, question, value, evidence) {
             var attendees = cwSelectedAttendees(taskId);
             var options = question.options || [];
             if (attendees.length < 2 || options.length < 1) return '';
             var expected = attendees.map(function(person) { return person.email; }).sort();
+            var evidenceByValue = {};
+            var evidenceSlots = evidence && Array.isArray(evidence.slots)
+                ? evidence.slots : [];
+            for (var slotIndex = 0; slotIndex < evidenceSlots.length; slotIndex += 1) {
+                var slot = evidenceSlots[slotIndex];
+                var slotValue = String(slot && slot.value || '').trim();
+                if (!slotValue || evidenceByValue[slotValue]) return '';
+                evidenceByValue[slotValue] = cwNormalizeAvailability(slot.availability);
+            }
             var rows = [];
             for (var i = 0; i < options.length; i += 1) {
-                var statuses = cwParseAvailability(options[i].description);
+                var optionValue = String(options[i].value || '').trim();
+                var statuses = evidenceByValue[optionValue]
+                    || cwParseAvailability(options[i].description);
                 if (!statuses) return '';
                 var actual = Object.keys(statuses).sort();
                 if (actual.length !== expected.length
