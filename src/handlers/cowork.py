@@ -1746,6 +1746,93 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         ):
             return self._fail(409, "That Cowork question was already answered")
 
+        if (
+            task
+            and task.get("action_type") == "schedule-meeting"
+            and action.get("terminal_status") == "ok"
+        ):
+            schedule_duration = schedule_duration_minutes(task)
+            selected_values = {
+                str(value).strip() for value in submitted_answers.values()
+                if str(value).strip()
+            }
+            selected_slots = [
+                slot
+                for slot in (
+                    (interaction.get("schedule_evidence") or {}).get("slots") or []
+                )
+                if (
+                    isinstance(slot, dict)
+                    and str(slot.get("value") or "").strip() in selected_values
+                )
+            ]
+            selected_slot = selected_slots[0] if len(selected_slots) == 1 else None
+            if selected_slot:
+                instruction = (
+                    "Continue the scheduling preview using exactly this certified "
+                    f"slot: {selected_slot['start']} to {selected_slot['end']} "
+                    f"({selected_slot['timezone']}). Prepare the calendar event "
+                    "preview with the existing confirmed attendees, title, and "
+                    "agenda, but do not create or send it yet."
+                )
+                child_answer = answer_record
+            else:
+                instruction = "\n".join(cleaned_answers.values())
+                child_answer = None
+            new_action = create_task_action(
+                tid,
+                action_type=action.get("action_type") or "general",
+                intent=action.get("intent"),
+                notes_snapshot=action.get("notes_snapshot"),
+                redirect_text=instruction,
+                composed_prompt=compose_refine_prompt(
+                    instruction,
+                    interaction_mode="interaction",
+                    schedule_duration=schedule_duration,
+                ),
+                conversation_id=action["conversation_id"],
+                island_url=action.get("island_url"),
+                parent_action_id=action["id"],
+                destination_kind=action.get("destination_kind"),
+                destination_ref=action.get("destination_ref"),
+                destination_display=action.get("destination_display"),
+                destination_source=action.get("destination_source"),
+                destination_confirmed_at=action.get("destination_confirmed_at"),
+                delivery_channel=action.get("delivery_channel"),
+                blocked_question="",
+                answered_interaction=child_answer,
+                interaction_mode="interaction",
+            )
+            try:
+                continue_preview(
+                    tid,
+                    action["conversation_id"],
+                    instruction,
+                    interaction_mode="interaction",
+                    log_dir=LOG_DIR_OVERRIDE,
+                    action_id=new_action["id"],
+                    schedule_people=schedule_attendees(task),
+                    schedule_duration=schedule_duration,
+                )
+            except AlreadyRunning:
+                update_task_action(
+                    new_action["id"],
+                    frozenset({"state", "error"}),
+                    state="failed",
+                    error="A Cowork action is already running for this task.",
+                )
+                return self._fail(409, "A Cowork action is already running for this task")
+            except Exception as exc:  # pragma: no cover - defensive
+                update_task_action(
+                    new_action["id"],
+                    frozenset({"state", "error"}),
+                    state="failed",
+                    error=f"Could not continue the conversation: {exc}",
+                )
+                return self._fail(500, f"Could not continue the conversation: {exc}")
+            self.set_status(202)
+            return self.write(json.dumps({"action": _enrich(_clean(new_action))}))
+
         try:
             await asyncio.to_thread(
                 (ANSWER_FN or answer_interaction),

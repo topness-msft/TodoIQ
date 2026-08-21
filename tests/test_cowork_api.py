@@ -3924,7 +3924,9 @@ class TestInteractionAnswer(CoworkAPITestBase):
         from src.handlers import cowork as handler_mod
         self.handler = handler_mod
         self._answer = handler_mod.ANSWER_FN
+        self._continue = handler_mod.continue_preview
         self.answers = []
+        self.continuations = []
         handler_mod.HANDOFF_FN = lambda cid: {
             "state": "needs_user_input",
             "waiting_on_user": True,
@@ -3933,7 +3935,13 @@ class TestInteractionAnswer(CoworkAPITestBase):
         handler_mod.ANSWER_FN = lambda cid, invocation_id, answers: (
             self.answers.append((cid, invocation_id, answers)) or True
         )
+        handler_mod.continue_preview = lambda *args, **kwargs: (
+            self.continuations.append((args, kwargs)) or True
+        )
         self.addCleanup(lambda: setattr(handler_mod, "ANSWER_FN", self._answer))
+        self.addCleanup(
+            lambda: setattr(handler_mod, "continue_preview", self._continue)
+        )
 
     def _blocked(self, state="previewing"):
         from src.db import get_connection
@@ -4080,6 +4088,36 @@ class TestInteractionAnswer(CoworkAPITestBase):
             self.answers[-1][2]["0"],
         )
 
+    def test_completed_schedule_free_text_starts_a_fresh_continuation(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self._blocked_schedule()
+        action = get_latest_task_action(tid)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE task_actions SET terminal_status='ok' WHERE id=?",
+            (action["id"],),
+        )
+        conn.commit()
+        conn.close()
+        self.handler.HANDOFF_FN = lambda _cid: {
+            "state": "running",
+            "waiting_on_user": False,
+        }
+
+        response = self._answer_request(
+            tid, {"0": "Check Jay's timezone and availability again"}
+        )
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(self.answers, [])
+        self.assertEqual(len(self.continuations), 1)
+        child = get_latest_task_action(tid)
+        self.assertEqual(child["parent_action_id"], action["id"])
+        self.assertIsNone(child["answered_interaction"])
+        self.assertIn("Re-run FindMeetingTimes", child["redirect_text"])
+
     def test_schedule_answer_persists_the_selected_certified_slot(self):
         from src.db import get_connection
         from src.models import get_latest_task_action
@@ -4163,6 +4201,91 @@ class TestInteractionAnswer(CoworkAPITestBase):
             record["interaction"]["schedule_evidence"]["slots"][0]["start"],
             "2099-08-20T13:05:00-04:00",
         )
+
+    def test_completed_schedule_chooser_starts_a_guarded_continuation(self):
+        from src.db import get_connection
+        from src.models import get_latest_task_action
+
+        tid = self._blocked_schedule()
+        selected = "Thu 8/20, 1:05 PM ET"
+        interaction = {
+            "invocation_id": "invoke-1",
+            "questions": [{
+                "id": "0",
+                "producer_id": "slot",
+                "header": "Pick a time",
+                "question": "Which time works?",
+                "multi_select": False,
+                "image_url": "",
+                "options": [{
+                    "value": selected,
+                    "label": selected,
+                    "description": "",
+                    "image_url": "",
+                }],
+            }],
+            "schedule_evidence": {
+                "valid": True,
+                "source": "FindMeetingTimes+interaction",
+                "query_backed": True,
+                "attendees": ["jay.padimiti@microsoft.com"],
+                "duration_minutes": 25,
+                "start_offset_minutes": 5,
+                "slots": [{
+                    "value": selected,
+                    "start": "2099-08-20T13:05:00-04:00",
+                    "end": "2099-08-20T13:30:00-04:00",
+                    "timezone": "Eastern Standard Time",
+                    "availability": {"jay.padimiti@microsoft.com": "free"},
+                }],
+            },
+        }
+        conn = get_connection()
+        parent = get_latest_task_action(tid)
+        conn.execute(
+            "UPDATE task_actions SET blocked_question=?, terminal_status='ok' "
+            "WHERE id=?",
+            (json.dumps(interaction), parent["id"]),
+        )
+        conn.commit()
+        conn.close()
+        task = self.handler.get_task(tid)
+        self.assertTrue(
+            self.handler.schedule_interaction_is_certified(
+                interaction,
+                self.handler.schedule_attendees(task),
+                self.handler.schedule_duration_minutes(task),
+            )
+        )
+        has_binding, bound_slot = self.handler._selected_schedule_slot({
+            "answered_interaction": json.dumps({
+                "kind": "interaction_answer",
+                "interaction": interaction,
+                "answers": {"0": selected},
+            }),
+        })
+        self.assertTrue(has_binding)
+        self.assertEqual(bound_slot["value"], selected)
+        self.handler.HANDOFF_FN = lambda _cid: {
+            "state": "running",
+            "waiting_on_user": False,
+        }
+
+        response = self._answer_request(tid, {"0": selected})
+
+        self.assertEqual(response.code, 202)
+        self.assertEqual(self.answers, [])
+        self.assertEqual(len(self.continuations), 1)
+        args, kwargs = self.continuations[0]
+        self.assertEqual(args[:2], (tid, "t:u:blocked"))
+        self.assertIn("2099-08-20T13:05:00-04:00", args[2])
+        self.assertIn("2099-08-20T13:30:00-04:00", args[2])
+        self.assertEqual(kwargs["schedule_duration"], 25)
+        child = get_latest_task_action(tid)
+        self.assertEqual(child["parent_action_id"], parent["id"])
+        self.assertIn("2099-08-20T13:05:00-04:00", child["redirect_text"])
+        record = json.loads(child["answered_interaction"])
+        self.assertEqual(record["answers"], {"0": selected})
 
     def test_schedule_slot_is_rejected_after_attendee_change(self):
         from src.db import get_connection
