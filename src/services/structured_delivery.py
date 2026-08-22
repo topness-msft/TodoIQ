@@ -218,13 +218,29 @@ def preview_prompt(task: dict, payload: dict) -> str:
         if channel == "calendar"
         else ""
     )
+    # cowork_runner carries an explicit "Include the agenda" instruction, added
+    # after a real task produced a draft that gave attendees nothing to prepare
+    # against. The structured rewrite dropped it and started emitting a single
+    # run-on sentence as the invite body, so the guidance is restored here.
+    content_rule = (
+        "\nWrite `body` as the invite agenda the attendees will actually read:\n"
+        "- One short line naming the purpose and the decision to reach.\n"
+        "- Then 2-4 agenda lines, each on its own line beginning with '- '.\n"
+        "- Ground every line in the task snapshot: its title, description, "
+        "notes and suggested next action. Do not invent attendees, commitments, "
+        "prior decisions, documents or dates that the snapshot does not "
+        "support; write only what the task supports.\n"
+        "- Plain text, no markdown headings, no greeting, no sign-off."
+        if channel == "calendar"
+        else ""
+    )
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
 
 Resolve every delivery identifier now. Do not defer recipient, message, chat,
 team, channel, thread, attendee, timezone, or slot resolution until execution.
-{standing_rule}
+{standing_rule}{content_rule}
 
 Task snapshot:
 {_json(_task_snapshot(task))}
@@ -335,9 +351,14 @@ def _preview_draft(payload: dict) -> str:
     if channel == "calendar":
         slots = payload.get("slots") or []
         lines = [payload.get("subject") or "Meeting", "", payload.get("body") or ""]
+        if slots:
+            lines.append("")
+            lines.append("Proposed times:")
+        # The label already carries the full range, so appending the raw ISO end
+        # rendered "2:05-2:30 PM ET - 2026-08-25T14:30:00-04:00", which reads as
+        # a contradiction rather than extra detail.
         lines.extend(
-            f"{slot.get('label') or slot.get('start')} - {slot.get('end')}"
-            for slot in slots
+            f"- {slot.get('label') or slot.get('start')}" for slot in slots
         )
         return "\n".join(line for line in lines if line is not None).strip()
     if channel == "email":
@@ -346,6 +367,38 @@ def _preview_draft(payload: dict) -> str:
             f"{payload.get('body') or ''}"
         ).strip()
     return str(payload.get("body") or "").strip()
+
+
+def calendar_event_summary(event: dict, label: str | None = None) -> str:
+    """Describe the meeting that was actually booked.
+
+    The execution row previously inherited the preview draft, so a finished
+    meeting still listed every time that had merely been offered. What the card
+    owes the reader afterwards is what happened, not what was considered.
+    """
+    when = str(label or "").strip() or " to ".join(
+        part for part in (
+            str(event.get("start") or "").strip(),
+            str(event.get("end") or "").strip(),
+        ) if part
+    )
+    attendees = ", ".join(
+        str(person.get("name") or person.get("email") or "").strip()
+        for person in event.get("attendees") or []
+        if str(person.get("name") or person.get("email") or "").strip()
+    )
+    lines = [str(event.get("subject") or "Meeting").strip(), ""]
+    body = str(event.get("body") or "").strip()
+    if body:
+        lines.extend([body, ""])
+    if when:
+        lines.append(f"When: {when}")
+    duration = event.get("duration_minutes")
+    if isinstance(duration, int) and duration > 0:
+        lines.append(f"Duration: {duration} minutes")
+    if attendees:
+        lines.append(f"Attendees: {attendees}")
+    return "\n".join(lines).strip()
 
 
 def _preview_destination(payload: dict) -> tuple[str, str]:
@@ -492,6 +545,7 @@ def finish_preview(
                 })
                 evidence_slots.append({
                     "value": value,
+                    "label": str(slot.get("label") or start),
                     "start": start,
                     "end": end,
                     "timezone": timezone_name,

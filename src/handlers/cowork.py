@@ -77,6 +77,7 @@ from ..services.cowork_runner import (
 )
 from ..services.workspace_settings import api_transport_enabled
 from ..services.structured_delivery import (
+    calendar_event_summary as structured_calendar_summary,
     channel_for_task as structured_channel_for_task,
     initial_payload as structured_initial_payload,
     start_execute as start_structured_execute,
@@ -2101,6 +2102,11 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             destination_ref, destination_display = _schedule_destination(
                 schedule_attendees(task)
             )
+            # What the card shows once this is booked must be the meeting that
+            # was created, not the list of times that were merely offered.
+            confirmed_draft = structured_calendar_summary(
+                event, selected_slot.get("label")
+            )
             ready = update_task_action(
                 action["id"],
                 frozenset({
@@ -2116,7 +2122,7 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 }),
                 required_state="previewing",
                 state="ready",
-                draft=(action.get("draft") or action.get("finding") or "").strip(),
+                draft=confirmed_draft,
                 finding=(action.get("finding") or action.get("draft") or "").strip(),
                 blocked_question="",
                 answered_interaction=answer_record,

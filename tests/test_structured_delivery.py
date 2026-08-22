@@ -636,6 +636,88 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
         self.assertEqual(latest["workiq_delivery_ref"], "1787429363102")
 
 
+class TestCalendarContentQuality(StructuredDeliveryTestBase):
+    """The structured rewrite lost content guidance Cowork had earned.
+
+    cowork_runner carries an explicit "Include the agenda" instruction, added
+    after a real task produced a draft that "gave them nothing to prepare
+    against". The structured calendar prompt shipped without it and produced a
+    single run-on sentence as the invite body.
+    """
+
+    def test_calendar_preview_prompt_demands_a_real_agenda(self):
+        task = create_task(
+            "Schedule Project Whale kickoff",
+            action_type="schedule-meeting",
+            description="Decide pilot structure and ownership.",
+        )
+        payload = structured_delivery.initial_payload(task, "calendar")
+
+        prompt = structured_delivery.preview_prompt(task, payload)
+
+        lowered = prompt.lower()
+        self.assertIn("agenda", lowered)
+        # It must ask for structure, not just mention the word.
+        self.assertIn("- ", prompt)
+        self.assertTrue(
+            "own line" in lowered or "bullet" in lowered,
+            "the prompt must ask for itemised agenda lines",
+        )
+        # And it must not invite invention.
+        self.assertTrue(
+            "do not invent" in lowered or "only what the task" in lowered,
+            "agenda guidance must forbid inventing agenda items",
+        )
+
+    def test_email_prompt_is_not_given_calendar_agenda_guidance(self):
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        payload = structured_delivery.initial_payload(task, "email")
+
+        prompt = structured_delivery.preview_prompt(task, payload)
+
+        self.assertNotIn("Agenda", prompt)
+
+    def test_calendar_draft_does_not_repeat_the_end_timestamp(self):
+        """The card rendered "2:05-2:30 PM ET - 2026-08-25T14:30:00-04:00"."""
+        draft = structured_delivery._preview_draft({
+            "channel": "calendar",
+            "subject": "Project Whale kickoff",
+            "body": "Decide the pilot structure.",
+            "slots": [{
+                "id": "0",
+                "label": "Tuesday, August 25, 2:05\u20132:30 PM ET",
+                "start": "2026-08-25T14:05:00-04:00",
+                "end": "2026-08-25T14:30:00-04:00",
+            }],
+        })
+
+        self.assertIn("Tuesday, August 25, 2:05\u20132:30 PM ET", draft)
+        self.assertNotIn("2026-08-25T14:30:00-04:00", draft)
+
+    def test_confirmed_meeting_summary_states_what_was_booked(self):
+        summary = structured_delivery.calendar_event_summary(
+            {
+                "subject": "Project Whale kickoff",
+                "body": "Decide the pilot structure and ownership.",
+                "attendees": [
+                    {"name": "Sally Shi", "email": "sally.shi@microsoft.com"},
+                    {"name": "Azharullah Meer", "email": "ameer@microsoft.com"},
+                ],
+                "start": "2026-08-25T14:05:00-04:00",
+                "end": "2026-08-25T14:30:00-04:00",
+                "duration_minutes": 25,
+            },
+            label="Tuesday, August 25, 2:05\u20132:30 PM ET",
+        )
+
+        self.assertIn("Project Whale kickoff", summary)
+        self.assertIn("Tuesday, August 25, 2:05\u20132:30 PM ET", summary)
+        self.assertIn("Sally Shi", summary)
+        self.assertIn("Azharullah Meer", summary)
+        self.assertIn("Decide the pilot structure", summary)
+
+
 class TestStructuredDeliveryMigration(unittest.TestCase):
     def test_partial_legacy_schema_rebuild_preserves_rows(self):
         conn = db_module.sqlite3.connect(":memory:")
@@ -1160,6 +1242,100 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(event["end"], end.isoformat())
         self.assertEqual(event["duration_minutes"], duration)
         self.assertEqual(event["time_zone"], "Eastern Standard Time")
+        # The card must report what was booked. It previously carried the
+        # preview draft, so a finished meeting still listed all the times that
+        # had merely been offered.
+        child_draft = self.execute_started[0]["draft"]
+        self.assertIn("Project Whale kickoff", child_draft)
+        self.assertIn("2:05", child_draft)
+        self.assertNotIn("slots", child_draft.lower())
+
+    def test_selected_meeting_draft_drops_the_options_not_chosen(self):
+        from src.handlers import cowork as handler
+
+        task = create_task(
+            "Schedule a 25-minute review",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        duration = structured_delivery._meeting_duration(task)
+        offered = []
+        for index, hour in enumerate((9, 13, 15)):
+            begin = datetime(
+                2028, 8, 21, hour, 5, tzinfo=timezone(timedelta(hours=-7))
+            )
+            offered.append({
+                "id": str(index),
+                "label": f"Monday, August 21 at {hour}:05",
+                "start": begin.isoformat(),
+                "end": (begin + timedelta(minutes=duration)).isoformat(),
+                "timezone": "America/Los_Angeles",
+                "availability": {"rima@microsoft.com": "free"},
+            })
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": envelope["correlation_id"],
+                    "phase": "preview",
+                    "ok": True,
+                    "payload": {
+                        "schema_version": 1,
+                        "channel": "calendar",
+                        "subject": "Quarterly review",
+                        "body": "Agree the rollout plan.",
+                        "duration_minutes": duration,
+                        "attendees": [
+                            {"name": "Rima Reyes", "email": "rima@microsoft.com"}
+                        ],
+                        "timezone": "America/Los_Angeles",
+                        "slots": offered,
+                    },
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id=envelope["correlation_id"],
+            expected_channel="calendar",
+            expected_attendees={"rima@microsoft.com"},
+            expected_duration=duration,
+        )
+        waiting = get_latest_task_action(task["id"])
+        interaction = json.loads(waiting["blocked_question"])
+
+        original_execute = handler.STRUCTURED_EXECUTE_FN
+        original_now = handler.NOW_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution: self.execute_started.append(execution)
+        )
+        handler.NOW_FN = lambda: datetime(2028, 8, 20, 12, 0, tzinfo=timezone.utc)
+        try:
+            response = self._post(
+                f"/api/tasks/{task['id']}/cowork/answer",
+                {
+                    "invocation_id": interaction["invocation_id"],
+                    "answers": {"0": "1"},
+                },
+            )
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original_execute
+            handler.NOW_FN = original_now
+
+        self.assertEqual(response.code, 202, response.body)
+        draft = self.execute_started[0]["draft"]
+        self.assertIn("Monday, August 21 at 13:05", draft)
+        self.assertNotIn("Monday, August 21 at 9:05", draft)
+        self.assertNotIn("Monday, August 21 at 15:05", draft)
 
     def test_unconfirmed_calendar_execution_can_be_retried_on_the_same_row(self):
         from src.handlers import cowork as handler
