@@ -88,8 +88,10 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
   Reset is destructive only to `data/demo/riveter-demo.db` and refuses while the
   validated demo process or port is live. Never copy production data into demo.
 - Prod deploy command: from the selected checkout,
-  `python scripts/install_startup.py`, start now = Yes. Requires explicit
-  current-conversation production approval and port 8766 ownership cleanup.
+  `python scripts/install_startup.py`, start now = Yes. Riveter is a single-user
+  local prototype: once relevant tests and required visual gates pass, production
+  deployment does not require a separate approval prompt. This exception is
+  scoped to this project only. Port 8766 ownership cleanup remains mandatory.
 - Auto-deploy triggers: none. Git push does not deploy.
 - Known-broken deploy patterns to REFUSE:
   - Never run two TodoIQ writers against different DBs and call them synced.
@@ -199,4 +201,6 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
 - `data/` is gitignored and contains DBs, logs, backups and local settings.
 - User-approved workspace root:
   `C:\Users\phtopnes\OneDrive - Microsoft\Documents\__TodoIq`.
-- Production approval wording and post-deploy probes are mandatory.
+- Post-deploy probes are mandatory. Do not request a separate production deploy
+  approval after the relevant test and visual gates pass; this standing policy is
+  specific to Riveter.
