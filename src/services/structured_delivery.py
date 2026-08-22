@@ -477,8 +477,8 @@ def finish_preview(
                     "id": "0",
                     "header": "Select & create meeting",
                     "question": (
-                        "Choose one verified time. Selecting it immediately creates "
-                        "the calendar meeting."
+                        "Choose one verified time, then press Select & create "
+                        "meeting. There is no second confirmation."
                     ),
                     "multi_select": False,
                     "options": options,

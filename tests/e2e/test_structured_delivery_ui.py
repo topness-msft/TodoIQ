@@ -49,8 +49,8 @@ def test_structured_calendar_selector_is_explicit_and_not_cowork(
                     questions: [{
                         id: '0',
                         header: 'Select & create meeting',
-                        question: 'Choose one verified time. Selecting it immediately '
-                            + 'creates the calendar meeting.',
+                        question: 'Choose one verified time, then press Select & '
+                            + 'create meeting. There is no second confirmation.',
                         multi_select: false,
                         options: [{
                             value: '0',
@@ -84,10 +84,15 @@ def test_structured_calendar_selector_is_explicit_and_not_cowork(
     card = page.locator(".cw-card")
     expect(card).to_contain_text("WorkIQ")
     expect(card).to_contain_text("Riveter is waiting for your selection")
-    expect(card).to_contain_text("25-minute meeting immediately")
+    # The card must not claim the click alone books it; the button does.
+    expect(card).not_to_contain_text("immediately")
+    expect(card).to_contain_text("press Select & create meeting")
+    expect(card).to_contain_text("no second confirmation")
     expect(page.get_by_test_id("cw-answer-submit")).to_have_text(
         "Select & create meeting"
     )
+    # A parked structured run still needs a way out; Stop does not apply.
+    expect(page.get_by_test_id("cw-restart")).to_be_visible()
     expect(page.get_by_test_id("cw-stop")).to_have_count(0)
     expect(page.get_by_test_id("cw-open-cowork")).to_have_count(0)
     box = card.bounding_box()

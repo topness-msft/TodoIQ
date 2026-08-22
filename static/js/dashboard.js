@@ -4049,6 +4049,16 @@ function cwCostBadge(a) {
         + ' measured from your month-to-date usage">' + escapeHtml(text) + '</span>';
 }
 
+function cwRestartButton(taskId) {
+    // The ready card has "Start over", but a card parked in previewing or
+    // waiting-for-selection had no exit at all: Stop is hidden for structured
+    // runs (there is no Cowork conversation to halt), so a stuck WorkIQ preview
+    // could only be escaped by reloading.
+    return '<button class="cw-btn cw-btn-ghost" data-testid="cw-restart" '
+        + 'title="Discard this run and start a fresh preview." '
+        + 'onclick="cwStartOver(' + taskId + ')">Start over</button>';
+}
+
 function cwCumulativeCostBadge(a) {
     var c = a && a.credits_cumulative;
     if (c === null || c === undefined || c === '') return '';
@@ -4057,8 +4067,21 @@ function cwCumulativeCostBadge(a) {
     var text = n >= 1000 ? Math.round(n).toLocaleString()
         : Number.isInteger(n) ? n.toLocaleString()
         : n.toFixed(1);
-    return '<span class="cw-foot-note" title="Credits consumed by completed Cowork'
-        + ' runs for this task">' + escapeHtml(text + ' credits total') + '</span>';
+    // Only Cowork runs record cost_credits; structured WorkIQ actions never
+    // call cost_snapshot(). So on a WorkIQ card this total is always spend from
+    // earlier Cowork attempts, and a bare "N credits total" reads as WorkIQ
+    // spend for the run in front of you. Say whose credits these are.
+    var structured = cwIsStructured(a);
+    return '<span class="cw-foot-note" data-testid="cw-credits" title="'
+        + escapeAttr(structured
+            ? 'Credits consumed by earlier Cowork runs for this task. This '
+                + 'WorkIQ action is not credit-metered here.'
+            : 'Credits consumed by completed Cowork runs for this task')
+        + '">'
+        + escapeHtml(text + (structured
+            ? ' credits \u00b7 earlier Cowork runs'
+            : ' credits total'))
+        + '</span>';
 }
 
 function cwHandoffBadge(a) {
@@ -4421,6 +4444,7 @@ function renderCoworkCard(task) {
                     ? '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                         + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
                     : '')
+                + (structured ? cwRestartButton(task.id) : '')
                 + cwCumulativeCostBadge(a),
                 a);
         }
@@ -4487,8 +4511,10 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            (structured ? '' : '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
-            + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>')
+            (structured
+                ? cwRestartButton(task.id)
+                : '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+                    + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>')
             + cwCumulativeCostBadge(a),
             a);
     }
@@ -4791,12 +4817,13 @@ function cwInteractionFields(taskId, interaction) {
         ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note">'
             + '<b>Query-backed suggestions</b>'
             + '<span>' + (structured
-                ? 'WorkIQ checked the exact calendars. Selecting a time creates '
-                    + 'the ' + escapeHtml(String(evidence.duration_minutes || 25))
-                    + '-minute meeting immediately.'
-                : 'Cowork derived these after checking the exact calendars. '
-                    + 'Review the time before booking.')
-            + '</span></div>'
+            ? 'WorkIQ checked the exact calendars. Pick a time, then press '
+                + 'Select &amp; create meeting to book the '
+                + escapeHtml(String(evidence.duration_minutes || 25))
+                + '-minute meeting. There is no second confirmation.'
+            : 'Cowork derived these after checking the exact calendars. '
+                + 'Review the time before booking.')
+        + '</span></div>'
         : '';
     return evidenceNote + (interaction.questions || []).map(function(question) {
         var id = String(question.id || '');
