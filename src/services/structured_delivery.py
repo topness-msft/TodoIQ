@@ -399,11 +399,14 @@ def finish_preview(
             "destination_source": "workiq_preview",
         }
         if channel == "calendar":
-            attendees = [
-                str(item.get("email") or "").strip().lower()
-                for item in payload.get("attendees") or []
-                if str(item.get("email") or "").strip()
-            ]
+            # The certifier that gates slot selection compares this list against
+            # cowork_runner._attendee_emails(), which is sorted and de-duplicated.
+            # Building it in payload order instead produced an equal *set* but an
+            # unequal *list*, so every slot click was refused with "no longer
+            # verified for the current attendees". Share the one canonical form.
+            from src.services.cowork_runner import _attendee_emails
+
+            attendees = _attendee_emails(payload.get("attendees") or [])
             duration = payload.get("duration_minutes")
             slots = payload.get("slots")
             if not attendees or not isinstance(duration, int) or duration <= 0:

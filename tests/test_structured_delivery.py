@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tornado.testing
@@ -889,6 +889,119 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(response.code, 400, response.body)
         latest = get_latest_task_action(task["id"])
         self.assertEqual(json.loads(latest["structured_payload"]), payload)
+
+    def test_windows_timezone_slot_selection_still_creates_the_exact_meeting(self):
+        """Production returns Windows zone names, not IANA ones.
+
+        Every earlier calendar test used "America/Los_Angeles", but the live
+        WorkIQ preview emits "Eastern Standard Time" with an en-dash label, so
+        the selection path was only ever exercised against a shape production
+        does not produce.
+        """
+        from src.handlers import cowork as handler
+
+        task = create_task(
+            "Schedule Project Whale kickoff call",
+            action_type="schedule-meeting",
+            key_people=json.dumps([
+                {"name": "Sally Shi", "email": "sally.shi@microsoft.com"},
+                {"name": "Azharullah Meer", "email": "ameer@microsoft.com"},
+            ]),
+        )
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        # Derive the duration exactly as the worker does. Hardcoding it here
+        # let the preview and the selection certifier disagree, which is the
+        # shape of the bug this test exists to catch.
+        duration = structured_delivery._meeting_duration(task)
+        start = datetime(2028, 8, 25, 14, 5, tzinfo=timezone(timedelta(hours=-4)))
+        end = start + timedelta(minutes=duration)
+        preview = {
+            "schema_version": 1,
+            "channel": "calendar",
+            "subject": "Project Whale kickoff",
+            "body": "Align on outreach and telemetry targeting.",
+            "duration_minutes": duration,
+            # Mixed case, exactly as the live directory returned it.
+            "attendees": [
+                {"name": "Sally Shi", "email": "Sally.Shi@microsoft.com"},
+                {"name": "Azharullah Meer", "email": "ameer@microsoft.com"},
+            ],
+            "timezone": "Eastern Standard Time",
+            "slots": [
+                {
+                    "id": "0",
+                    "label": "Tuesday, August 25, 2026, 2:05\u20132:30 PM ET",
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "timezone": "Eastern Standard Time",
+                    "availability": {
+                        "sally.shi@microsoft.com": "free",
+                        "ameer@microsoft.com": "free",
+                    },
+                }
+            ],
+        }
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": envelope["correlation_id"],
+                    "phase": "preview",
+                    "ok": True,
+                    "payload": preview,
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id=envelope["correlation_id"],
+            expected_channel="calendar",
+            expected_attendees={
+                "sally.shi@microsoft.com", "ameer@microsoft.com"
+            },
+            expected_duration=duration,
+        )
+
+        waiting = get_latest_task_action(task["id"])
+        self.assertEqual(waiting["state"], "previewing", waiting.get("error"))
+        interaction = json.loads(waiting["blocked_question"])
+        slots = (interaction.get("schedule_evidence") or {}).get("slots") or []
+        self.assertTrue(slots, "no selectable slot was offered")
+        # The handler matches the user's answer against this key; without it the
+        # selection fails with "Select exactly one verified meeting time."
+        self.assertIn("value", slots[0])
+
+        original_execute = handler.STRUCTURED_EXECUTE_FN
+        original_now = handler.NOW_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution: self.execute_started.append(execution)
+        )
+        handler.NOW_FN = lambda: datetime(2028, 8, 24, 12, 0, tzinfo=timezone.utc)
+        try:
+            response = self._post(
+                f"/api/tasks/{task['id']}/cowork/answer",
+                {
+                    "invocation_id": interaction["invocation_id"],
+                    "answers": {"0": str(slots[0]["value"])},
+                },
+            )
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original_execute
+            handler.NOW_FN = original_now
+
+        self.assertEqual(response.code, 202, response.body)
+        self.assertEqual(len(self.execute_started), 1)
+        event = json.loads(self.execute_started[0]["structured_payload"])
+        self.assertEqual(event["start"], start.isoformat())
+        self.assertEqual(event["end"], end.isoformat())
+        self.assertEqual(event["duration_minutes"], duration)
+        self.assertEqual(event["time_zone"], "Eastern Standard Time")
 
     def test_structured_email_edit_updates_the_sealed_payload(self):
         task = create_task(
