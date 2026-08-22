@@ -25,6 +25,7 @@ from .handlers.cowork import (
     CoworkExecuteHandler,
     CoworkHandler,
     CoworkRefineHandler,
+    CoworkRetryHandler,
 )
 from .models import (
     get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
@@ -166,6 +167,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/tasks/(\d+)/cowork/refine", CoworkRefineHandler),
             (r"/api/tasks/(\d+)/cowork/answer", CoworkAnswerHandler),
             (r"/api/tasks/(\d+)/cowork/execute", CoworkExecuteHandler),
+            (r"/api/tasks/(\d+)/cowork/retry", CoworkRetryHandler),
             (r"/api/tasks/(\d+)/cowork/destination", CoworkDestinationHandler),
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),

@@ -478,6 +478,164 @@ class TestStructuredDestinationResolution(StructuredDeliveryTestBase):
         self.assertIn("destination", latest["error"].lower())
 
 
+class TestCalendarIdempotency(StructuredDeliveryTestBase):
+    """Graph dedupes event creates that share a transactionId.
+
+    Measured 2026-08-22: posting the same event twice with
+    transactionId "rvt-txn-c4d1" returned the SAME event id and an unchanged
+    createdDateTime, so a repeated create cannot double-book. That makes a
+    stable, persisted transaction id the difference between an ambiguous
+    execution being retryable and being a dead end.
+    """
+
+    def _calendar_action(self):
+        task = create_task(
+            "Schedule a 25-minute review",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            structured_payload=json.dumps({
+                "schema_version": 1,
+                "channel": "calendar",
+                "subject": "Project review",
+                "body": "Agenda",
+                "attendees": [{"name": "Rima Reyes", "email": "rima@microsoft.com"}],
+                "duration_minutes": 25,
+                "start": "2028-08-21T09:05:00-07:00",
+                "end": "2028-08-21T09:30:00-07:00",
+                "time_zone": "America/Los_Angeles",
+            }),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+        return task, action
+
+    def test_transaction_id_is_stable_for_one_action_and_unique_across_them(self):
+        first = structured_delivery.calendar_transaction_id(41)
+        again = structured_delivery.calendar_transaction_id(41)
+        other = structured_delivery.calendar_transaction_id(42)
+
+        self.assertEqual(first, again, "a retry must reuse the same key")
+        self.assertNotEqual(first, other)
+        self.assertIn("41", first)
+
+    def test_execute_prompt_pins_the_transaction_id_for_calendar_only(self):
+        payload = {
+            "schema_version": 1,
+            "channel": "calendar",
+            "subject": "Project review",
+            "start": "2028-08-21T09:05:00-07:00",
+        }
+        prompt = structured_delivery.execute_prompt(
+            payload, "corr-1", transaction_id="riveter-cal-41"
+        )
+        self.assertIn("riveter-cal-41", prompt)
+        self.assertIn("transactionId", prompt)
+
+        teams_prompt = structured_delivery.execute_prompt(
+            {"schema_version": 1, "channel": "teams", "chat_id": "chat-1",
+             "body": "hi"},
+            "corr-1",
+            transaction_id=None,
+        )
+        self.assertNotIn("transactionId", teams_prompt)
+
+    def test_calendar_execution_requires_the_transaction_id_to_be_echoed(self):
+        _task, action = self._calendar_action()
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1",
+                    "phase": "execute",
+                    "ok": True,
+                    "delivery_ref": "event-42",
+                    "transaction_id": "riveter-cal-WRONG",
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            expected_transaction_id="riveter-cal-41",
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+        self.assertIsNone(latest["workiq_delivery_ref"])
+
+    def test_calendar_execution_confirms_when_the_transaction_id_matches(self):
+        _task, action = self._calendar_action()
+        txn = structured_delivery.calendar_transaction_id(action["id"])
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1",
+                    "phase": "execute",
+                    "ok": True,
+                    "delivery_ref": "AAMkAD-event-id",
+                    "transaction_id": txn,
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            expected_transaction_id=txn,
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "executed", latest.get("error"))
+        self.assertEqual(latest["workiq_delivery_ref"], "AAMkAD-event-id")
+
+    def test_non_calendar_execution_does_not_require_a_transaction_id(self):
+        task = create_task("Ping the chat", action_type="follow-up",
+                           source_type="chat")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            destination_ref="chat-1",
+            destination_display="Project chat",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "teams", "body": "Approved"}
+            ),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1",
+                    "phase": "execute",
+                    "ok": True,
+                    "delivery_ref": "1787429363102",
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            expected_transaction_id=None,
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "executed", latest.get("error"))
+        self.assertEqual(latest["workiq_delivery_ref"], "1787429363102")
+
+
 class TestStructuredDeliveryMigration(unittest.TestCase):
     def test_partial_legacy_schema_rebuild_preserves_rows(self):
         conn = db_module.sqlite3.connect(":memory:")
@@ -1002,6 +1160,130 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(event["end"], end.isoformat())
         self.assertEqual(event["duration_minutes"], duration)
         self.assertEqual(event["time_zone"], "Eastern Standard Time")
+
+    def test_unconfirmed_calendar_execution_can_be_retried_on_the_same_row(self):
+        from src.handlers import cowork as handler
+
+        task = create_task(
+            "Schedule a 25-minute review",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            destination_ref="rima@microsoft.com",
+            destination_display="Rima Reyes",
+            structured_payload=json.dumps({
+                "schema_version": 1, "channel": "calendar",
+                "subject": "Project review",
+                "start": "2028-08-21T09:05:00-07:00",
+                "end": "2028-08-21T09:30:00-07:00",
+            }),
+        )
+        update_task_action(
+            action["id"],
+            frozenset({"state", "error"}),
+            state="execute_unconfirmed",
+            error="Structured worker produced no readable output",
+        )
+        expected_txn = structured_delivery.calendar_transaction_id(action["id"])
+
+        original = handler.STRUCTURED_EXECUTE_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution: self.execute_started.append(execution)
+        )
+        try:
+            response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original
+
+        self.assertEqual(response.code, 202, response.body)
+        self.assertEqual(len(self.execute_started), 1)
+        # Same row means the same Graph transactionId, which is what makes the
+        # retry safe rather than a second booking.
+        self.assertEqual(self.execute_started[0]["id"], action["id"])
+        self.assertEqual(
+            structured_delivery.calendar_transaction_id(
+                self.execute_started[0]["id"]
+            ),
+            expected_txn,
+        )
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "executing")
+        self.assertIsNone(latest["error"])
+
+    def test_unconfirmed_teams_execution_is_not_retryable(self):
+        """Measured: Teams has no transactionId, so a repeat post duplicates."""
+        from src.handlers import cowork as handler
+
+        task = create_task("Ping the chat", action_type="follow-up",
+                           source_type="chat")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            destination_ref="chat-1",
+            destination_display="Project chat",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "teams", "body": "Approved"}
+            ),
+        )
+        update_task_action(
+            action["id"],
+            frozenset({"state", "error"}),
+            state="execute_unconfirmed",
+            error="no readable output",
+        )
+
+        original = handler.STRUCTURED_EXECUTE_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution: self.execute_started.append(execution)
+        )
+        try:
+            response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original
+
+        self.assertEqual(response.code, 409, response.body)
+        self.assertEqual(self.execute_started, [])
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+
+    def test_retry_is_refused_unless_the_action_is_unconfirmed(self):
+        from src.handlers import cowork as handler
+
+        task = create_task("Schedule a 25-minute review",
+                           action_type="schedule-meeting")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "calendar"}
+            ),
+        )
+        update_task_action(
+            action["id"],
+            frozenset({"state", "workiq_delivery_ref"}),
+            state="executed",
+            workiq_delivery_ref="AAMkAD-event",
+        )
+
+        original = handler.STRUCTURED_EXECUTE_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution: self.execute_started.append(execution)
+        )
+        try:
+            response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original
+
+        self.assertEqual(response.code, 409, response.body)
+        self.assertEqual(self.execute_started, [])
+        self.assertEqual(
+            get_latest_task_action(task["id"])["state"], "executed"
+        )
 
     def test_structured_email_edit_updates_the_sealed_payload(self):
         task = create_task(

@@ -240,15 +240,41 @@ and omit payload. Never invent an identity or identifier.
 """.strip()
 
 
-def execute_prompt(payload: dict, correlation_id: str) -> str:
+def calendar_transaction_id(action_id: int) -> str:
+    """Stable Graph idempotency key for one execution row.
+
+    Graph dedupes `/me/events` creates that share a `transactionId`: a repeat
+    POST returns the existing event rather than booking a second one. Deriving
+    the key from the execution row id (rather than minting a fresh uuid per
+    attempt) is the whole point — re-running the same row must reuse the same
+    key, otherwise a retry after an unconfirmed outcome double-books real
+    people.
+    """
+    return f"riveter-cal-{action_id}"
+
+
+def execute_prompt(
+    payload: dict,
+    correlation_id: str,
+    transaction_id: str | None = None,
+) -> str:
     """Build a write-only prompt that sends the exact sealed payload once."""
     channel = payload.get("channel")
+    marker_extra = ""
     if channel == "calendar":
         operation = (
             "Call workiq-create_entity exactly once with parentUrl /me/events. "
             "Map the exact subject, body, selected start/end/timezone, and attendees "
             "from the payload to a Microsoft Graph event. Return the created event id."
         )
+        if transaction_id:
+            operation += (
+                f' Set the event property "transactionId" to exactly '
+                f'"{transaction_id}". Do not alter or regenerate it. Graph uses '
+                "it to avoid creating a duplicate meeting, so it must be sent "
+                "verbatim, and it must be echoed back in the result block."
+            )
+            marker_extra = f',\n"transaction_id":"{transaction_id}"'
     elif channel == "email":
         operation = (
             "Call workiq-do_action exactly once. For reply mode use "
@@ -278,7 +304,7 @@ Sealed payload:
 Return exactly one result block:
 {RESULT_START}
 {{"correlation_id":"{correlation_id}","phase":"execute","ok":true,
-"delivery_ref":"non-empty external reference"}}
+"delivery_ref":"non-empty external reference"{marker_extra}}}
 {RESULT_END}
 
 If the write fails or its result is ambiguous, return ok=false with an error.
@@ -521,6 +547,7 @@ def finish_execute(
     stderr: str,
     exit_code: int,
     correlation_id: str,
+    expected_transaction_id: str | None = None,
 ) -> dict | None:
     """Persist execution only when correlated external delivery evidence exists."""
     if exit_code != 0:
@@ -539,6 +566,14 @@ def finish_execute(
             phase="execute",
             require_delivery_ref=True,
         )
+        if expected_transaction_id is not None:
+            echoed = str(result.get("transaction_id") or "").strip()
+            if echoed != expected_transaction_id:
+                # Without the key we cannot tell a first attempt from a repeat,
+                # so a later retry could double-book. Refuse to call it done.
+                raise ValueError(
+                    "The meeting was created without Riveter's idempotency key"
+                )
         delivery_ref = str(result["delivery_ref"]).strip()
         return update_task_action(
             action_id,
@@ -603,9 +638,19 @@ def _preview_worker(task: dict, action: dict) -> None:
 def _execute_worker(action: dict) -> None:
     payload = json.loads(action["structured_payload"])
     correlation_id = str(uuid.uuid4())
+    # Derived from the row, not the attempt, so re-running this execution reuses
+    # the same key and Graph returns the existing event instead of a duplicate.
+    transaction_id = (
+        calendar_transaction_id(action["id"])
+        if payload.get("channel") == "calendar"
+        else None
+    )
     try:
         result = _run(
-            execute_command(execute_prompt(payload, correlation_id), payload["channel"])
+            execute_command(
+                execute_prompt(payload, correlation_id, transaction_id),
+                payload["channel"],
+            )
         )
         finish_execute(
             action["id"],
@@ -613,6 +658,7 @@ def _execute_worker(action: dict) -> None:
             stderr=result.stderr,
             exit_code=result.returncode,
             correlation_id=correlation_id,
+            expected_transaction_id=transaction_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured execution failed")

@@ -1759,6 +1759,77 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"action": payload}))
 
 
+class CoworkRetryHandler(tornado.web.RequestHandler):
+    """Re-run one unconfirmed structured execution on its existing row.
+
+    Only calendar qualifies, and only because Graph dedupes `/me/events`
+    creates that share a `transactionId` (measured 2026-08-22: the repeat POST
+    returned the same event id with an unchanged createdDateTime). Reusing the
+    SAME action row is what preserves that key, so the retry either creates the
+    meeting that never landed or returns the one that did.
+
+    Email and Teams are deliberately excluded: Teams has no idempotency key at
+    all and a repeat post duplicates, and email has no native key either. For
+    those, an unconfirmed outcome still means "go look before acting".
+    """
+
+    def _fail(self, code, message):
+        self.set_status(code)
+        self.write(json.dumps({"error": message}))
+
+    def post(self, task_id):
+        if not cowork_execute_enabled():
+            return self._fail(403, DEMO_DISABLED_MESSAGE)
+        tid = int(task_id)
+        action = get_latest_task_action(tid)
+        if not action:
+            return self._fail(404, "No action for this task")
+        if not action.get("structured_payload"):
+            return self._fail(409, "Only a WorkIQ action can be retried here.")
+        if action.get("state") != "execute_unconfirmed":
+            return self._fail(
+                409, "Only an unconfirmed delivery can be retried."
+            )
+        if action.get("delivery_channel") != "calendar":
+            return self._fail(
+                409,
+                "Only a calendar action can be retried safely. Sending again "
+                "would post a second message, so check the destination and "
+                "start over if it did not arrive.",
+            )
+
+        retried = update_task_action(
+            action["id"],
+            frozenset({"state", "error"}),
+            required_state="execute_unconfirmed",
+            state="executing",
+            error=None,
+        )
+        if not retried:
+            return self._fail(409, "That action changed before it was retried.")
+        try:
+            execute = STRUCTURED_EXECUTE_FN or start_structured_execute
+            execute(retried)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("could not retry structured WorkIQ action")
+            message = (
+                f"Could not restart the action: {exc}. Delivery could not be "
+                "confirmed. Check the calendar before retrying."
+            )
+            retried = update_task_action(
+                retried["id"],
+                frozenset({"state", "error"}),
+                state="execute_unconfirmed",
+                error=message,
+            ) or retried
+            return self._fail(502, message)
+
+        self.set_status(202)
+        payload = _enrich(_clean(retried))
+        payload["credits_cumulative"] = _credits_cumulative(tid)
+        self.write(json.dumps({"action": payload}))
+
+
 class CoworkRefineHandler(tornado.web.RequestHandler):
     """POST /api/tasks/<id>/cowork/refine — one more turn, same conversation.
 

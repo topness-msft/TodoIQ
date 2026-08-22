@@ -4202,6 +4202,31 @@ function cwRedoRow(taskId) {
 // so. Redo is framed as "tell Cowork what to change", which reads as steering
 // the existing conversation; a user asking for a clean slate had no way to
 // express it except by typing the request into the correction box.
+function cwRetryDelivery(taskId) {
+    if (!window.confirm('Retry creating this meeting?\n\nThis is safe to repeat: '
+        + 'Riveter sends the same idempotency key, so Microsoft 365 returns the '
+        + 'existing meeting rather than creating a second one.')) return;
+    fetch('/api/tasks/' + taskId + '/cowork/retry', { method: 'POST' })
+    .then(function(res) {
+        return res.json().then(function(data) { return { ok: res.ok, data: data }; });
+    })
+    .then(function(result) {
+        if (!result.ok) {
+            var current = _cwActions[taskId];
+            if (current) current.error = result.data.error || 'Could not retry.';
+            return cwRerender(taskId);
+        }
+        if (result.data.action) {
+            _cwActions[taskId] = result.data.action;
+            cwSyncTaskState(taskId, result.data.action);
+            renderTaskList();
+            startCoworkPoller(taskId);
+        }
+        cwRerender(taskId);
+    })
+    .catch(function(err) { console.error('Failed to retry delivery:', err); });
+}
+
 function cwStartOver(taskId) {
     var structured = cwIsStructured(_cwActions[taskId]);
     var ok = window.confirm(
@@ -4489,15 +4514,29 @@ function renderCoworkCard(task) {
         }
 
         if (a && a.state === 'execute_unconfirmed') {
+            // Only calendar is safely repeatable: Graph dedupes event creates
+            // that share a transactionId, so a retry either books the meeting
+            // that never landed or returns the one that did. Teams and email
+            // have no such key, so offering Retry there would risk a second
+            // message going out.
+            var canRetry = cwIsStructured(a) && a.delivery_channel === 'calendar';
             return cwShell('is-unconfirmed', 'check delivery', task,
                 '<section class="cw-delivery-result is-unconfirmed" data-testid="delivery-unconfirmed">'
                 + '<span class="cw-delivery-mark" aria-hidden="true">!</span><div>'
                 + '<b>Delivery could not be confirmed</b>'
-                + '<span>Check the destination before retrying. ' + escapeHtml(a.error || '') + '</span>'
+                + '<span>' + (canRetry
+                    ? 'Retrying is safe for a meeting: it will not create a second one. '
+                    : 'Check the destination before retrying. ')
+                + escapeHtml(a.error || '') + '</span>'
                 + '</div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
-                '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
+                (canRetry
+                    ? '<button class="cw-btn cw-btn-go" data-testid="cw-retry" '
+                        + 'title="Safe to repeat: the meeting cannot be created twice." '
+                        + 'onclick="cwRetryDelivery(' + task.id + ')">Retry safely</button>'
+                    : '')
+                + '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
                 + cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }

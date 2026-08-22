@@ -143,3 +143,64 @@ def test_structured_delivery_evidence_is_attributed_to_workiq(
         path=os.path.join(TEMP_DIR, "structured-email-delivered.png"),
         full_page=True,
     )
+
+
+def _render_unconfirmed(page: Page, base_url: str, title: str, channel: str,
+                        action_type: str) -> int:
+    task_id = _seed(page, base_url, title)
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """({taskId, channel, actionType}) => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = actionType;
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                id: 501,
+                task_id: taskId,
+                action_type: actionType,
+                state: 'execute_unconfirmed',
+                delivery_channel: channel,
+                structured_payload: '{"schema_version":1,"channel":"'
+                    + channel + '"}',
+                destination_display: 'Rima Reyes',
+                draft: 'Approved content',
+                error: 'Structured worker produced no readable output'
+            };
+            renderDetailPane(task);
+        }""",
+        {"taskId": task_id, "channel": channel, "actionType": action_type},
+    )
+    return task_id
+
+
+def test_unconfirmed_calendar_offers_a_safe_retry(page: Page, base_url: str):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    _render_unconfirmed(
+        page, base_url, "Schedule a 25-minute review", "calendar",
+        "schedule-meeting",
+    )
+
+    card = page.locator(".cw-card")
+    expect(card).to_contain_text("Delivery could not be confirmed")
+    expect(page.get_by_test_id("cw-retry")).to_be_visible()
+    expect(card).to_contain_text("will not create a second one")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "structured-calendar-retry.png"),
+        full_page=True,
+    )
+
+
+def test_unconfirmed_teams_withholds_retry(page: Page, base_url: str):
+    """Teams has no idempotency key, so a retry would post twice."""
+    _render_unconfirmed(
+        page, base_url, "Ping the project chat", "teams", "follow-up",
+    )
+
+    card = page.locator(".cw-card")
+    expect(card).to_contain_text("Delivery could not be confirmed")
+    expect(page.get_by_test_id("cw-retry")).to_have_count(0)
+    expect(card).to_contain_text("Check the destination before retrying")
