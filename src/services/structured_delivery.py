@@ -88,6 +88,12 @@ def parse_result_marker(
     require_delivery_ref: bool | None = None,
 ) -> dict:
     """Parse exactly one correlated result marker, rejecting ambiguous output."""
+    if output is None:
+        # Captured output can be lost without the child failing (a decode error
+        # in the reader thread still yields returncode 0). Absent output is
+        # unreadable, never "nothing happened", so fail closed and stay silent
+        # about whether a write landed.
+        raise ValueError("Structured worker produced no readable output")
     blocks: list[str] = []
     offset = 0
     while True:
@@ -281,11 +287,17 @@ Never retry a write.
 
 
 def _run(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    # encoding/errors are load-bearing, not cosmetic. `text=True` alone decodes
+    # with the locale codec, which on Windows is cp1252; the CLI emits UTF-8, so
+    # the reader thread died on the first non-cp1252 byte and subprocess.run
+    # returned returncode 0 with stdout=None. Every structured channel then
+    # failed. cowork_runner spawns with the same pair for the same reason.
     return subprocess.run(
         argv,
         cwd=str(PROJECT_ROOT),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         check=False,
@@ -323,14 +335,19 @@ def _preview_destination(payload: dict) -> tuple[str, str]:
     if channel == "email":
         recipients = [str(item).strip() for item in payload.get("to") or []]
         return ";".join(filter(None, recipients)), ", ".join(filter(None, recipients))
-    ref = (
-        payload.get("chat_id")
-        or "|".join(
-            str(payload.get(key) or "")
+    chat_id = str(payload.get("chat_id") or "").strip()
+    if chat_id:
+        ref = chat_id
+    else:
+        # Joining raw values here once produced "||" from three empty ids, which
+        # is truthy and sailed through the unresolved-destination guard. Require
+        # the full channel triple instead, so a half-resolved thread fails.
+        parts = [
+            str(payload.get(key) or "").strip()
             for key in ("team_id", "channel_id", "message_id")
-        )
-    )
-    return str(ref or "").strip(), str(payload.get("destination_display") or ref or "")
+        ]
+        ref = "|".join(parts) if all(parts) else ""
+    return ref, str(payload.get("destination_display") or ref or "")
 
 
 def finish_preview(

@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -278,6 +280,202 @@ class TestStructuredDeliveryContract(StructuredDeliveryTestBase):
         latest = get_latest_task_action(task["id"])
         self.assertEqual(latest["state"], "failed")
         self.assertIn("duration changed", latest["error"].lower())
+
+
+class TestStructuredWorkerTransport(StructuredDeliveryTestBase):
+    """Guards the seam between the subprocess and the result parser.
+
+    Production ran every structured channel through `_run`, but no test ever
+    called it: the suite handed `finish_preview`/`finish_execute` a ready-made
+    string. So a decode fault that returned `returncode == 0` with
+    `stdout is None` broke all six paths while the suite stayed green.
+    """
+
+    # '\u25cf' is e2 97 8f in UTF-8, and 0x8f is undefined in cp1252 - the exact
+    # byte that killed the reader thread on the CLI's status banner.
+    UTF8_BANNER = "\u25cf Disabled tools: \u2500\u2500 done\n"
+
+    def _emit(self, text: str) -> subprocess.CompletedProcess:
+        return structured_delivery._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.buffer.write(sys.argv[1].encode('utf-8'))",
+                text,
+            ],
+            timeout=60,
+        )
+
+    def test_run_decodes_utf8_output_instead_of_losing_it(self):
+        result = self._emit(self.UTF8_BANNER)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNotNone(result.stdout, "captured stdout was silently dropped")
+        self.assertIn("Disabled tools", result.stdout)
+
+    def test_run_survives_undecodable_bytes_without_dropping_output(self):
+        """Never trade one lost-output bug for another: replace, don't raise."""
+        result = structured_delivery._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.buffer.write(b'\\xff\\xfe ok')",
+            ],
+            timeout=60,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNotNone(result.stdout)
+        self.assertIn("ok", result.stdout)
+
+    def test_marker_survives_a_utf8_banner_ahead_of_the_result(self):
+        marker = (
+            f"{structured_delivery.RESULT_START}\n"
+            '{"correlation_id":"corr-1","phase":"execute","ok":true,'
+            '"delivery_ref":"event-42"}\n'
+            f"{structured_delivery.RESULT_END}\n"
+        )
+
+        result = self._emit(self.UTF8_BANNER + marker)
+        parsed = structured_delivery.parse_result_marker(
+            result.stdout, correlation_id="corr-1", phase="execute"
+        )
+
+        self.assertEqual(parsed["delivery_ref"], "event-42")
+
+    def test_missing_output_fails_closed_rather_than_crashing(self):
+        with self.assertRaises(ValueError):
+            structured_delivery.parse_result_marker(
+                None, correlation_id="corr-1", phase="preview"
+            )
+
+    def test_lost_preview_output_fails_the_action_with_a_clear_reason(self):
+        task = create_task("Ping the project chat", action_type="follow-up",
+                           source_type="chat")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            structured_payload=json.dumps(
+                structured_delivery.initial_payload(task, "teams")
+            ),
+        )
+
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=None,
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIn("no readable output", latest["error"].lower())
+
+    def test_lost_execution_output_never_claims_delivery(self):
+        """An unreadable write is ambiguous: the message may already be sent."""
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref="sarah@microsoft.com",
+            destination_display="Sarah Goodwin",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "email", "body": "Approved"}
+            ),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=None,
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+        self.assertIsNone(latest["workiq_delivery_ref"])
+
+
+class TestStructuredDestinationResolution(StructuredDeliveryTestBase):
+    def test_teams_channel_reply_needs_the_whole_triple(self):
+        """Joining empty ids produced "||", which is truthy and passed the guard."""
+        ref, _display = structured_delivery._preview_destination(
+            {
+                "channel": "teams",
+                "chat_id": None,
+                "team_id": None,
+                "channel_id": None,
+                "message_id": None,
+            }
+        )
+        self.assertEqual(ref, "")
+
+        partial, _ = structured_delivery._preview_destination(
+            {
+                "channel": "teams",
+                "chat_id": None,
+                "team_id": "team-1",
+                "channel_id": "channel-1",
+                "message_id": None,
+            }
+        )
+        self.assertEqual(partial, "")
+
+        complete, _ = structured_delivery._preview_destination(
+            {
+                "channel": "teams",
+                "chat_id": None,
+                "team_id": "team-1",
+                "channel_id": "channel-1",
+                "message_id": "message-1",
+            }
+        )
+        self.assertEqual(complete, "team-1|channel-1|message-1")
+
+    def test_unresolved_teams_destination_fails_the_preview(self):
+        task = create_task("Ping the project chat", action_type="follow-up",
+                           source_type="chat")
+        envelope = structured_delivery.initial_payload(task, "teams")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            structured_payload=json.dumps(envelope),
+        )
+
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": envelope["correlation_id"],
+                    "phase": "preview",
+                    "ok": True,
+                    "payload": {
+                        "schema_version": 1,
+                        "channel": "teams",
+                        "destination_kind": "channel",
+                        "chat_id": None,
+                        "team_id": None,
+                        "channel_id": None,
+                        "message_id": None,
+                        "destination_display": "Project channel",
+                        "body": "Following up on the rollout.",
+                    },
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id=envelope["correlation_id"],
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIn("destination", latest["error"].lower())
 
 
 class TestStructuredDeliveryMigration(unittest.TestCase):
