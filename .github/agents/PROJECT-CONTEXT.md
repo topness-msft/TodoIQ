@@ -3,12 +3,15 @@
 ## One-liner
 TodoIQ is a local Windows task manager that detects actionable Microsoft 365
 work through WorkIQ, stores it in SQLite, and exposes a Tornado dashboard with
-Cowork-powered draft, approval, and direct-action flows.
+structured WorkIQ delivery plus Cowork-powered general action flows.
 
 ## Architecture principles (immutable unless explicitly revised)
-- WorkIQ detects tasks; Cowork researches/drafts actions; TodoIQ owns durable
-  task state and human-facing approval boundaries.
-- Cowork previews are write-barriered. External M365 writes require a separate
+- WorkIQ detects tasks and owns structured meeting, email, and Teams delivery;
+  Cowork researches/drafts all other actions. TodoIQ owns durable task state and
+  human-facing approval boundaries.
+- Structured WorkIQ previews expose read-only tools. Execution exposes one
+  channel-specific write primitive and requires a correlated external reference.
+  Cowork previews remain write-barriered. External M365 writes require a separate
   TodoIQ execution action, an exact-draft confirmation, and a durable child audit
   row with duplicate-send protection.
 - SQLite is the source of truth. Schema changes are additive/idempotent and
@@ -32,6 +35,9 @@ Cowork-powered draft, approval, and direct-action flows.
   the middle, process runner in the lower third.
 - `src/services/claude_runner.py` — shared `copilot -p` subprocess manager for
   WorkIQ-backed slash commands.
+- `src/services/structured_delivery.py` — read-only WorkIQ preview prompts,
+  channel-isolated write prompts, strict correlated results, and worker lifecycle
+  for calendar, email, and Teams delivery.
 - `static/js/dashboard.js` — `/` dashboard behavior and Cowork card. Large
   classic script; task list/detail rendering is in the first quarter, Cowork
   rendering/transitions/polling near the end.
@@ -159,8 +165,9 @@ Cowork-powered draft, approval, and direct-action flows.
 - `task_actions` latest row is ordered by integer `id`, not second-precision
   timestamps.
 - Cowork `tool_trace[].ok` means the call returned, not that a write executed.
-- Execution claims delivery only after a recognized write tool succeeds on the
-  unbarriered execution turn; ambiguous outcomes require checking the destination.
+- Structured execution claims delivery only after a matching correlation ID and
+  non-empty WorkIQ delivery reference. Ambiguous outcomes are never retried
+  automatically and require checking the destination.
 - Cowork CLI 1.21.89 resumed SSE omits required `conversationId`; TodoIQ backend
   resume needs the compatibility shim and persisted full island URL.
 - Cowork auth can expire between successful runs; runner performs one silent

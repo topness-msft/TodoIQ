@@ -84,11 +84,13 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         cr._cost_snapshot_fn = lambda: None
         self._base_handoff_fn = cowork_handler.HANDOFF_FN
         self._base_question_fn = cowork_handler.BLOCKED_QUESTION_FN
+        self._base_structured_channel_fn = cowork_handler.STRUCTURED_CHANNEL_FN
         # Same reasoning as the cost seam: GET /v1/tasks is a network call and
         # the card GET runs in many tests. Default to "no handoff info", which
         # is exactly the additive-degrades-to-today path.
         cowork_handler.HANDOFF_FN = lambda _cid: None
         cowork_handler.BLOCKED_QUESTION_FN = lambda _cid: None
+        cowork_handler.STRUCTURED_CHANNEL_FN = lambda _task: None
         cr.reset_handoff_cache()
         # Tests must never read the user's real data/settings.json — with the
         # API transport flag on for dogfood, these tests made real network calls.
@@ -115,6 +117,7 @@ class CoworkAPITestBase(tornado.testing.AsyncHTTPTestCase):
         cr._cost_snapshot_fn = self._base_cost_fn
         cowork_handler.HANDOFF_FN = self._base_handoff_fn
         cowork_handler.BLOCKED_QUESTION_FN = self._base_question_fn
+        cowork_handler.STRUCTURED_CHANNEL_FN = self._base_structured_channel_fn
         cr.api_transport_enabled = self._base_api_flag
         cr.tenant_barrier_precheck = self._base_precheck
         cr.reset_handoff_cache()

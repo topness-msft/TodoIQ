@@ -11,7 +11,10 @@ triggers:
 
 Find optimal meeting times based on calendar availability via WorkIQ.
 
-**Important:** WorkIQ cannot create or send meeting invites. It can only query work hours and calendar availability to suggest suitable times. The user must send the invite themselves (e.g. via Outlook).
+**Important:** Keep this skill read-only while finding availability. In the
+Riveter dashboard, the structured WorkIQ delivery pipeline creates the event
+after the user selects a verified slot. Do not route meeting scheduling through
+Cowork and do not tell the user that WorkIQ cannot create events.
 
 ## Steps
 
@@ -44,7 +47,7 @@ Find optimal meeting times based on calendar availability via WorkIQ.
    2. Wednesday Feb 18, 2:00-2:25 PM — After lunch, no conflicts
    3. Thursday Feb 19, 9:00-9:25 AM — Start of day, good for focused discussion
 
-   Next step: Send the invite from Outlook for your preferred slot.
+   Next step: Select a verified slot in Riveter to create the meeting.
    ```
 
 7. **Save context**: Store the availability analysis as task_context in the database:

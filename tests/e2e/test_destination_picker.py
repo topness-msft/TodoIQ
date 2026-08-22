@@ -918,7 +918,7 @@ class TestDestinationBinding:
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
                 "The attendee list changed after this preview. Start over so "
-                "Cowork can check availability for the exact people shown in Key People."
+                "WorkIQ can check availability for the exact people shown in Key People."
             ]
         finally:
             _delete_task(page, base_url, task_id)
@@ -959,7 +959,7 @@ class TestDestinationBinding:
             expect(page.get_by_test_id("execute-confirmation")).to_have_count(0)
             assert dialogs == [
                 "The attendee list changed after this preview. Start over so "
-                "Cowork can check availability for the exact people shown in Key People."
+                "WorkIQ can check availability for the exact people shown in Key People."
             ]
         finally:
             _delete_task(page, base_url, task_id)

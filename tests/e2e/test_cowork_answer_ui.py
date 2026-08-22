@@ -1066,7 +1066,7 @@ def test_cowork_pane_waits_for_identity_confirmation_during_reparse(
             task_id,
         )
         expect(page.get_by_test_id("cw-identity-pending")).to_have_count(0)
-        expect(page.get_by_text("Preview with Cowork", exact=True)).to_be_visible()
+        expect(page.get_by_text("Preview with WorkIQ", exact=True)).to_be_visible()
     finally:
         page.request.delete(f"{base_url}/api/tasks/{task_id}")
 

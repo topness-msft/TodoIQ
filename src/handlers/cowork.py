@@ -25,6 +25,7 @@ from ..models import (
     claim_blocked_question_answer,
     confirm_destination,
     create_execution_action,
+    create_structured_execution_action,
     create_task_action,
     final_action_draft,
     get_latest_task_action,
@@ -75,6 +76,12 @@ from ..services.cowork_runner import (
     start_execution,
 )
 from ..services.workspace_settings import api_transport_enabled
+from ..services.structured_delivery import (
+    channel_for_task as structured_channel_for_task,
+    initial_payload as structured_initial_payload,
+    start_execute as start_structured_execute,
+    start_preview as start_structured_preview,
+)
 from ..services.calendar_time import (
     calendar_event_duration_minutes,
     calendar_event_is_future,
@@ -107,6 +114,9 @@ ANSWER_FN = None
 EXECUTE_FN = None
 EXECUTE_TRANSPORT_ENABLED_FN = None
 NOW_FN = None
+STRUCTURED_PREVIEW_FN = None
+STRUCTURED_EXECUTE_FN = None
+STRUCTURED_CHANNEL_FN = None
 
 # Bulk of the CLI payload (82 entries in the spike) and of no value once parsed.
 _NEVER_PERSIST = ("sse_events",)
@@ -508,6 +518,12 @@ def _enrich(action: dict) -> dict:
         action["waiting_on_user"] = False
         action["interaction_request"] = None
     elif action.get("state") == "previewing" and demo_mode():
+        action["waiting_on_user"] = bool(action.get("interaction_request"))
+    elif (
+        action.get("state") == "previewing"
+        and action.get("delivery_channel") == "calendar"
+        and action.get("structured_payload")
+    ):
         action["waiting_on_user"] = bool(action.get("interaction_request"))
     elif (
         action.get("state") == "previewing"
@@ -1283,6 +1299,40 @@ class CoworkHandler(tornado.web.RequestHandler):
                     400,
                     f"Resolve the {noun} for {names} before scheduling.",
                 )
+        structured_channel = (
+            STRUCTURED_CHANNEL_FN or structured_channel_for_task
+        )(task)
+        if structured_channel:
+            payload = structured_initial_payload(task, structured_channel)
+            if redirect_text:
+                payload["redirect_text"] = redirect_text
+            action = create_task_action(
+                tid,
+                action_type=task.get("action_type") or "general",
+                intent=task.get("coaching_text"),
+                notes_snapshot=task.get("user_notes"),
+                redirect_text=redirect_text,
+                delivery_channel=structured_channel,
+                structured_payload=json.dumps(
+                    payload, separators=(",", ":"), sort_keys=True
+                ),
+                interaction_mode="interaction",
+            )
+            try:
+                preview = STRUCTURED_PREVIEW_FN or start_structured_preview
+                preview(task, action)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("could not start structured WorkIQ preview")
+                update_task_action(
+                    action["id"],
+                    frozenset({"state", "error"}),
+                    state="failed",
+                    error=f"Could not start WorkIQ preview: {exc}",
+                )
+                return self._fail(500, f"Could not start WorkIQ preview: {exc}")
+            self.set_status(202)
+            return self.write(json.dumps({"action": _enrich(_clean(action))}))
+
         destination = parse_source_url(task.get("source_url"))
         is_schedule = task.get("action_type") == "schedule-meeting"
         is_email = task.get("action_type") == "respond-email"
@@ -1370,7 +1420,7 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(404, "No Cowork preview for this task")
 
         pre_state = action["state"]
-        if (
+        if not action.get("structured_payload") and (
             action["state"] in {"previewing", "executing"}
             or (
                 action["state"] == "ready"
@@ -1391,7 +1441,9 @@ class CoworkHandler(tornado.web.RequestHandler):
             if action.get("state") == "executing"
             else preview_label(tid)
         )
-        payload["progress"] = get_progress(label)
+        payload["progress"] = (
+            [] if action.get("structured_payload") else get_progress(label)
+        )
 
         # What happened after "Open in Cowork". Only meaningful once a preview
         # has finished and been handed over, so a run still in `previewing`
@@ -1476,11 +1528,46 @@ class CoworkHandler(tornado.web.RequestHandler):
             return self._fail(400, "No editable fields supplied")
         if action.get("state") not in {"previewing", "ready"}:
             return self._fail(409, "A completed action cannot be edited.")
+        updates = {
+            key: value for key, value in body.items()
+            if key in ACTION_EDITABLE_FIELDS
+        }
+        if action.get("structured_payload") and "draft_edited" in updates:
+            edited = str(updates["draft_edited"] or "").strip()
+            try:
+                payload = json.loads(action["structured_payload"])
+            except (json.JSONDecodeError, TypeError):
+                return self._fail(409, "The structured action payload is invalid.")
+            channel = payload.get("channel")
+            if channel == "email":
+                lines = edited.splitlines()
+                if not lines or not re.match(r"^Subject:[ \t]*\S", lines[0], re.I):
+                    return self._fail(
+                        400, "The email draft must start with a Subject: line."
+                    )
+                message = "\n".join(lines[1:]).strip()
+                if not message:
+                    return self._fail(400, "The email draft must include a body.")
+                payload["subject"] = re.sub(
+                    r"^Subject:[ \t]*", "", lines[0], flags=re.I
+                ).strip()
+                payload["body"] = message
+            elif channel == "teams":
+                if not edited:
+                    return self._fail(400, "The Teams message cannot be empty.")
+                payload["body"] = edited
+            else:
+                return self._fail(
+                    409, "This structured action cannot be edited at this stage."
+                )
+            updates["structured_payload"] = json.dumps(
+                payload, separators=(",", ":"), sort_keys=True
+            )
         updated = update_task_action(
             action["id"],
-            ACTION_EDITABLE_FIELDS,
+            frozenset(updates),
             required_state=action["state"],
-            **body,
+            **updates,
         )
         if updated is None:
             return self._fail(409, "The draft changed state before it was saved.")
@@ -1515,19 +1602,9 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         if not task:
             return self._fail(404, "Not found")
 
-        transport_enabled = (
-            EXECUTE_TRANSPORT_ENABLED_FN or api_transport_enabled
-        )
-        if not transport_enabled():
-            return self._fail(
-                409, "Direct actions require the Cowork API transport."
-            )
-
         parent = get_latest_task_action(tid)
         if not parent or parent.get("state") != "ready":
             return self._fail(409, "There is no approved draft ready to send.")
-        if not parent.get("conversation_id"):
-            return self._fail(409, "This draft has no Cowork conversation.")
         if not parent.get("destination_confirmed_at"):
             return self._fail(409, "Review and confirm the destination first.")
         final_draft = final_action_draft(parent)
@@ -1549,6 +1626,47 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                     409,
                     "The final email draft must include a message body.",
                 )
+        if parent.get("structured_payload"):
+            action = create_structured_execution_action(
+                parent["id"], approved_snapshot
+            )
+            if not action:
+                return self._fail(
+                    409,
+                    "The draft or destination changed after review, or this action "
+                    "is already being handled. Review it again before sending.",
+                )
+            try:
+                execute = STRUCTURED_EXECUTE_FN or start_structured_execute
+                execute(action)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("could not start structured WorkIQ action")
+                message = (
+                    f"Could not start the action: {exc}. Delivery could not be "
+                    "confirmed. Check the destination before retrying."
+                )
+                action = update_task_action(
+                    action["id"],
+                    frozenset({"state", "error"}),
+                    state="execute_unconfirmed",
+                    error=message,
+                ) or action
+                return self._fail(502, message)
+            self.set_status(202)
+            payload = _enrich(_clean(action))
+            payload["credits_cumulative"] = _credits_cumulative(tid)
+            return self.write(json.dumps({"action": payload}))
+
+        transport_enabled = (
+            EXECUTE_TRANSPORT_ENABLED_FN or api_transport_enabled
+        )
+        if not transport_enabled():
+            return self._fail(
+                409, "Direct actions require the Cowork API transport."
+            )
+        if not parent.get("conversation_id"):
+            return self._fail(409, "This draft has no Cowork conversation.")
+
         if parent.get("action_type") == "schedule-meeting":
             unresolved = _unresolved_schedule_people(task)
             current_ref, current_display = _schedule_destination(
@@ -1785,7 +1903,11 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
         action = _enrich(action)
         if action.get("state") not in {"previewing", "executing"}:
             return self._fail(409, "That Cowork turn is not running")
-        if not action.get("conversation_id"):
+        structured_calendar = (
+            action.get("delivery_channel") == "calendar"
+            and bool(action.get("structured_payload"))
+        )
+        if not structured_calendar and not action.get("conversation_id"):
             return self._fail(409, "That preview has no Cowork conversation")
         if not action.get("waiting_on_user"):
             return self._fail(409, "Cowork is not waiting for an answer")
@@ -1833,9 +1955,10 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 "attendees. Ask Cowork to check availability again.",
             )
         if task and task.get("action_type") == "schedule-meeting":
-            cleaned_answers = schedule_answers_for_recheck(
-                interaction, cleaned_answers
-            )
+            if not structured_calendar:
+                cleaned_answers = schedule_answers_for_recheck(
+                    interaction, cleaned_answers
+                )
 
         previous_question = action.get("blocked_question")
         answer_record = json.dumps(
@@ -1851,6 +1974,135 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             action["id"], previous_question, answer_record
         ):
             return self._fail(409, "That Cowork question was already answered")
+
+        if structured_calendar:
+            selected_values = {
+                str(value).strip()
+                for value in submitted_answers.values()
+                if str(value).strip()
+            }
+            evidence_slots = (
+                (interaction.get("schedule_evidence") or {}).get("slots") or []
+            )
+            selected_slots = [
+                slot
+                for slot in evidence_slots
+                if isinstance(slot, dict)
+                and str(slot.get("value") or "").strip() in selected_values
+            ]
+            if len(selected_slots) != 1:
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
+                return self._fail(400, "Select exactly one verified meeting time.")
+            selected_slot = selected_slots[0]
+            try:
+                preview_payload = json.loads(action["structured_payload"])
+            except (json.JSONDecodeError, TypeError):
+                preview_payload = None
+            if not isinstance(preview_payload, dict):
+                return self._fail(409, "The structured meeting preview is invalid.")
+            event = {
+                "schema_version": 1,
+                "channel": "calendar",
+                "subject": preview_payload.get("subject"),
+                "body": preview_payload.get("body") or "",
+                "attendees": preview_payload.get("attendees") or [],
+                "duration_minutes": preview_payload.get("duration_minutes"),
+                "start": selected_slot.get("start"),
+                "end": selected_slot.get("end"),
+                "time_zone": selected_slot.get("timezone"),
+            }
+            now = NOW_FN() if NOW_FN is not None else None
+            if (
+                not event["subject"]
+                or not event["attendees"]
+                or not calendar_event_is_future(event, now=now)
+                or calendar_event_duration_minutes(event)
+                != schedule_duration_minutes(task)
+                or not calendar_event_matches_slot(event, selected_slot)
+            ):
+                return self._fail(
+                    409,
+                    "That verified meeting time is no longer safe to create. "
+                    "Start over and check availability again.",
+                )
+            destination_ref, destination_display = _schedule_destination(
+                schedule_attendees(task)
+            )
+            ready = update_task_action(
+                action["id"],
+                frozenset({
+                    "state",
+                    "draft",
+                    "finding",
+                    "blocked_question",
+                    "answered_interaction",
+                    "structured_payload",
+                    "destination_ref",
+                    "destination_display",
+                    "destination_source",
+                }),
+                required_state="previewing",
+                state="ready",
+                draft=(action.get("draft") or action.get("finding") or "").strip(),
+                finding=(action.get("finding") or action.get("draft") or "").strip(),
+                blocked_question="",
+                answered_interaction=answer_record,
+                structured_payload=json.dumps(
+                    event, separators=(",", ":"), sort_keys=True
+                ),
+                destination_ref=destination_ref,
+                destination_display=destination_display,
+                destination_source="schedule_selection",
+            )
+            if not ready:
+                return self._fail(409, "That meeting selection is no longer current.")
+            ready = confirm_destination(
+                ready["id"],
+                "calendar",
+                destination_ref,
+                destination_display,
+                "schedule_selection",
+            )
+            if not ready:
+                return self._fail(409, "The meeting attendees could not be confirmed.")
+            snapshot = {
+                "parent_action_id": ready["id"],
+                "draft": final_action_draft(ready),
+                "destination_ref": ready.get("destination_ref") or "",
+                "destination_display": ready.get("destination_display") or "",
+                "delivery_channel": ready.get("delivery_channel") or "",
+                "destination_confirmed_at": (
+                    ready.get("destination_confirmed_at") or ""
+                ),
+            }
+            execution = create_structured_execution_action(ready["id"], snapshot)
+            if not execution:
+                return self._fail(
+                    409,
+                    "That meeting is already being created or the selection changed.",
+                )
+            try:
+                execute = STRUCTURED_EXECUTE_FN or start_structured_execute
+                execute(execution)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("could not create selected structured meeting")
+                message = (
+                    f"Could not start meeting creation: {exc}. Delivery could not "
+                    "be confirmed. Check the calendar before retrying."
+                )
+                execution = update_task_action(
+                    execution["id"],
+                    frozenset({"state", "error"}),
+                    state="execute_unconfirmed",
+                    error=message,
+                ) or execution
+                return self._fail(502, message)
+            self.set_status(202)
+            return self.write(
+                json.dumps({"action": _enrich(_clean(execution))})
+            )
 
         if (
             task
@@ -2046,6 +2298,16 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
             )
         if normalized_email_ref:
             ref = normalized_email_ref
+        if action.get("structured_payload") and (
+            channel != (action.get("delivery_channel") or "")
+            or ref != (action.get("destination_ref") or "")
+            or display != (action.get("destination_display") or "")
+        ):
+            return self._fail(
+                409,
+                "The WorkIQ destination was resolved during preview and cannot "
+                "be changed without starting a new preview.",
+            )
 
         # Provenance is server owned: anything arriving over HTTP is a picker
         # confirmation, never an automatic resolution.

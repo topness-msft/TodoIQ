@@ -562,12 +562,12 @@ _ACTION_INSERT_FIELDS = (
     "island_url", "delivery_channel", "destination_display", "destination_source",
     "destination_confirmed_at", "parent_action_id",
     "blocked_question", "answered_interaction",
-    "interaction_mode",
+    "interaction_mode", "structured_payload", "workiq_delivery_ref",
 )
 
 # Teams and email are the only transports TodoIQ can describe today. The value
 # is orthogonal to destination_kind, which describes audience size, not channel.
-DELIVERY_CHANNELS = frozenset({"teams", "email"})
+DELIVERY_CHANNELS = frozenset({"teams", "email", "calendar"})
 _COWORK_REVISION_FIELDS = frozenset({
     "title",
     "description",
@@ -698,6 +698,97 @@ def create_execution_action(
               AND COALESCE(TRIM(parent.destination_ref), '') <> ''
               AND COALESCE(TRIM(parent.destination_display), '') <> ''
               AND COALESCE(TRIM(parent.conversation_id), '') <> ''
+              AND ? <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_actions child
+                  WHERE child.parent_action_id = parent.id
+                    AND child.state IN (
+                        'executing','executed','execute_unconfirmed'
+                    )
+              )
+            """,
+            (final_draft, final_draft, parent_action_id, final_draft),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        action_id = cursor.lastrowid
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def create_structured_execution_action(
+    parent_action_id: int, approved_snapshot: dict
+) -> dict | None:
+    """Atomically claim one structured preview without a Cowork conversation."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        parent = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (parent_action_id,)
+        ).fetchone()
+        if not parent:
+            conn.rollback()
+            return None
+        parent = dict(parent)
+        final_draft = final_action_draft(parent)
+        expected = {
+            "parent_action_id": parent["id"],
+            "draft": final_draft,
+            "destination_ref": parent.get("destination_ref") or "",
+            "destination_display": parent.get("destination_display") or "",
+            "delivery_channel": parent.get("delivery_channel") or "",
+            "destination_confirmed_at": parent.get("destination_confirmed_at") or "",
+        }
+        if (
+            approved_snapshot != expected
+            or not (parent.get("structured_payload") or "").strip()
+        ):
+            conn.rollback()
+            return None
+        cursor = conn.execute(
+            """
+            INSERT INTO task_actions (
+                task_id, action_type, cowork_revision, state, intent, notes_snapshot,
+                redirect_text, composed_prompt, finding, draft, draft_edited,
+                destination_kind, destination_ref, delivery_channel,
+                destination_display, destination_confirmed_at, destination_source,
+                parent_action_id, interaction_mode, execution_requested_at,
+                structured_payload
+            )
+            SELECT
+                task_id, action_type, cowork_revision, 'executing', intent,
+                notes_snapshot, redirect_text, NULL, finding, ?, ?,
+                destination_kind, destination_ref, delivery_channel,
+                destination_display, destination_confirmed_at, destination_source,
+                id, 'interaction', strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                structured_payload
+            FROM task_actions parent
+            WHERE parent.id = ?
+              AND parent.state = 'ready'
+              AND EXISTS (
+                  SELECT 1 FROM tasks current
+                  WHERE current.id = parent.task_id
+                    AND current.cowork_revision = parent.cowork_revision
+                    AND current.action_type = parent.action_type
+              )
+              AND parent.id = (
+                  SELECT MAX(latest.id)
+                  FROM task_actions latest
+                  WHERE latest.task_id = parent.task_id
+              )
+              AND parent.destination_confirmed_at IS NOT NULL
+              AND COALESCE(TRIM(parent.destination_ref), '') <> ''
+              AND COALESCE(TRIM(parent.destination_display), '') <> ''
+              AND COALESCE(TRIM(parent.structured_payload), '') <> ''
               AND ? <> ''
               AND NOT EXISTS (
                   SELECT 1 FROM task_actions child

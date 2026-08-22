@@ -254,6 +254,8 @@ class TestTaskActionsSchema(unittest.TestCase):
             "had_interaction",
             "execution_requested_at",
             "delivery_confirmed_at",
+            "structured_payload",
+            "workiq_delivery_ref",
             # A refine turn continues an existing Cowork conversation. It is
             # still its own row so the correction chain stays auditable, and
             # this points back at the attempt it refines.

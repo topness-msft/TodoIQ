@@ -266,7 +266,13 @@ def _migrate(conn: sqlite3.Connection):
     action_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_actions'"
     ).fetchone()
-    if action_sql and "execute_unconfirmed" not in (action_sql[0] or ""):
+    action_definition = (action_sql[0] or "") if action_sql else ""
+    if (
+        "execute_unconfirmed" not in action_definition
+        or "'calendar'" not in action_definition
+        or "structured_payload" not in action_cols
+        or "workiq_delivery_ref" not in action_cols
+    ):
         _migrate_task_action_execution_states(conn)
 
     # Migrate sync_log to support 'full_scan' sync_type
@@ -346,11 +352,23 @@ def _migrate_identity_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
-    """Rebuild task_actions because SQLite cannot widen a CHECK in place."""
+    """Rebuild task_actions because SQLite cannot widen CHECKs in place."""
     columns = [
         row[1] for row in conn.execute("PRAGMA table_info(task_actions)").fetchall()
     ]
-    copy_columns = ", ".join(columns)
+    current_columns = {
+        "id", "task_id", "action_type", "cowork_revision", "state", "intent",
+        "notes_snapshot", "redirect_text", "composed_prompt", "finding", "draft",
+        "draft_edited", "destination_kind", "destination_ref", "conversation_id",
+        "terminal_status", "tool_trace", "cost_credits", "error", "seen_at",
+        "island_url", "delivery_channel", "destination_display",
+        "destination_confirmed_at", "destination_source", "parent_action_id",
+        "blocked_question", "answered_interaction", "interaction_mode",
+        "completed_at", "had_interaction", "execution_requested_at",
+        "delivery_confirmed_at", "structured_payload", "workiq_delivery_ref",
+        "created_at", "updated_at",
+    }
+    copy_columns = ", ".join(column for column in columns if column in current_columns)
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
@@ -386,7 +404,7 @@ def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
                 seen_at          TEXT,
                 island_url       TEXT,
                 delivery_channel TEXT
-                                     CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email')),
+                                     CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email','calendar')),
                 destination_display TEXT,
                 destination_confirmed_at TEXT,
                 destination_source TEXT,
@@ -400,6 +418,8 @@ def _migrate_task_action_execution_states(conn: sqlite3.Connection) -> None:
                                       CHECK (had_interaction IN (0,1)),
                 execution_requested_at TEXT,
                 delivery_confirmed_at TEXT,
+                structured_payload TEXT,
+                workiq_delivery_ref TEXT,
                 created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                 updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
@@ -539,7 +559,7 @@ CREATE TABLE IF NOT EXISTS task_actions (
     seen_at          TEXT,
     island_url       TEXT,
     delivery_channel TEXT
-                         CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email')),
+                         CHECK (delivery_channel IS NULL OR delivery_channel IN ('teams','email','calendar')),
     destination_display TEXT,
     destination_confirmed_at TEXT,
     destination_source TEXT,
@@ -553,6 +573,8 @@ CREATE TABLE IF NOT EXISTS task_actions (
                           CHECK (had_interaction IN (0,1)),
     execution_requested_at TEXT,
     delivery_confirmed_at TEXT,
+    structured_payload TEXT,
+    workiq_delivery_ref TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

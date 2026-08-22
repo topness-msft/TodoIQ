@@ -904,7 +904,7 @@ function renderDetailPane(task) {
     evidenceHtml += '<div class="detail-card">'
         + '<div class="detail-label">Notes</div>'
         + '<div class="notes-add-row">'
-        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for Cowork)" '
+        + '<input type="text" class="notes-add-input" id="notes-add-input" placeholder="Quick note\u2026 (context for this action)" '
         + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTimestampedNote(' + task.id + ')}">'
         + '<button class="btn btn-sm notes-add-btn" onclick="addTimestampedNote(' + task.id + ')">+</button>'
         + '</div>'
@@ -935,7 +935,8 @@ function renderDetailPane(task) {
             .indexOf(workspaceAction.state) >= 0;
     var workspaceHtml = (['parsed', 'queued', 'parsing'].indexOf(task.parse_status) >= 0
             || hasLiveWorkspaceAction)
-        ? '<section class="detail-workspace" aria-label="Cowork workspace">'
+        ? '<section class="detail-workspace" aria-label="'
+            + (cwTaskUsesWorkIQ(task) ? 'WorkIQ' : 'Cowork') + ' workspace">'
             + renderCoworkCard(task)
             + '</section>'
         : '';
@@ -3298,14 +3299,30 @@ function cwHeadStatus(a) {
     return '<span class="cw-head-status">' + cwOpenLink(a, 'Open in Cowork') + '</span>';
 }
 
+function cwIsStructured(a) {
+    return Boolean(a && a.structured_payload);
+}
+
+function cwTaskUsesWorkIQ(task) {
+    if (!task) return false;
+    return task.action_type === 'schedule-meeting'
+        || task.action_type === 'respond-email'
+        || ((task.action_type === 'follow-up'
+                || task.action_type === 'awaiting-response')
+            && ['chat', 'teams', 'teams_chat', 'teams-channel']
+                .indexOf(task.source_type) >= 0);
+}
+
 function cwShell(cls, badge, task, body, foot, action) {
     var label = CW_LABELS[task.action_type] || 'Action';
+    var provider = cwIsStructured(action) || (!action && cwTaskUsesWorkIQ(task))
+        ? 'WorkIQ' : 'Cowork';
     return '<div class="cw-card ' + cls + '">'
         + '<div class="cw-head">'
         // Referenced rather than inlined: the asset is gradient-based, and its
         // <defs> ids would collide with every other copy on the page.
         + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
-        + '<span class="cw-type">' + label + ' &middot; Cowork</span>'
+        + '<span class="cw-type">' + label + ' &middot; ' + provider + '</span>'
         + cwHeadStatus(action)
         + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
         + '</div>'
@@ -3632,7 +3649,7 @@ function cwOpenExecuteConfirm(taskId) {
                     || action.destination_ref !== currentDestination.ref
                     || action.destination_display !== currentDestination.display) {
                 window.alert('The attendee list changed after this preview. '
-                    + 'Start over so Cowork can check availability for the exact '
+                    + 'Start over so WorkIQ can check availability for the exact '
                     + 'people shown in Key People.');
                 return;
             }
@@ -3727,7 +3744,8 @@ function cwOpenExecuteConfirm(taskId) {
             + destinationHtml + '</div>'
             + '<label class="source-modal-label">Final draft</label>'
             + '<div class="cw-execute-draft">' + cwDraftDisplay(action, approvalDraft) + '</div>'
-            + '<div class="cw-execute-warning">This performs the action through Cowork. '
+            + '<div class="cw-execute-warning">This performs the action through '
+            + (cwIsStructured(action) ? 'WorkIQ. ' : 'Cowork. ')
             + 'The destination and draft cannot be changed after confirmation.</div>')
             + '<div class="cw-execute-error" id="execute-modal-error" role="alert"></div>'
             + '<div class="source-modal-buttons">'
@@ -3809,15 +3827,13 @@ function cwNoInteractionComplete(action) {
     return '';
 }
 
-// The intent line is WorkIQ's suggested next action. It remains editable here
-// because retiring the AI Coaching card would otherwise remove the only way to
-// correct generic boilerplate BEFORE Cowork runs. It writes coaching_text
-// through the existing PUT /api/tasks/<id>, reusing saveCoaching().
+// The intent line remains editable before the selected action engine runs.
 function cwIntentBlock(task, editable) {
     var intent = task.coaching_text || '';
     if (!intent) return '';
     return '<div class="cw-intent">'
-        + '<span class="i-label">Asking Cowork to:</span> '
+        + '<span class="i-label">Asking '
+        + (cwTaskUsesWorkIQ(task) ? 'WorkIQ' : 'Cowork') + ' to:</span> '
         + '<span id="coaching-display-' + task.id + '">' + escapeHtml(intent) + '</span>'
         + (editable
             ? '<span class="i-edit" onclick="toggleCoachingEdit(' + task.id + ')">Change</span>'
@@ -4091,7 +4107,9 @@ function cwHandoffAgo(ms) {
 function cwFindingBlock(finding, taskId) {
     if (!finding) return '';
     var expanded = Boolean(_cwFindingExpanded[taskId]);
-    return '<div class="cw-finding"><div class="cw-finding-label">What Cowork found</div>'
+    var action = _cwActions[taskId];
+    return '<div class="cw-finding"><div class="cw-finding-label">What '
+        + (cwIsStructured(action) ? 'WorkIQ' : 'Cowork') + ' found</div>'
         + '<div class="cw-finding-body' + (expanded ? '' : ' cw-finding-clamped')
         + '" id="cw-finding-' + taskId + '">'
         + renderCoworkMarkdown(_stripContextRefs(finding)) + '</div>'
@@ -4162,11 +4180,13 @@ function cwRedoRow(taskId) {
 // the existing conversation; a user asking for a clean slate had no way to
 // express it except by typing the request into the correction box.
 function cwStartOver(taskId) {
+    var structured = cwIsStructured(_cwActions[taskId]);
     var ok = window.confirm(
-        'Start a new Cowork conversation for this task?\n\n'
-        + 'The current draft is abandoned and research begins again from '
-        + 'scratch, with no correction carried over. The previous run stays in '
-        + 'history, and the audience you confirmed is kept.');
+        (structured
+            ? 'Start a new WorkIQ preview for this task?\n\n'
+            : 'Start a new Cowork conversation for this task?\n\n')
+        + 'The current draft is abandoned and research begins again from scratch. '
+        + 'The previous run stays in history.');
     if (!ok) return;
     delete _cwRedo[taskId];
     delete _cwEditing[taskId];
@@ -4363,9 +4383,10 @@ function renderCoworkCard(task) {
                 && !_cwPollers[task.id]) {
             startCoworkPoller(task.id);
         }
+        var structured = cwIsStructured(a);
         var prog = (a.progress && a.progress.length)
             ? a.progress[a.progress.length - 1]
-            : 'Cowork is reading M365';
+            : (structured ? 'WorkIQ is reading M365' : 'Cowork is reading M365');
         // Cowork can stop mid-run to ask a question in the web app, and until
         // it is answered nothing else happens. A spinner here reads as "still
         // working", which told Phil to keep waiting through 13 minutes of a run
@@ -4378,7 +4399,10 @@ function renderCoworkCard(task) {
                 : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>';
             var answerButton = interaction
                 ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
-                    + 'onclick="cwSendAnswer(' + task.id + ')">Answer and continue</button>'
+                    + 'onclick="cwSendAnswer(' + task.id + ')">'
+                    + (structured && a.delivery_channel === 'calendar'
+                        ? 'Select &amp; create meeting' : 'Answer and continue')
+                    + '</button>'
                 : '';
             return cwShell('is-running', 'needs you', task,
                 cwModeSwitch(task.id, a, true)
@@ -4386,12 +4410,14 @@ function renderCoworkCard(task) {
                 + '<div class="cw-blocked" data-testid="cw-blocked" '
                 + 'data-cw-invocation="'
                 + escapeAttr(interaction ? interaction.invocation_id : '') + '">'
-                + '<b>Cowork is waiting for your answer.</b>'
+                + '<b>' + (structured
+                    ? 'Riveter is waiting for your selection.'
+                    : 'Cowork is waiting for your answer.') + '</b>'
                 + (a.error ? '<div class="cw-error">' + escapeHtml(a.error) + '</div>' : '')
                 + question
                 + '</div>',
                 answerButton
-                + (a.state === 'previewing'
+                + (a.state === 'previewing' && !structured
                     ? '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
                         + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
                     : '')
@@ -4423,7 +4449,10 @@ function renderCoworkCard(task) {
                 '<section class="cw-delivery-result is-confirmed" data-testid="delivery-confirmed">'
                 + '<span class="cw-delivery-mark" aria-hidden="true">\u2713</span><div>'
                 + '<b>Delivered to ' + escapeHtml(a.destination_display || a.destination_ref || 'the destination')
-                + '</b><span>Cowork returned positive delivery evidence.</span></div></section>'
+                + '</b><span>' + (structured
+                   ? 'WorkIQ returned positive delivery evidence.'
+                   : 'Cowork returned positive delivery evidence.')
+                + '</span></div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
                 (canCompleteDelivered
@@ -4458,8 +4487,8 @@ function renderCoworkCard(task) {
             + '<span class="cw-progress-sub" id="cw-hb-' + task.id + '">'
             + escapeHtml(cwElapsed(task.id, a)) + '</span>'
             + '</span></div>',
-            '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
-            + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>'
+            (structured ? '' : '<button class="cw-btn cw-btn-ghost" data-testid="cw-stop" '
+            + 'onclick="cwStopPreview(' + task.id + ')">Stop</button>')
             + cwCumulativeCostBadge(a),
             a);
     }
@@ -4467,7 +4496,9 @@ function renderCoworkCard(task) {
     if (a && a.state === 'failed') {
         return cwShell('is-failed', 'failed', task,
             cwModeSwitch(task.id, a, false)
-            + '<div class="cw-fail"><b>Cowork could not complete this.</b>'
+            + '<div class="cw-fail"><b>'
+            + (cwIsStructured(a) ? 'WorkIQ could not complete this.' : 'Cowork could not complete this.')
+            + '</b>'
             + '<div class="cw-fail-sub">' + escapeHtml(a.error || a.terminal_status || 'Unknown error')
             + '<br>Nothing was sent.</div></div>'
             + cwRedoRow(task.id),
@@ -4548,9 +4579,13 @@ function renderCoworkCard(task) {
     return cwShell('', 'not run', task,
         cwModeSwitch(task.id, a, false)
         + cwIntentBlock(task, true)
-        + '<div class="cw-idle">Cowork can check the latest state of this in M365, then draft the action.'
+        + '<div class="cw-idle">'
+        + (cwTaskUsesWorkIQ(task)
+           ? 'WorkIQ can check the latest state in M365 and prepare a structured action.'
+           : 'Cowork can check the latest state of this in M365, then draft the action.')
         + '<span class="cw-idle-sub">Nothing happens without your explicit review and confirmation.</span></div>',
-        '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with Cowork</button>'
+        '<button class="cw-btn cw-btn-go" onclick="cwStart(' + task.id + ')">Preview with '
+        + (cwTaskUsesWorkIQ(task) ? 'WorkIQ' : 'Cowork') + '</button>'
         + '<span class="cw-foot-note">~45s &middot; read-only</span>',
         a);
 }
@@ -4673,7 +4708,8 @@ function cwStart(taskId, isRedo) {
     .then(function(result) {
         var data = result.data;
         if (!result.ok) {
-            window.alert(data.error || 'Could not start Cowork.');
+            window.alert(data.error || ('Could not start '
+                + (cwTaskUsesWorkIQ(task) ? 'WorkIQ' : 'Cowork') + '.'));
             return;
         }
         if (data.action) {
@@ -4685,7 +4721,7 @@ function cwStart(taskId, isRedo) {
         }
         cwRerender(taskId);
     })
-    .catch(function(err) { console.error('Failed to start Cowork preview:', err); });
+    .catch(function(err) { console.error('Failed to start action preview:', err); });
 }
 
 function cwToggleRedo(taskId, on) {
@@ -4750,15 +4786,22 @@ function cwInteractionFields(taskId, interaction) {
         ? 'e.g. make the subject clearer and the tone warmer'
         : 'e.g. find something later in the day';
     var evidence = interaction && interaction.schedule_evidence;
+    var structured = cwIsStructured(action);
     var evidenceNote = evidence && evidence.query_backed === true
         ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note">'
             + '<b>Query-backed suggestions</b>'
-            + '<span>Cowork derived these after checking the exact calendars. '
-            + 'Review the time before booking.</span></div>'
+            + '<span>' + (structured
+                ? 'WorkIQ checked the exact calendars. Selecting a time creates '
+                    + 'the ' + escapeHtml(String(evidence.duration_minutes || 25))
+                    + '-minute meeting immediately.'
+                : 'Cowork derived these after checking the exact calendars. '
+                    + 'Review the time before booking.')
+            + '</span></div>'
         : '';
     return evidenceNote + (interaction.questions || []).map(function(question) {
         var id = String(question.id || '');
-        var heading = question.header || question.question || 'Cowork question';
+        var heading = question.header || question.question
+            || (structured ? 'WorkIQ question' : 'Cowork question');
         var prompt = question.header && question.question
             ? '<div class="cw-blocked-sub">' + escapeHtml(question.question) + '</div>'
             : '';
@@ -5071,7 +5114,8 @@ function cwSendAnswer(taskId) {
         if (!res.ok) {
             delete _cwAnswerSending[taskId];
             var a = _cwActions[taskId];
-            if (a) a.error = (res.d && res.d.error) || 'Could not answer Cowork.';
+            if (a) a.error = (res.d && res.d.error)
+                || ('Could not answer ' + (cwIsStructured(a) ? 'WorkIQ.' : 'Cowork.'));
             return cwRerender(taskId);
         }
         delete _cwAnswerBuf[taskId];
@@ -5082,9 +5126,11 @@ function cwSendAnswer(taskId) {
     })
     .catch(function(err) {
         delete _cwAnswerSending[taskId];
-        console.error('Failed to answer Cowork:', err);
+        console.error('Failed to answer action:', err);
         var a = _cwActions[taskId];
-        if (a) a.error = 'Could not answer Cowork. Check your connection and try again.';
+        if (a) a.error = 'Could not answer '
+            + (cwIsStructured(a) ? 'WorkIQ.' : 'Cowork.')
+            + ' Check your connection and try again.';
         cwRerender(taskId);
     });
 }

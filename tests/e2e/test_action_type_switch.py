@@ -69,7 +69,7 @@ def test_action_type_switch_hides_stale_preview_without_starting_cowork(
 
         page.locator(".action-type-select").select_option("schedule-meeting")
 
-        expect(page.get_by_role("button", name="Preview with Cowork")).to_be_visible()
+        expect(page.get_by_role("button", name="Preview with WorkIQ")).to_be_visible()
         expect(page.get_by_text("Old preparation draft")).to_have_count(0)
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
         page.screenshot(
