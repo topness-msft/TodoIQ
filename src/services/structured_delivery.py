@@ -70,11 +70,17 @@ def execute_command(prompt: str, channel: str) -> list[str]:
     tool = EXECUTE_TOOLS.get(channel)
     if not tool:
         raise ValueError(f"Unsupported structured delivery channel: {channel}")
+    tools = [tool]
+    if channel == "email":
+        # /sendMail and /reply return 202 with no body, so the only honest way
+        # to produce a delivery reference is to read the sent copy back. This
+        # adds a READ tool, never a second write primitive.
+        tools.append("workiq-fetch")
     return [
         "copilot",
         "-p",
         prompt,
-        f"--available-tools={tool}",
+        f"--available-tools={','.join(tools)}",
         "--allow-tool=workiq",
         "--no-ask-user",
     ]
@@ -256,23 +262,37 @@ and omit payload. Never invent an identity or identifier.
 """.strip()
 
 
-def calendar_transaction_id(action_id: int) -> str:
-    """Stable Graph idempotency key for one execution row.
+def idempotency_key(action: dict) -> str | None:
+    """The key Riveter mints so it can recognise its own write afterwards.
 
-    Graph dedupes `/me/events` creates that share a `transactionId`: a repeat
-    POST returns the existing event rather than booking a second one. Deriving
-    the key from the execution row id (rather than minting a fresh uuid per
-    attempt) is the whole point — re-running the same row must reuse the same
-    key, otherwise a retry after an unconfirmed outcome double-books real
-    people.
+    One concept, two transports. Calendar carries it as Graph's native
+    `transactionId`, which makes a repeated create return the existing event.
+    Email carries it as an `x-riveter-correlation-id` internet message header,
+    which survives both /sendMail and /reply and makes the sent copy findable,
+    so the delivery reference is looked up rather than invented. Teams has no
+    mechanism at all and returns None rather than pretending otherwise.
+
+    The task id is included deliberately: a key found later on a real calendar
+    event or in a raw mail header should say which task produced it, not just
+    an opaque row id that means nothing outside this database. Note the email
+    header travels to recipients, so it must never carry anything but these
+    identifiers.
     """
-    return f"riveter-cal-{action_id}"
+    prefix = {"calendar": "cal", "email": "mail"}.get(
+        str(action.get("delivery_channel") or "").strip().lower()
+    )
+    if not prefix:
+        return None
+    return f"riveter-{prefix}-t{action.get('task_id')}-a{action.get('id')}"
+
+
+CORRELATION_HEADER = "x-riveter-correlation-id"
 
 
 def execute_prompt(
     payload: dict,
     correlation_id: str,
-    transaction_id: str | None = None,
+    idempotency_key_value: str | None = None,
 ) -> str:
     """Build a write-only prompt that sends the exact sealed payload once."""
     channel = payload.get("channel")
@@ -283,22 +303,40 @@ def execute_prompt(
             "Map the exact subject, body, selected start/end/timezone, and attendees "
             "from the payload to a Microsoft Graph event. Return the created event id."
         )
-        if transaction_id:
+        if idempotency_key_value:
             operation += (
                 f' Set the event property "transactionId" to exactly '
-                f'"{transaction_id}". Do not alter or regenerate it. Graph uses '
-                "it to avoid creating a duplicate meeting, so it must be sent "
+                f'"{idempotency_key_value}". Do not alter or regenerate it. Graph '
+                "uses it to avoid creating a duplicate meeting, so it must be sent "
                 "verbatim, and it must be echoed back in the result block."
             )
-            marker_extra = f',\n"transaction_id":"{transaction_id}"'
+            marker_extra = f',\n"idempotency_key":"{idempotency_key_value}"'
     elif channel == "email":
         operation = (
-            "Call workiq-do_action exactly once. For reply mode use "
-            "/me/messages/{message_id}/reply with jsonBody {\"comment\": body}. "
-            "For new mode use /me/sendMail with the exact recipients, subject, and "
-            "body. On confirmed success use the returned entity/request reference; "
-            "for a successful reply with no response body, use email-reply:{message_id}."
+            "Call workiq-do_action exactly once to send. For reply mode use "
+            "/me/messages/{message_id}/reply. For new mode use /me/sendMail with "
+            "the exact recipients, subject, and body."
         )
+        if idempotency_key_value:
+            operation += (
+                "\n\nBefore sending, attach Riveter's correlation header to the "
+                "outgoing message so the sent copy can be identified afterwards. "
+                "Set internetMessageHeaders on the message object to exactly "
+                f'[{{"name":"{CORRELATION_HEADER}",'
+                f'"value":"{idempotency_key_value}"}}]. For reply mode this goes '
+                'in the "Message" property alongside "Comment"; for new mail it '
+                'goes in the "Message" property of /me/sendMail.'
+                "\n\nAfter sending, the send returns 202 with no body, so it "
+                "carries no reference. Do NOT invent one. Instead read "
+                "/me/mailFolders/sentitems/messages"
+                "?$top=5&$select=id,internetMessageId,internetMessageHeaders"
+                "&$orderby=sentDateTime desc with workiq-fetch, find the message "
+                f'whose {CORRELATION_HEADER} header equals '
+                f'"{idempotency_key_value}", and return that message\'s id as '
+                "delivery_ref. If no such message is found, return ok=false: "
+                "never report a delivery reference you did not read back."
+            )
+            marker_extra = f',\n"idempotency_key":"{idempotency_key_value}"'
     elif channel == "teams":
         operation = (
             "Call workiq-create_entity exactly once. For a chat use "
@@ -308,9 +346,19 @@ def execute_prompt(
         )
     else:
         raise ValueError(f"Unsupported structured delivery channel: {channel}")
+    # The blanket "do not fetch" rule predates the email read-back and would
+    # now contradict the instruction that follows it. Contradictory prompts are
+    # their own failure mode, so the read allowance is stated per channel.
+    read_rule = (
+        "The only read permitted is the sent-items lookup described below; do "
+        "not search for anything else."
+        if channel == "email"
+        else "Do not search or fetch anything."
+    )
     return f"""
-You are Riveter's {channel} execution worker. Perform one write only. Do not
-search, fetch, reinterpret, improve, or change the approved payload.
+You are Riveter's {channel} execution worker. Perform one write only.
+{read_rule}
+Do not reinterpret, improve, or change the approved payload.
 
 Sealed payload:
 {_json(payload)}
@@ -601,7 +649,7 @@ def finish_execute(
     stderr: str,
     exit_code: int,
     correlation_id: str,
-    expected_transaction_id: str | None = None,
+    expected_idempotency_key: str | None = None,
 ) -> dict | None:
     """Persist execution only when correlated external delivery evidence exists."""
     if exit_code != 0:
@@ -620,13 +668,13 @@ def finish_execute(
             phase="execute",
             require_delivery_ref=True,
         )
-        if expected_transaction_id is not None:
-            echoed = str(result.get("transaction_id") or "").strip()
-            if echoed != expected_transaction_id:
-                # Without the key we cannot tell a first attempt from a repeat,
-                # so a later retry could double-book. Refuse to call it done.
+        if expected_idempotency_key is not None:
+            echoed = str(result.get("idempotency_key") or "").strip()
+            if echoed != expected_idempotency_key:
+                # Without the key we cannot recognise our own write later, so a
+                # retry could send twice and the reference may not be real.
                 raise ValueError(
-                    "The meeting was created without Riveter's idempotency key"
+                    "The write completed without Riveter's idempotency key"
                 )
         delivery_ref = str(result["delivery_ref"]).strip()
         return update_task_action(
@@ -693,16 +741,13 @@ def _execute_worker(action: dict) -> None:
     payload = json.loads(action["structured_payload"])
     correlation_id = str(uuid.uuid4())
     # Derived from the row, not the attempt, so re-running this execution reuses
-    # the same key and Graph returns the existing event instead of a duplicate.
-    transaction_id = (
-        calendar_transaction_id(action["id"])
-        if payload.get("channel") == "calendar"
-        else None
-    )
+    # the same key: Graph returns the existing event, and the sent mail copy
+    # stays findable instead of being sent twice.
+    key = idempotency_key(action)
     try:
         result = _run(
             execute_command(
-                execute_prompt(payload, correlation_id, transaction_id),
+                execute_prompt(payload, correlation_id, key),
                 payload["channel"],
             )
         )
@@ -712,7 +757,7 @@ def _execute_worker(action: dict) -> None:
             stderr=result.stderr,
             exit_code=result.returncode,
             correlation_id=correlation_id,
-            expected_transaction_id=transaction_id,
+            expected_idempotency_key=key,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured execution failed")

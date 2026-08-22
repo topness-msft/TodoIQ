@@ -57,11 +57,34 @@ class TestStructuredDeliveryContract(StructuredDeliveryTestBase):
         teams = structured_delivery.execute_command("prompt", "teams")
 
         self.assertIn("--available-tools=workiq-create_entity", calendar)
-        self.assertIn("--available-tools=workiq-do_action", email)
         self.assertIn("--available-tools=workiq-create_entity", teams)
+        # Email additionally reads the sent copy back, because /sendMail and
+        # /reply return 202 with no body and the alternative is inventing a
+        # delivery reference. That is a read tool, not a second write.
+        email_tools = next(
+            value for value in email if value.startswith("--available-tools=")
+        ).split("=", 1)[1].split(",")
+        self.assertEqual(
+            sorted(email_tools), ["workiq-do_action", "workiq-fetch"]
+        )
+
+        write_primitives = {
+            "workiq-create_entity", "workiq-do_action",
+            "workiq-update_entity", "workiq-delete_entity",
+        }
         for argv in (calendar, email, teams):
-            self.assertNotIn("workiq-fetch", " ".join(argv))
+            tools = next(
+                value for value in argv
+                if value.startswith("--available-tools=")
+            ).split("=", 1)[1].split(",")
+            self.assertEqual(
+                len(write_primitives.intersection(tools)), 1,
+                f"exactly one write primitive expected, got {tools}",
+            )
             self.assertNotIn("shell", " ".join(argv))
+        # Only email may read; the others stay write-only.
+        self.assertNotIn("workiq-fetch", " ".join(calendar))
+        self.assertNotIn("workiq-fetch", " ".join(teams))
 
     def test_marker_requires_matching_correlation_and_delivery_reference(self):
         output = (
@@ -516,16 +539,22 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
         update_task_action(action["id"], frozenset({"state"}), state="executing")
         return task, action
 
-    def test_transaction_id_is_stable_for_one_action_and_unique_across_them(self):
-        first = structured_delivery.calendar_transaction_id(41)
-        again = structured_delivery.calendar_transaction_id(41)
-        other = structured_delivery.calendar_transaction_id(42)
+    def test_calendar_key_is_stable_for_one_row_and_unique_across_rows(self):
+        row = {"id": 41, "task_id": 2495, "delivery_channel": "calendar"}
+        other = {"id": 42, "task_id": 2495, "delivery_channel": "calendar"}
 
-        self.assertEqual(first, again, "a retry must reuse the same key")
-        self.assertNotEqual(first, other)
-        self.assertIn("41", first)
+        self.assertEqual(
+            structured_delivery.idempotency_key(row),
+            structured_delivery.idempotency_key(dict(row)),
+            "a retry must reuse the same key",
+        )
+        self.assertNotEqual(
+            structured_delivery.idempotency_key(row),
+            structured_delivery.idempotency_key(other),
+        )
+        self.assertIn("41", structured_delivery.idempotency_key(row))
 
-    def test_execute_prompt_pins_the_transaction_id_for_calendar_only(self):
+    def test_execute_prompt_pins_the_key_for_calendar_only(self):
         payload = {
             "schema_version": 1,
             "channel": "calendar",
@@ -533,20 +562,20 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
             "start": "2028-08-21T09:05:00-07:00",
         }
         prompt = structured_delivery.execute_prompt(
-            payload, "corr-1", transaction_id="riveter-cal-41"
+            payload, "corr-1", "riveter-cal-t2495-a41"
         )
-        self.assertIn("riveter-cal-41", prompt)
+        self.assertIn("riveter-cal-t2495-a41", prompt)
         self.assertIn("transactionId", prompt)
 
         teams_prompt = structured_delivery.execute_prompt(
             {"schema_version": 1, "channel": "teams", "chat_id": "chat-1",
              "body": "hi"},
             "corr-1",
-            transaction_id=None,
+            None,
         )
         self.assertNotIn("transactionId", teams_prompt)
 
-    def test_calendar_execution_requires_the_transaction_id_to_be_echoed(self):
+    def test_calendar_execution_requires_the_key_to_be_echoed(self):
         _task, action = self._calendar_action()
 
         structured_delivery.finish_execute(
@@ -558,23 +587,25 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
                     "phase": "execute",
                     "ok": True,
                     "delivery_ref": "event-42",
-                    "transaction_id": "riveter-cal-WRONG",
+                    "idempotency_key": "riveter-cal-WRONG",
                 })
                 + f"\n{structured_delivery.RESULT_END}"
             ),
             stderr="",
             exit_code=0,
             correlation_id="corr-1",
-            expected_transaction_id="riveter-cal-41",
+            expected_idempotency_key="riveter-cal-t2495-a41",
         )
 
         latest = get_latest_task_action(action["task_id"])
         self.assertEqual(latest["state"], "execute_unconfirmed")
         self.assertIsNone(latest["workiq_delivery_ref"])
 
-    def test_calendar_execution_confirms_when_the_transaction_id_matches(self):
+    def test_calendar_execution_confirms_when_the_key_matches(self):
         _task, action = self._calendar_action()
-        txn = structured_delivery.calendar_transaction_id(action["id"])
+        txn = structured_delivery.idempotency_key(
+            {**action, "delivery_channel": "calendar"}
+        )
 
         structured_delivery.finish_execute(
             action["id"],
@@ -585,21 +616,21 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
                     "phase": "execute",
                     "ok": True,
                     "delivery_ref": "AAMkAD-event-id",
-                    "transaction_id": txn,
+                    "idempotency_key": txn,
                 })
                 + f"\n{structured_delivery.RESULT_END}"
             ),
             stderr="",
             exit_code=0,
             correlation_id="corr-1",
-            expected_transaction_id=txn,
+            expected_idempotency_key=txn,
         )
 
         latest = get_latest_task_action(action["task_id"])
         self.assertEqual(latest["state"], "executed", latest.get("error"))
         self.assertEqual(latest["workiq_delivery_ref"], "AAMkAD-event-id")
 
-    def test_non_calendar_execution_does_not_require_a_transaction_id(self):
+    def test_teams_execution_does_not_require_a_key(self):
         task = create_task("Ping the chat", action_type="follow-up",
                            source_type="chat")
         action = create_task_action(
@@ -628,7 +659,7 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
             stderr="",
             exit_code=0,
             correlation_id="corr-1",
-            expected_transaction_id=None,
+            expected_idempotency_key=None,
         )
 
         latest = get_latest_task_action(task["id"])
@@ -716,6 +747,169 @@ class TestCalendarContentQuality(StructuredDeliveryTestBase):
         self.assertIn("Sally Shi", summary)
         self.assertIn("Azharullah Meer", summary)
         self.assertIn("Decide the pilot structure", summary)
+
+
+class TestIdempotencyKeys(StructuredDeliveryTestBase):
+    """One concept, two transports.
+
+    Calendar carries the key as Graph's native `transactionId`; email carries it
+    as an `x-riveter-correlation-id` internet message header (verified
+    2026-08-22 to survive both /sendMail and /reply). Teams has no mechanism at
+    all, which the key function states honestly by returning None.
+    """
+
+    def test_keys_are_stable_per_row_and_scoped_by_channel(self):
+        cal = {"id": 238, "task_id": 2495, "delivery_channel": "calendar"}
+        mail = {"id": 238, "task_id": 2495, "delivery_channel": "email"}
+        other_row = {"id": 239, "task_id": 2495, "delivery_channel": "email"}
+        other_task = {"id": 238, "task_id": 2496, "delivery_channel": "email"}
+
+        self.assertEqual(
+            structured_delivery.idempotency_key(cal),
+            structured_delivery.idempotency_key(dict(cal)),
+        )
+        self.assertNotEqual(
+            structured_delivery.idempotency_key(cal),
+            structured_delivery.idempotency_key(mail),
+        )
+        self.assertNotEqual(
+            structured_delivery.idempotency_key(mail),
+            structured_delivery.idempotency_key(other_row),
+        )
+        # A key found on a real message must say which task produced it, not
+        # just an opaque row id that means nothing outside the database.
+        key = structured_delivery.idempotency_key(mail)
+        self.assertIn("2495", key)
+        self.assertIn("238", key)
+        self.assertNotEqual(
+            key, structured_delivery.idempotency_key(other_task)
+        )
+        # Teams cannot support this, and must not pretend to.
+        self.assertIsNone(structured_delivery.idempotency_key(
+            {"id": 238, "task_id": 2495, "delivery_channel": "teams"}
+        ))
+
+    def test_email_execution_may_read_but_still_writes_once(self):
+        argv = structured_delivery.execute_command("prompt", "email")
+        available = next(
+            value for value in argv if value.startswith("--available-tools=")
+        )
+        # The lookup that produces real evidence needs a read tool; the write
+        # surface must stay exactly one primitive.
+        self.assertIn("workiq-do_action", available)
+        self.assertIn("workiq-fetch", available)
+        self.assertNotIn("workiq-create_entity", available)
+        self.assertNotIn("workiq-update_entity", available)
+        self.assertNotIn("workiq-delete_entity", available)
+        self.assertNotIn("shell", " ".join(argv))
+
+    def test_email_prompt_requires_a_looked_up_reference_not_a_made_up_one(self):
+        payload = {
+            "schema_version": 1, "channel": "email", "mode": "reply",
+            "message_id": "message-1", "to": ["sarah@microsoft.com"],
+            "subject": "Re: Project update", "body": "Approved body",
+        }
+        prompt = structured_delivery.execute_prompt(
+            payload, "corr-1", "riveter-mail-77"
+        )
+        lowered = prompt.lower()
+
+        self.assertIn("riveter-mail-77", prompt)
+        self.assertIn("x-riveter-correlation-id", lowered)
+        self.assertIn("internetmessageheaders", lowered)
+        self.assertIn("sentitems", lowered)
+        # The old prompt told the model to synthesise "email-reply:{id}".
+        self.assertNotIn("email-reply:", lowered)
+        self.assertTrue(
+            "do not invent" in lowered or "never invent" in lowered,
+            "the prompt must forbid inventing a delivery reference",
+        )
+        # It must not both require a lookup and forbid fetching.
+        self.assertNotIn("do not\nsearch, fetch", lowered)
+        self.assertNotIn("do not search or fetch", lowered)
+
+    def test_write_only_channels_are_still_told_not_to_read(self):
+        teams = structured_delivery.execute_prompt(
+            {"schema_version": 1, "channel": "teams", "chat_id": "chat-1",
+             "body": "hi"},
+            "corr-1",
+            None,
+        )
+        self.assertIn("Do not search or fetch anything.", teams)
+
+    def test_email_execution_rejects_a_missing_idempotency_key(self):
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref="sarah@microsoft.com",
+            destination_display="Sarah Goodwin",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "email", "body": "Approved"}
+            ),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "email-reply:message-1",
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            expected_idempotency_key="riveter-mail-77",
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+        self.assertIsNone(latest["workiq_delivery_ref"])
+
+    def test_email_execution_confirms_with_a_real_message_id(self):
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref="sarah@microsoft.com",
+            destination_display="Sarah Goodwin",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "email", "body": "Approved"}
+            ),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+        key = structured_delivery.idempotency_key(
+            {**action, "delivery_channel": "email"}
+        )
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "AAMkADFkODcyODkwLT-real-sent-id",
+                    "idempotency_key": key,
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            expected_idempotency_key=key,
+        )
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "executed", latest.get("error"))
+        self.assertEqual(
+            latest["workiq_delivery_ref"], "AAMkADFkODcyODkwLT-real-sent-id"
+        )
 
 
 class TestStructuredDeliveryMigration(unittest.TestCase):
@@ -1365,7 +1559,9 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             state="execute_unconfirmed",
             error="Structured worker produced no readable output",
         )
-        expected_txn = structured_delivery.calendar_transaction_id(action["id"])
+        expected_txn = structured_delivery.idempotency_key(
+            {**action, "delivery_channel": "calendar"}
+        )
 
         original = handler.STRUCTURED_EXECUTE_FN
         handler.STRUCTURED_EXECUTE_FN = (
@@ -1382,8 +1578,8 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         # retry safe rather than a second booking.
         self.assertEqual(self.execute_started[0]["id"], action["id"])
         self.assertEqual(
-            structured_delivery.calendar_transaction_id(
-                self.execute_started[0]["id"]
+            structured_delivery.idempotency_key(
+                {**self.execute_started[0], "delivery_channel": "calendar"}
             ),
             expected_txn,
         )
