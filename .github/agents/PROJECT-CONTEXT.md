@@ -174,6 +174,26 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
   resume needs the compatibility shim and persisted full island URL.
 - Cowork auth can expire between successful runs; runner performs one silent
   refresh and one retry only.
+- Direct Microsoft Graph is NOT an available transport, and this was measured on
+  2026-08-22 rather than assumed. Riveter authenticates as the Azure PowerShell
+  first-party client (`1950a258-227b-4e31-a9cf-717495945fc2`) against a
+  Cowork-scoped resource. Its MSAL cache holds one refresh token targeted at
+  `6ab48b67-.../access_as_user` with no `family_id`, so it is not a FOCI token
+  and silent acquisition of any Graph scope returns None. Device-code consent
+  fails `AADSTS53003` (Conditional Access cannot bind a compliant device through
+  that flow), and interactive consent fails `AADSTS65002`: first-party client to
+  first-party resource requires preauthorization by the API owner. No tenant
+  admin can grant this. Reaching Graph directly would require registering a new
+  Entra application plus delegated consent for `Calendars.ReadWrite`,
+  `Mail.Send` and `ChatMessage.Send`. Until that exists, WorkIQ is the only
+  supported path to Graph, and structured delivery must keep going through it.
+- WorkIQ read tools cannot see another person's calendar: `/me/calendarView`
+  returns 200 but `/users/{other}/calendarView` returns 404. Attendee free/busy
+  is only reachable through POST actions (`/me/findMeetingTimes`,
+  `getSchedule`), which need `workiq-do_action` — the same primitive that can
+  send mail. That is why structured previews currently let the model reason
+  about availability instead of calling Graph's scheduler, and why suggested
+  slots can differ between two runs of the same task.
 - Cowork can emit `ta` technical approvals for Teams `PostMessage`; direct
   execution answers only when the tool, Teams thread and draft exactly match
   Riveter's immutable approval snapshot. Uncaptured email/calendar shapes fail
