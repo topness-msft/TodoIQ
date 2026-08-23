@@ -44,7 +44,7 @@ class TestTodoIQLoads:
         expect(page).to_have_title('Riveter')
         expect(page.locator('.header-brand')).to_contain_text('Riveter')
         expect(page.locator('link[rel="icon"]')).to_have_attribute(
-            'href', '/static/img/coworker.svg'
+            'href', '/static/img/copilot.svg'
         )
         expect(page.locator('link[rel="icon"]')).to_have_attribute(
             'type', 'image/svg+xml'

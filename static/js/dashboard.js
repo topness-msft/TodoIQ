@@ -603,14 +603,16 @@ function renderSection(sectionId, sectionTasks) {
             || task.parse_status === 'parsing';
         var parseHtml = refreshingContext ? '' : parseStatusIcon(task.parse_status);
         var enrichedHtml = '';
+        var engineName = cwTaskUsesWorkIQ(task) ? 'WorkIQ' : 'Cowork';
+        var engineMark = cwEngineMarkImg(task, null);
         if (task.cw_state === 'previewing') {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is working"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="' + engineName + ' is working">' + engineMark + '</span>';
         } else if (refreshingContext) {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="Cowork is refreshing task context"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-running" title="' + engineName + ' is refreshing task context">' + engineMark + '</span>';
         } else if (task.cw_state === 'ready' && !task.cw_seen_at) {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New Cowork update"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-unread" title="New ' + engineName + ' update">' + engineMark + '</span>';
         } else if (task.skill_output) {
-            enrichedHtml = '<span class="cw-status-indicator cw-status-complete" title="Cowork enhanced"><img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true"></span>';
+            enrichedHtml = '<span class="cw-status-indicator cw-status-complete" title="' + engineName + ' enhanced">' + engineMark + '</span>';
         }
         var waitingIconHtml = waitingActivityIcon(task);
         var suggestionBadgeHtml = suggestionCheckBadge(task);
@@ -3314,15 +3316,57 @@ function cwTaskUsesWorkIQ(task) {
                 .indexOf(task.source_type) >= 0);
 }
 
+// Which engine is behind this work. The card header already named the
+// provider while the icon was always Cowork's, so the two could disagree in
+// front of the user. Both now read from this one decision.
+var CW_ENGINE_MARK = {
+    workiq: '/static/img/copilot.svg',
+    cowork: '/static/img/coworker.svg'
+};
+
+function cwEngine(task, action) {
+    if (cwIsStructured(action)) return 'workiq';
+    if (!action && cwTaskUsesWorkIQ(task)) return 'workiq';
+    return 'cowork';
+}
+
+function cwEngineName(task, action) {
+    return cwEngine(task, action) === 'workiq' ? 'WorkIQ' : 'Cowork';
+}
+
+function cwEngineMarkImg(task, action, cls) {
+    var engine = cwEngine(task, action);
+    return '<img class="' + (cls || 'cw-spark') + '" src="'
+        + CW_ENGINE_MARK[engine] + '" alt="" aria-hidden="true"'
+        + ' data-engine="' + engine + '">';
+}
+
+// Turn a resolved Teams destination into something a person can open.
+// destination_ref holds either a chat id ("19:...@thread.v2") or the
+// team|channel|message triple the preview resolved for a channel reply.
+function cwTeamsDeepLink(action) {
+    var ref = (action && action.destination_ref || '').trim();
+    if (!ref) return '';
+    if (ref.indexOf('|') >= 0) {
+        var parts = ref.split('|');
+        if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return '';
+        return 'https://teams.microsoft.com/l/message/'
+            + encodeURIComponent(parts[1]) + '/' + encodeURIComponent(parts[2])
+            + '?groupId=' + encodeURIComponent(parts[0]);
+    }
+    if (ref.indexOf('19:') !== 0) return '';
+    return 'https://teams.microsoft.com/l/chat/'
+        + encodeURIComponent(ref) + '/0';
+}
+
 function cwShell(cls, badge, task, body, foot, action) {
     var label = CW_LABELS[task.action_type] || 'Action';
-    var provider = cwIsStructured(action) || (!action && cwTaskUsesWorkIQ(task))
-        ? 'WorkIQ' : 'Cowork';
+    var provider = cwEngineName(task, action);
     return '<div class="cw-card ' + cls + '">'
         + '<div class="cw-head">'
         // Referenced rather than inlined: the asset is gradient-based, and its
         // <defs> ids would collide with every other copy on the page.
-        + '<img class="cw-spark" src="/static/img/coworker.svg" alt="" aria-hidden="true">'
+        + cwEngineMarkImg(task, action)
         + '<span class="cw-type">' + label + ' &middot; ' + provider + '</span>'
         + cwHeadStatus(action)
         + (badge ? '<span class="cw-badge">' + escapeHtml(badge) + '</span>' : '')
@@ -3400,7 +3444,7 @@ function cwToolIcon(item) {
         + 'data-tool-icon="' + type + '" aria-hidden="true">' + icon + '</span>';
 }
 
-function cwTimeline(action, liveText, liveIconName) {
+function cwTimeline(action, liveText, liveIconName, task) {
     var trace = cwToolTrace(action);
     if (!trace.length && !liveText) return '';
     var events = trace.map(function(item) {
@@ -3414,11 +3458,12 @@ function cwTimeline(action, liveText, liveIconName) {
             + '<span>' + escapeHtml(cwToolLabel(item)) + '</span></div></div>';
     });
     if (liveText) {
+        var liveEngine = cwEngine(task, action);
         var liveIcon = liveIconName
             ? cwToolIcon({name: liveIconName})
             : '<span class="cw-tool-icon is-cowork" data-testid="tool-icon" '
-                + 'data-tool-icon="cowork" aria-hidden="true">'
-                + '<img src="/static/img/coworker.svg" alt=""></span>';
+                + 'data-tool-icon="' + liveEngine + '" aria-hidden="true">'
+                + '<img src="' + CW_ENGINE_MARK[liveEngine] + '" alt=""></span>';
         events.push('<div class="cw-timeline-event is-active">'
             + '<span class="cw-timeline-dot" aria-hidden="true"></span>'
             + liveIcon
@@ -3676,6 +3721,16 @@ function cwOpenExecuteConfirm(taskId) {
             cwConfirmDest(taskId, true);
             return;
         }
+        // A structured destination was resolved during preview and the server
+        // refuses to change it, so the picker offered an edit that could only
+        // ever fail -- and showed a raw chat id, which tells a human nothing.
+        // Confirm it silently; the execute dialog below shows where it goes,
+        // as a link the user can actually open.
+        if (!action.destination_confirmed_at && cwIsStructured(action)
+                && action.destination_ref && action.destination_display) {
+            cwConfirmDest(taskId, true);
+            return;
+        }
         if (!action.destination_confirmed_at) {
             cwOpenDestPicker(taskId);
             return;
@@ -3699,6 +3754,20 @@ function cwOpenExecuteConfirm(taskId) {
                 + escapeHtml(task.source_url)
                 + '" target="_blank" rel="noopener noreferrer">Open '
                 + escapeHtml(destination) + ' conversation</a>';
+        } else if (action.delivery_channel === 'teams') {
+            // A raw chat id ("19:...@thread.v2") is unverifiable by eye, so
+            // offer the conversation itself. The name stays the primary label;
+            // the link is there for anyone who wants to check the destination
+            // before sending.
+            var teamsUrl = cwTeamsDeepLink(action);
+            destinationHtml = '<b>' + escapeHtml(destination) + '</b>'
+                + (teamsUrl
+                    ? '<small><a class="cw-execute-destination-link" href="'
+                        + escapeHtml(teamsUrl)
+                        + '" target="_blank" rel="noopener noreferrer"'
+                        + ' data-testid="teams-destination-link">'
+                        + 'Open this conversation in Teams</a></small>'
+                    : '');
         }
         var meetingConfirmationHtml = '';
         if (isMeeting) {
