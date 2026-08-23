@@ -1385,6 +1385,61 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
         self.assertIn("torecipients", prompt.lower().replace(" ", ""))
 
 
+class TestTeamsBodyFidelity(StructuredDeliveryTestBase):
+    """Graph wants an itemBody object, not a string.
+
+    Observed in production 2026-08-23 (tasks 2592 and 2593): the Teams execute
+    prompt said only "post the exact body from the payload", the worker passed
+    the payload's plain string straight into chatMessage.body, and Graph
+    rejected every send with "Property body in payload has a value that does
+    not match schema". 2593's body had no newlines at all and still failed, so
+    this is the body's *type*, not its whitespace. A spike against real Graph
+    confirmed {"contentType":"html","content": ...} returns 201 and preserves
+    <br> breaks. Riveter approves a specific artifact, so Riveter renders the
+    wire format rather than leaving the shape to the worker -- the same rule
+    already applied to email.
+    """
+
+    TEAMS_PAYLOAD = {
+        "schema_version": 1,
+        "channel": "teams",
+        "destination_kind": "chat",
+        "chat_id": "19:abc@thread.v2",
+        "destination_display": "Project chat",
+        "body": "Structured Teams delivery test.\nLine two.\nLine three.",
+    }
+
+    def test_prompt_dictates_the_itembody_shape(self):
+        prompt = structured_delivery.execute_prompt(self.TEAMS_PAYLOAD, "corr-1")
+        compact = prompt.lower().replace(" ", "")
+        self.assertIn('"contenttype":"html"', compact)
+        self.assertIn('"content"', compact)
+
+    def test_prompt_carries_the_rendered_html_body(self):
+        prompt = structured_delivery.execute_prompt(self.TEAMS_PAYLOAD, "corr-1")
+        rendered = structured_delivery.plain_text_to_html(
+            self.TEAMS_PAYLOAD["body"]
+        )
+        self.assertIn(rendered, prompt)
+        # The breaks the user approved must reach the wire format.
+        self.assertIn("Line two.<br>", rendered)
+
+    def test_prompt_does_not_ask_for_the_bare_payload_body(self):
+        """The old wording is what produced the BadRequest."""
+        prompt = structured_delivery.execute_prompt(self.TEAMS_PAYLOAD, "corr-1")
+        self.assertNotIn("Post the exact body from the payload", prompt)
+
+    def test_recovery_matches_against_the_rendered_body(self):
+        """Look-before-write compares to what was actually posted, i.e. HTML."""
+        prompt = structured_delivery.execute_prompt(
+            self.TEAMS_PAYLOAD, "corr-1", recover=True
+        )
+        rendered = structured_delivery.plain_text_to_html(
+            self.TEAMS_PAYLOAD["body"]
+        )
+        self.assertIn(rendered, prompt)
+
+
 class TestTeamsMessageRouting(StructuredDeliveryTestBase):
     """A manually written Teams task must be able to reach the Teams channel.
 
@@ -1865,6 +1920,94 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         latest = get_latest_task_action(task["id"])
         self.assertEqual(latest["destination_ref"], "sarah@microsoft.com")
         self.assertEqual(latest["destination_display"], "Sarah Goodwin")
+
+    def test_structured_email_destination_confirms_despite_address_case(self):
+        """The preview resolves display-cased addresses; confirming must work.
+
+        Production 2026-08-23 (task 2591): clicking Send was a silent no-op.
+        The handler lowercases the incoming address and then compared that
+        against the un-normalised stored ref, so any address with a capital
+        letter -- which is what Graph returns -- tripped the immutability guard
+        and returned 409. The same class of bug as the attendee 409 fixed in
+        bf8622b: two representations of one value compared directly.
+        """
+        task = create_task(
+            "Email Phil about the harness",
+            action_type="respond-email",
+            source_type="manual",
+        )
+        payload = {
+            "schema_version": 1,
+            "channel": "email",
+            "mode": "new",
+            "to": ["Phil.Topness@microsoft.com"],
+            "subject": "Harness update",
+            "body": "Approved body",
+        }
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref="Phil.Topness@microsoft.com",
+            destination_display="Phil.Topness@microsoft.com",
+            structured_payload=json.dumps(payload),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="ready")
+
+        response = self._post(
+            f"/api/tasks/{task['id']}/cowork/destination",
+            {
+                "delivery_channel": "email",
+                "destination_ref": "Phil.Topness@microsoft.com",
+                "destination_display": "Phil.Topness@microsoft.com",
+            },
+        )
+
+        self.assertEqual(response.code, 200, response.body)
+        latest = get_latest_task_action(task["id"])
+        self.assertTrue(latest["destination_confirmed_at"])
+        # The address the user approved is preserved, not silently recased.
+        self.assertEqual(
+            latest["destination_ref"], "Phil.Topness@microsoft.com"
+        )
+
+    def test_structured_email_destination_still_rejects_a_different_address(self):
+        """Relaxing the case comparison must not relax the guard itself."""
+        task = create_task(
+            "Email Phil about the harness",
+            action_type="respond-email",
+            source_type="manual",
+        )
+        payload = {
+            "schema_version": 1,
+            "channel": "email",
+            "mode": "new",
+            "to": ["Phil.Topness@microsoft.com"],
+            "subject": "Harness update",
+            "body": "Approved body",
+        }
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref="Phil.Topness@microsoft.com",
+            destination_display="Phil.Topness@microsoft.com",
+            structured_payload=json.dumps(payload),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="ready")
+
+        response = self._post(
+            f"/api/tasks/{task['id']}/cowork/destination",
+            {
+                "delivery_channel": "email",
+                "destination_ref": "Someone.Else@microsoft.com",
+                "destination_display": "Someone Else",
+            },
+        )
+
+        self.assertEqual(response.code, 409, response.body)
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(
+            latest["destination_ref"], "Phil.Topness@microsoft.com"
+        )
 
     def test_structured_teams_edit_rejects_whitespace_only_message(self):
         task = create_task(

@@ -4013,8 +4013,24 @@ function cwConfirmDest(taskId, continueToExecute) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
     })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
+    .then(function(res) {
+        return res.json().then(function(data) { return { ok: res.ok, data: data }; });
+    })
+    .then(function(result) {
+        // A refusal used to land here as an undefined action, so the picker
+        // just closed and the Send button looked dead (task 2591). A server
+        // that declined has a reason; show it rather than swallowing it.
+        if (!result.ok) {
+            var current = _cwActions[taskId];
+            if (current) {
+                current.error = result.data.error
+                    || 'Could not confirm the destination.';
+            }
+            cwCloseDestPicker();
+            cwRerender(taskId);
+            return;
+        }
+        var data = result.data;
         if (data.action) {
             _cwActions[taskId] = data.action;
             cwSyncTaskState(taskId, data.action);

@@ -394,11 +394,29 @@ def execute_prompt(
                 ',\n"recipients":["actual addresses from the sent message"]'
             )
     elif channel == "teams":
+        rendered = plain_text_to_html(payload.get("body"))
+        # Graph's chatMessage.body is an itemBody, not a string. "Post the exact
+        # body from the payload" left the shape to the worker, which passed the
+        # plain string through and was rejected with "Property body in payload
+        # has a value that does not match schema" on every send (tasks 2592 and
+        # 2593). Teams renders HTML, so the same rendering email uses applies:
+        # Riveter owns the wire format for what it approved.
+        body_block = (
+            'Graph requires the message body to be an itemBody object, not a '
+            'string. Set it to {"contentType":"html","content": <<<the block '
+            "below>>>} using this exact rendered content verbatim. Do not "
+            "reformat it, re-wrap it, restyle it, or substitute the plain text "
+            "version:\n"
+            "-----BEGIN APPROVED HTML BODY-----\n"
+            f"{rendered}\n"
+            "-----END APPROVED HTML BODY-----"
+        )
         operation = (
             "Call workiq-create_entity exactly once. For a chat use "
             "/me/chats/{chat_id}/messages. For a channel reply use "
-            "/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies. "
-            "Post the exact body from the payload and return the created message id."
+            "/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies.\n\n"
+            f"{body_block}\n\n"
+            "Return the created message id."
         )
         if recover:
             # Teams cannot be stamped with a key, so the only defence against a
@@ -411,13 +429,15 @@ def execute_prompt(
                 "workiq-fetch: /chats/{chat_id}/messages?$top=25 for a chat, or "
                 "/teams/{team_id}/channels/{channel_id}/messages/{message_id}"
                 "/replies?$top=25 for a channel reply.\n"
-                "2. If a message sent by the signed-in user already has EXACTLY "
-                "the body in the sealed payload, the earlier attempt succeeded. "
-                "Do not post anything. Return that message's id as delivery_ref "
-                'with "already_posted": true.\n'
+                "2. If a message sent by the signed-in user already carries the "
+                "approved content below, the earlier attempt succeeded. Compare "
+                "on the visible text, ignoring HTML tag differences, because the "
+                "post was made as HTML. Do not post anything. Return that "
+                'message\'s id as delivery_ref with "already_posted": true.\n'
                 "3. Only if no such message exists, call workiq-create_entity "
                 "exactly once to post it, and return the new message id with "
                 '"already_posted": false.\n\n'
+                f"{body_block}\n\n"
                 "Never post when step 2 matched, and never report a message id "
                 "you did not either read or create."
             )

@@ -2405,9 +2405,24 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
             )
         if normalized_email_ref:
             ref = normalized_email_ref
+        # The stored ref and the incoming one must be compared in the SAME form.
+        # Normalising only the incoming address lowercased it and then measured
+        # it against the display-cased value the preview resolved, so every
+        # structured email whose address had a capital letter -- which is what
+        # Graph returns -- was refused as if the user had edited it (task 2591).
+        # Same defect class as the attendee 409: one value, two representations.
+        stored_ref = action.get("destination_ref") or ""
+        if is_email:
+            incoming_canonical = normalized_email_ref or ref.lower()
+            stored_canonical = (
+                _normalize_single_email(stored_ref) or stored_ref.lower()
+            )
+        else:
+            incoming_canonical = ref
+            stored_canonical = stored_ref
         if action.get("structured_payload") and (
             channel != (action.get("delivery_channel") or "")
-            or ref != (action.get("destination_ref") or "")
+            or incoming_canonical != stored_canonical
             or display != (action.get("destination_display") or "")
         ):
             return self._fail(
@@ -2415,6 +2430,10 @@ class CoworkDestinationHandler(tornado.web.RequestHandler):
                 "The WorkIQ destination was resolved during preview and cannot "
                 "be changed without starting a new preview.",
             )
+        # Preview already resolved this destination and the user approved what
+        # it displayed, so keep that exact spelling rather than recasing it.
+        if action.get("structured_payload") and stored_ref:
+            ref = stored_ref
 
         # Provenance is server owned: anything arriving over HTTP is a picker
         # confirmation, never an automatic resolution.
