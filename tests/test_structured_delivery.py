@@ -1385,6 +1385,59 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
         self.assertIn("torecipients", prompt.lower().replace(" ", ""))
 
 
+class TestTeamsDestinationDiscovery(StructuredDeliveryTestBase):
+    """The Teams preview worker must be told where chats live.
+
+    Production 2026-08-23 (task 2125): the worker returned "The exact Teams
+    chat ID is not exposed by the available read-only WorkIQ metadata" and
+    gave up. That is false -- PREVIEW_TOOLS includes workiq-fetch, and
+    /me/chats returns ids. Calendar gets a standing-duration rule and agenda
+    guidance, email gets reply-recipient guidance, and Teams got an empty
+    string: only "resolve every delivery identifier" and a schema with a
+    chat_id field, with nothing saying where to look. The endpoints were
+    already named in the EXECUTE prompt, so the knowledge existed in the
+    codebase -- it just never reached the worker that had to do the lookup.
+    """
+
+    def _teams_prompt(self):
+        task = create_task(
+            "Message the project chat about Lighthouse",
+            action_type="teams-message",
+            source_type="manual",
+        )
+        payload = structured_delivery.initial_payload(task, "teams")
+        return structured_delivery.preview_prompt(task, payload)
+
+    def test_prompt_names_the_chat_listing_endpoint(self):
+        prompt = self._teams_prompt()
+        self.assertIn("/me/chats", prompt)
+
+    def test_prompt_says_how_to_match_a_chat(self):
+        prompt = self._teams_prompt()
+        lowered = self._teams_prompt().lower()
+        self.assertIn("topic", lowered)
+        self.assertTrue(
+            "member" in lowered or "participant" in lowered,
+            "the worker must be told it can match a chat by who is in it",
+        )
+
+    def test_prompt_does_not_leave_teams_without_channel_guidance(self):
+        """Teams was the one channel whose guidance was an empty string."""
+        teams = self._teams_prompt()
+        self.assertIn("workiq-fetch", teams)
+        self.assertTrue(
+            any(word in teams.lower() for word in ("chat", "channel")),
+            "teams guidance must talk about chats or channels",
+        )
+
+    def test_prompt_refuses_invented_identifiers(self):
+        prompt = self._teams_prompt().lower()
+        self.assertTrue(
+            "never invent" in prompt or "do not invent" in prompt,
+            "resolution guidance must not licence guessing an id",
+        )
+
+
 class TestTeamsBodyFidelity(StructuredDeliveryTestBase):
     """Graph wants an itemBody object, not a string.
 

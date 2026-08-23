@@ -260,6 +260,30 @@ def preview_prompt(task: dict, payload: dict) -> str:
             "recipient you are addressing. Either way it must match who will "
             "really receive it, because the user approves that list."
         )
+    if channel == "teams":
+        # Calendar and email each carry channel guidance; Teams carried an
+        # empty string. Given only "resolve every delivery identifier" and a
+        # schema with a chat_id field, a worker reported that chat ids were
+        # "not exposed by the available read-only WorkIQ metadata" and gave up
+        # (task 2125) -- untrue, since workiq-fetch is allowed and /me/chats
+        # returns them. The execute prompt already named these endpoints; the
+        # worker that has to find them never saw one.
+        content_rule = (
+            "\nResolve the destination by reading, not by guessing:\n"
+            "- List conversations with workiq-fetch: /me/chats"
+            "?$select=id,topic,chatType,webUrl&$top=50\n"
+            "- Match a group chat on its topic. For a one-on-one, check who is "
+            "in it with /me/chats/{chat_id}/members, since those chats carry "
+            "no topic.\n"
+            "- For a channel reply, resolve the team and channel with "
+            "/me/joinedTeams and /teams/{team_id}/channels, and the parent "
+            "message id from that channel's messages.\n"
+            "- Set `destination_display` to the chat's topic, or the other "
+            "person's name for a one-on-one. It is what the user reads to "
+            "recognise where this is going, so a raw id will not do.\n"
+            "- If nothing matches, return ok=false naming the conversation you "
+            "looked for. Never report a chat id you did not read back."
+        )
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
