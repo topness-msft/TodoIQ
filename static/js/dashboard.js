@@ -4547,19 +4547,24 @@ function renderCoworkCard(task) {
         // it is answered nothing else happens. A spinner here reads as "still
         // working", which told Phil to keep waiting through 13 minutes of a run
         // that was blocked on him the whole time.
-        if (a.waiting_on_user
-                && ['previewing', 'executing'].indexOf(a.state) >= 0) {
+        // But waiting_on_user is ALSO set when Cowork pauses for its own
+        // internal tool approval, which never produces a question the user can
+        // answer. That only happens once execution is under way, so the blocked
+        // view belongs to the preview phase: during execution the run reports
+        // progress instead of prompting for an answer nobody owes it. 48ff6c3
+        // asserted exactly this in test_execution_progress_and_approval_states
+        // while leaving this branch covering 'executing' too, so the two have
+        // disagreed since 2026-08-15.
+        if (a.waiting_on_user && a.interaction_request
+                && a.state === 'previewing') {
             var interaction = a.interaction_request;
-            var question = interaction
-                ? cwInteractionFields(task.id, interaction)
-                : '<div class="cw-blocked-sub">Loading Cowork\u2019s question\u2026</div>';
-            var answerButton = interaction
-                ? '<button class="cw-btn cw-btn-go" data-testid="cw-answer-submit" '
-                    + 'onclick="cwSendAnswer(' + task.id + ')">'
-                    + (structured && a.delivery_channel === 'calendar'
-                        ? 'Select &amp; create meeting' : 'Answer and continue')
-                    + '</button>'
-                : '';
+            var question = cwInteractionFields(task.id, interaction);
+            var answerButton = '<button class="cw-btn cw-btn-go" '
+                + 'data-testid="cw-answer-submit" '
+                + 'onclick="cwSendAnswer(' + task.id + ')">'
+                + (structured && a.delivery_channel === 'calendar'
+                    ? 'Select &amp; create meeting' : 'Answer and continue')
+                + '</button>';
             return cwShell('is-running', 'needs you', task,
                 cwModeSwitch(task.id, a, true)
                 + cwIntentBlock(task, false)

@@ -373,6 +373,10 @@ class TestCoworkIndicators:
         action = {
             "id": 123,
             "task_id": task_id,
+            # cwLoad discards an action whose type/revision do not match the
+            # task, so the stub has to look like a real one.
+            "action_type": "follow-up",
+            "cowork_revision": 0,
             "state": "ready",
             "finding": "Done",
             "draft": "Draft",
