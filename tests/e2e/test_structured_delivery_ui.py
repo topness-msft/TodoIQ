@@ -186,8 +186,8 @@ def test_unconfirmed_calendar_offers_a_safe_retry(page: Page, base_url: str):
 
     card = page.locator(".cw-card")
     expect(card).to_contain_text("Delivery could not be confirmed")
-    expect(page.get_by_test_id("cw-retry")).to_be_visible()
-    expect(card).to_contain_text("will not create a second one")
+    expect(page.get_by_test_id("cw-retry")).to_have_text("Retry safely")
+    expect(card).to_contain_text("cannot be sent twice")
     page.screenshot(
         path=os.path.join(TEMP_DIR, "structured-calendar-retry.png"),
         full_page=True,
@@ -195,12 +195,74 @@ def test_unconfirmed_calendar_offers_a_safe_retry(page: Page, base_url: str):
 
 
 def test_unconfirmed_teams_withholds_retry(page: Page, base_url: str):
-    """Teams has no idempotency key, so a retry would post twice."""
-    _render_unconfirmed(
-        page, base_url, "Ping the project chat", "teams", "follow-up",
+    """A stale Teams post cannot be checked, so no retry is offered."""
+    task_id = _seed(page, base_url, "Ping the project chat")
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'follow-up';
+            selectedTaskId = taskId;
+            const old = new Date(Date.now() - 300 * 60000).toISOString()
+                .replace(/\\.\\d+Z$/, 'Z');
+            _cwActions[taskId] = {
+                id: 502, task_id: taskId, action_type: 'follow-up',
+                state: 'execute_unconfirmed', delivery_channel: 'teams',
+                structured_payload: '{"schema_version":1,"channel":"teams"}',
+                destination_display: 'Project chat', draft: 'Approved content',
+                updated_at: old,
+                error: 'Structured worker produced no readable output'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
     )
 
     card = page.locator(".cw-card")
     expect(card).to_contain_text("Delivery could not be confirmed")
     expect(page.get_by_test_id("cw-retry")).to_have_count(0)
     expect(card).to_contain_text("Check the destination before retrying")
+
+
+def test_recent_unconfirmed_teams_offers_a_checked_retry(page: Page, base_url: str):
+    """A recent Teams post can be looked up, but the promise is weaker."""
+    page.set_viewport_size({"width": 1280, "height": 900})
+    task_id = _seed(page, base_url, "Ping the project chat")
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'follow-up';
+            selectedTaskId = taskId;
+            const recent = new Date(Date.now() - 4 * 60000).toISOString()
+                .replace(/\\.\\d+Z$/, 'Z');
+            _cwActions[taskId] = {
+                id: 503, task_id: taskId, action_type: 'follow-up',
+                state: 'execute_unconfirmed', delivery_channel: 'teams',
+                structured_payload: '{"schema_version":1,"channel":"teams"}',
+                destination_display: 'Project chat', draft: 'Approved content',
+                updated_at: recent,
+                error: 'Structured worker produced no readable output'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    card = page.locator(".cw-card")
+    expect(page.get_by_test_id("cw-retry")).to_have_text("Check and retry")
+    # It must not borrow calendar's stronger guarantee.
+    expect(card).to_contain_text("check the chat first")
+    expect(card).not_to_contain_text("cannot be sent twice")
+    page.screenshot(
+        path=os.path.join(TEMP_DIR, "structured-teams-retry.png"),
+        full_page=True,
+    )

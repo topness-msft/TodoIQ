@@ -65,16 +65,18 @@ def preview_command(prompt: str) -> list[str]:
     ]
 
 
-def execute_command(prompt: str, channel: str) -> list[str]:
+def execute_command(prompt: str, channel: str, recover: bool = False) -> list[str]:
     """Build a subprocess command with one channel-specific write primitive."""
     tool = EXECUTE_TOOLS.get(channel)
     if not tool:
         raise ValueError(f"Unsupported structured delivery channel: {channel}")
     tools = [tool]
-    if channel == "email":
+    if channel == "email" or (channel == "teams" and recover):
         # /sendMail and /reply return 202 with no body, so the only honest way
-        # to produce a delivery reference is to read the sent copy back. This
-        # adds a READ tool, never a second write primitive.
+        # to produce a delivery reference is to read the sent copy back. Teams
+        # needs the same read, but only when recovering, so an ordinary post
+        # keeps the tightest possible surface. Either way this adds a READ tool,
+        # never a second write primitive.
         tools.append("workiq-fetch")
     return [
         "copilot",
@@ -287,12 +289,19 @@ def idempotency_key(action: dict) -> str | None:
 
 
 CORRELATION_HEADER = "x-riveter-correlation-id"
+# How long a Teams post stays recoverable. Teams cannot be stamped with a key,
+# so recovery works by reading recent messages and matching sender and body.
+# That look is only trustworthy while the message is still near the top of the
+# chat; beyond this a busy thread could have pushed it out of view, and a
+# "retry" would be a genuine second post.
+TEAMS_RECOVERY_WINDOW_MINUTES = 120
 
 
 def execute_prompt(
     payload: dict,
     correlation_id: str,
     idempotency_key_value: str | None = None,
+    recover: bool = False,
 ) -> str:
     """Build a write-only prompt that sends the exact sealed payload once."""
     channel = payload.get("channel")
@@ -344,19 +353,52 @@ def execute_prompt(
             "/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies. "
             "Post the exact body from the payload and return the created message id."
         )
+        if recover:
+            # Teams cannot be stamped with a key, so the only defence against a
+            # second post is to look for the first one before writing.
+            operation = (
+                "An earlier attempt to post this message may or may not have "
+                "succeeded, and Teams offers no idempotency key, so you must "
+                "look before you write.\n\n"
+                "1. Read the recent messages in the destination thread with "
+                "workiq-fetch: /chats/{chat_id}/messages?$top=25 for a chat, or "
+                "/teams/{team_id}/channels/{channel_id}/messages/{message_id}"
+                "/replies?$top=25 for a channel reply.\n"
+                "2. If a message sent by the signed-in user already has EXACTLY "
+                "the body in the sealed payload, the earlier attempt succeeded. "
+                "Do not post anything. Return that message's id as delivery_ref "
+                'with "already_posted": true.\n'
+                "3. Only if no such message exists, call workiq-create_entity "
+                "exactly once to post it, and return the new message id with "
+                '"already_posted": false.\n\n'
+                "Never post when step 2 matched, and never report a message id "
+                "you did not either read or create."
+            )
+            marker_extra += ',\n"already_posted":true or false'
     else:
         raise ValueError(f"Unsupported structured delivery channel: {channel}")
     # The blanket "do not fetch" rule predates the email read-back and would
     # now contradict the instruction that follows it. Contradictory prompts are
     # their own failure mode, so the read allowance is stated per channel.
-    read_rule = (
-        "The only read permitted is the sent-items lookup described below; do "
-        "not search for anything else."
-        if channel == "email"
-        else "Do not search or fetch anything."
+    if channel == "email":
+        read_rule = (
+            "The only read permitted is the sent-items lookup described below; "
+            "do not search for anything else."
+        )
+    elif channel == "teams" and recover:
+        read_rule = (
+            "The only read permitted is the thread lookup described below; do "
+            "not search for anything else."
+        )
+    else:
+        read_rule = "Do not search or fetch anything."
+    write_rule = (
+        "Post at most once, and only if the message is not already there."
+        if channel == "teams" and recover
+        else "Perform one write only."
     )
     return f"""
-You are Riveter's {channel} execution worker. Perform one write only.
+You are Riveter's {channel} execution worker. {write_rule}
 {read_rule}
 Do not reinterpret, improve, or change the approved payload.
 
@@ -650,6 +692,7 @@ def finish_execute(
     exit_code: int,
     correlation_id: str,
     expected_idempotency_key: str | None = None,
+    require_post_disposition: bool = False,
 ) -> dict | None:
     """Persist execution only when correlated external delivery evidence exists."""
     if exit_code != 0:
@@ -676,6 +719,15 @@ def finish_execute(
                 raise ValueError(
                     "The write completed without Riveter's idempotency key"
                 )
+        if require_post_disposition and not isinstance(
+            result.get("already_posted"), bool
+        ):
+            # A recovery run must say whether it found the message or sent it.
+            # Without that, "it worked" cannot be told apart from "it posted a
+            # second copy", which is the only thing recovery exists to prevent.
+            raise ValueError(
+                "The recovery run did not report whether it had already posted"
+            )
         delivery_ref = str(result["delivery_ref"]).strip()
         return update_task_action(
             action_id,
@@ -737,18 +789,20 @@ def _preview_worker(task: dict, action: dict) -> None:
             _threads.pop(f"preview:{action['id']}", None)
 
 
-def _execute_worker(action: dict) -> None:
+def _execute_worker(action: dict, recover: bool = False) -> None:
     payload = json.loads(action["structured_payload"])
     correlation_id = str(uuid.uuid4())
     # Derived from the row, not the attempt, so re-running this execution reuses
     # the same key: Graph returns the existing event, and the sent mail copy
     # stays findable instead of being sent twice.
     key = idempotency_key(action)
+    teams_recovery = recover and payload.get("channel") == "teams"
     try:
         result = _run(
             execute_command(
-                execute_prompt(payload, correlation_id, key),
+                execute_prompt(payload, correlation_id, key, recover=recover),
                 payload["channel"],
+                recover=recover,
             )
         )
         finish_execute(
@@ -758,6 +812,7 @@ def _execute_worker(action: dict) -> None:
             exit_code=result.returncode,
             correlation_id=correlation_id,
             expected_idempotency_key=key,
+            require_post_disposition=teams_recovery,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured execution failed")
@@ -800,6 +855,14 @@ def start_preview(task: dict, action: dict) -> None:
     _start_thread(f"preview:{action['id']}", _preview_worker, dict(task), dict(action))
 
 
-def start_execute(action: dict) -> None:
-    """Launch a single-write structured execution worker."""
-    _start_thread(f"execute:{action['id']}", _execute_worker, dict(action))
+def start_execute(action: dict, recover: bool = False) -> None:
+    """Launch a single-write structured execution worker.
+
+    ``recover`` re-runs an execution whose outcome was never confirmed. For
+    calendar and email the stamped key makes that inherently safe; for Teams it
+    switches the worker into look-before-you-write mode, which is the only
+    protection available there.
+    """
+    _start_thread(
+        f"execute:{action['id']}", _execute_worker, dict(action), recover
+    )

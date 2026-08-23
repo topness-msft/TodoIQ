@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 import tornado.web
 
@@ -77,6 +77,7 @@ from ..services.cowork_runner import (
 )
 from ..services.workspace_settings import api_transport_enabled
 from ..services.structured_delivery import (
+    TEAMS_RECOVERY_WINDOW_MINUTES,
     calendar_event_summary as structured_calendar_summary,
     channel_for_task as structured_channel_for_task,
     initial_payload as structured_initial_payload,
@@ -1760,6 +1761,27 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         self.write(json.dumps({"action": payload}))
 
 
+def _teams_recovery_is_open(action: dict) -> bool:
+    """Is a Teams post still recent enough that Riveter could recognise it?
+
+    Recovery reads the thread and matches on sender and body. That only works
+    while the message is still near the top, so the window is a safety bound,
+    not a convenience.
+    """
+    stamp = str(action.get("updated_at") or "").strip()
+    if not stamp:
+        return False
+    try:
+        seen = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    now = NOW_FN() if NOW_FN is not None else datetime.now(timezone.utc)
+    age = (now - seen).total_seconds() / 60
+    return 0 <= age <= TEAMS_RECOVERY_WINDOW_MINUTES
+
+
 class CoworkRetryHandler(tornado.web.RequestHandler):
     """Re-run one unconfirmed structured execution on its existing row.
 
@@ -1791,12 +1813,20 @@ class CoworkRetryHandler(tornado.web.RequestHandler):
             return self._fail(
                 409, "Only an unconfirmed delivery can be retried."
             )
-        if action.get("delivery_channel") != "calendar":
+        channel = action.get("delivery_channel")
+        if channel not in {"calendar", "email", "teams"}:
+            return self._fail(409, "This action cannot be retried safely.")
+        if channel == "teams" and not _teams_recovery_is_open(action):
+            # Teams carries no key, so recovery works by reading the thread and
+            # matching the body. Once the message can no longer be expected near
+            # the top of the chat, "retry" stops being a lookup and becomes a
+            # second post.
             return self._fail(
                 409,
-                "Only a calendar action can be retried safely. Sending again "
-                "would post a second message, so check the destination and "
-                "start over if it did not arrive.",
+                "This Teams message is too old to retry safely. Riveter can "
+                "only tell whether it already posted while the message is "
+                "still recent, so check the chat and start a new draft if it "
+                "never arrived.",
             )
 
         retried = update_task_action(
@@ -1810,7 +1840,7 @@ class CoworkRetryHandler(tornado.web.RequestHandler):
             return self._fail(409, "That action changed before it was retried.")
         try:
             execute = STRUCTURED_EXECUTE_FN or start_structured_execute
-            execute(retried)
+            execute(retried, recover=True)
         except Exception as exc:  # noqa: BLE001
             logger.exception("could not retry structured WorkIQ action")
             message = (

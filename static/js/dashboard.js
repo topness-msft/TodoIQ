@@ -4202,10 +4202,32 @@ function cwRedoRow(taskId) {
 // so. Redo is framed as "tell Cowork what to change", which reads as steering
 // the existing conversation; a user asking for a clean slate had no way to
 // express it except by typing the request into the correction box.
+var CW_TEAMS_RECOVERY_WINDOW_MIN = 120;
+
+// Teams carries no idempotency key, so recovery works by reading the thread and
+// matching the body. That is only trustworthy while the message is still near
+// the top of the chat, so the button disappears once it is too old. The server
+// enforces the same bound; this only avoids offering a control that would 409.
+function cwWithinTeamsRecovery(a) {
+    var stamp = a && a.updated_at;
+    if (!stamp) return false;
+    var seen = Date.parse(String(stamp).replace(' ', 'T').replace(/Z?$/, 'Z'));
+    if (isNaN(seen)) return false;
+    var ageMin = (Date.now() - seen) / 60000;
+    return ageMin >= 0 && ageMin <= CW_TEAMS_RECOVERY_WINDOW_MIN;
+}
+
 function cwRetryDelivery(taskId) {
-    if (!window.confirm('Retry creating this meeting?\n\nThis is safe to repeat: '
-        + 'Riveter sends the same idempotency key, so Microsoft 365 returns the '
-        + 'existing meeting rather than creating a second one.')) return;
+    var a = _cwActions[taskId];
+    var keyed = a && (a.delivery_channel === 'calendar'
+        || a.delivery_channel === 'email');
+    if (!window.confirm(keyed
+        ? 'Retry this delivery?\n\nThis is safe to repeat: Riveter sends the '
+            + 'same idempotency key, so Microsoft 365 returns what it already '
+            + 'created rather than sending a second one.'
+        : 'Check the chat and retry?\n\nTeams has no way to mark a message, so '
+            + 'Riveter will read the recent messages first and post only if '
+            + 'this one is not already there.')) return;
     fetch('/api/tasks/' + taskId + '/cowork/retry', { method: 'POST' })
     .then(function(res) {
         return res.json().then(function(data) { return { ok: res.ok, data: data }; });
@@ -4514,27 +4536,41 @@ function renderCoworkCard(task) {
         }
 
         if (a && a.state === 'execute_unconfirmed') {
-            // Only calendar is safely repeatable: Graph dedupes event creates
-            // that share a transactionId, so a retry either books the meeting
-            // that never landed or returns the one that did. Teams and email
-            // have no such key, so offering Retry there would risk a second
-            // message going out.
-            var canRetry = cwIsStructured(a) && a.delivery_channel === 'calendar';
+            // Calendar and email carry a key Riveter stamped on the write, so a
+            // repeat is provably the same one. Teams cannot be stamped at all,
+            // so recovery reads the thread first and is only offered while the
+            // message is recent enough to still be findable.
+            var structuredAction = cwIsStructured(a);
+            var keyedChannel = a.delivery_channel === 'calendar'
+                || a.delivery_channel === 'email';
+            var teamsRecoverable = a.delivery_channel === 'teams'
+                && cwWithinTeamsRecovery(a);
+            var canRetry = structuredAction && (keyedChannel || teamsRecoverable);
+            var retryNote = keyedChannel
+                ? 'Retrying is safe: Riveter reuses the same key, so this cannot '
+                    + 'be sent twice. '
+                : (teamsRecoverable
+                    ? 'Riveter will check the chat first and only post if the '
+                        + 'message is not already there. '
+                    : 'Check the destination before retrying. ');
             return cwShell('is-unconfirmed', 'check delivery', task,
                 '<section class="cw-delivery-result is-unconfirmed" data-testid="delivery-unconfirmed">'
                 + '<span class="cw-delivery-mark" aria-hidden="true">!</span><div>'
                 + '<b>Delivery could not be confirmed</b>'
-                + '<span>' + (canRetry
-                    ? 'Retrying is safe for a meeting: it will not create a second one. '
-                    : 'Check the destination before retrying. ')
+                + '<span>' + retryNote
                 + escapeHtml(a.error || '') + '</span>'
                 + '</div></section>'
                 + cwTimeline(a, '')
                 + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
                 (canRetry
                     ? '<button class="cw-btn cw-btn-go" data-testid="cw-retry" '
-                        + 'title="Safe to repeat: the meeting cannot be created twice." '
-                        + 'onclick="cwRetryDelivery(' + task.id + ')">Retry safely</button>'
+                        + 'title="' + (keyedChannel
+                            ? 'Safe to repeat: this cannot be delivered twice.'
+                            : 'Riveter checks the chat before posting again.')
+                        + '" '
+                        + 'onclick="cwRetryDelivery(' + task.id + ')">'
+                        + (keyedChannel ? 'Retry safely' : 'Check and retry')
+                        + '</button>'
                     : '')
                 + '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
                 + cwCostBadge(a) + cwCumulativeCostBadge(a),

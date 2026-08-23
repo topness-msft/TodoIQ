@@ -912,6 +912,130 @@ class TestIdempotencyKeys(StructuredDeliveryTestBase):
         )
 
 
+class TestTeamsRecovery(StructuredDeliveryTestBase):
+    """Teams has no idempotency key, so repeating a post is a real second post.
+
+    Measured 2026-08-22: identical posts produced two distinct message ids. The
+    chatMessage schema has no extended properties, internet headers or
+    transaction id, and every field it does have is user-visible, so nothing can
+    be stamped on the message. Recovery therefore has to LOOK before posting,
+    and that look is only trustworthy while the message is still recent enough
+    to be in view.
+    """
+
+    def _teams_action(self, minutes_old=5):
+        task = create_task("Ping the project chat", action_type="follow-up",
+                           source_type="chat")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            destination_ref="19:chat-1@thread.v2",
+            destination_display="Project chat",
+            structured_payload=json.dumps({
+                "schema_version": 1, "channel": "teams", "mode": "chat",
+                "chat_id": "19:chat-1@thread.v2", "body": "Approved body",
+            }),
+        )
+        stamp = (
+            datetime.now(timezone.utc) - timedelta(minutes=minutes_old)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        update_task_action(
+            action["id"],
+            frozenset({"state", "error", "updated_at"}),
+            state="execute_unconfirmed",
+            error="Structured worker produced no readable output",
+            updated_at=stamp,
+        )
+        return task, action
+
+    def test_normal_teams_execution_stays_write_only(self):
+        argv = structured_delivery.execute_command("prompt", "teams")
+        self.assertNotIn("workiq-fetch", " ".join(argv))
+
+    def test_recovery_teams_execution_may_read_before_posting(self):
+        argv = structured_delivery.execute_command("prompt", "teams", recover=True)
+        tools = next(
+            value for value in argv if value.startswith("--available-tools=")
+        ).split("=", 1)[1].split(",")
+        self.assertEqual(
+            sorted(tools), ["workiq-create_entity", "workiq-fetch"]
+        )
+
+    def test_recovery_prompt_requires_looking_before_posting(self):
+        payload = {
+            "schema_version": 1, "channel": "teams", "mode": "chat",
+            "chat_id": "19:chat-1@thread.v2", "body": "Approved body",
+        }
+        prompt = structured_delivery.execute_prompt(
+            payload, "corr-1", None, recover=True
+        )
+        lowered = prompt.lower()
+
+        self.assertIn("already", lowered)
+        self.assertIn("already_posted", prompt)
+        self.assertTrue(
+            "do not post" in lowered or "without posting" in lowered,
+            "recovery must be able to conclude the message is already there",
+        )
+
+    def test_normal_prompt_does_not_mention_recovery(self):
+        payload = {
+            "schema_version": 1, "channel": "teams", "mode": "chat",
+            "chat_id": "19:chat-1@thread.v2", "body": "Approved body",
+        }
+        prompt = structured_delivery.execute_prompt(payload, "corr-1", None)
+        self.assertNotIn("already_posted", prompt)
+
+    def test_recovery_result_must_state_whether_it_posted(self):
+        _task, action = self._teams_action()
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "1787429374269",
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            require_post_disposition=True,
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+        self.assertIsNone(latest["workiq_delivery_ref"])
+
+    def test_recovery_confirms_when_it_reports_an_existing_message(self):
+        _task, action = self._teams_action()
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "1787429363102",
+                    "already_posted": True,
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="",
+            exit_code=0,
+            correlation_id="corr-1",
+            require_post_disposition=True,
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "executed", latest.get("error"))
+        self.assertEqual(latest["workiq_delivery_ref"], "1787429363102")
+
+
 class TestStructuredDeliveryMigration(unittest.TestCase):
     def test_partial_legacy_schema_rebuild_preserves_rows(self):
         conn = db_module.sqlite3.connect(":memory:")
@@ -1565,7 +1689,7 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
 
         original = handler.STRUCTURED_EXECUTE_FN
         handler.STRUCTURED_EXECUTE_FN = (
-            lambda execution: self.execute_started.append(execution)
+            lambda execution, recover=False: self.execute_started.append(execution)
         )
         try:
             response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
@@ -1587,8 +1711,24 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(latest["state"], "executing")
         self.assertIsNone(latest["error"])
 
+    def _backdate(self, action_id: int, minutes: int) -> None:
+        """Age a row's updated_at directly.
+
+        update_task_action owns updated_at, so a test cannot make a row look
+        old through the normal path.
+        """
+        stamp = (
+            datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = db_module.get_connection()
+        conn.execute(
+            "UPDATE task_actions SET updated_at=? WHERE id=?", (stamp, action_id)
+        )
+        conn.commit()
+        conn.close()
+
     def test_unconfirmed_teams_execution_is_not_retryable(self):
-        """Measured: Teams has no transactionId, so a repeat post duplicates."""
+        """Superseded: Teams retry is now allowed, but only while it can look."""
         from src.handlers import cowork as handler
 
         task = create_task("Ping the chat", action_type="follow-up",
@@ -1608,20 +1748,68 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             state="execute_unconfirmed",
             error="no readable output",
         )
+        self._backdate(
+            action["id"],
+            structured_delivery.TEAMS_RECOVERY_WINDOW_MINUTES + 30,
+        )
 
         original = handler.STRUCTURED_EXECUTE_FN
         handler.STRUCTURED_EXECUTE_FN = (
-            lambda execution: self.execute_started.append(execution)
+            lambda execution, recover=False: self.execute_started.append(execution)
         )
         try:
             response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
         finally:
             handler.STRUCTURED_EXECUTE_FN = original
 
+        # Too old to see the message, so retrying could post a second time.
         self.assertEqual(response.code, 409, response.body)
         self.assertEqual(self.execute_started, [])
         latest = get_latest_task_action(task["id"])
         self.assertEqual(latest["state"], "execute_unconfirmed")
+
+    def test_recent_unconfirmed_teams_execution_retries_in_recovery_mode(self):
+        from src.handlers import cowork as handler
+
+        task = create_task("Ping the chat", action_type="follow-up",
+                           source_type="chat")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="teams",
+            destination_ref="19:chat-1@thread.v2",
+            destination_display="Project chat",
+            structured_payload=json.dumps(
+                {"schema_version": 1, "channel": "teams", "body": "Approved"}
+            ),
+        )
+        recent = (
+            datetime.now(timezone.utc) - timedelta(minutes=3)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        update_task_action(
+            action["id"],
+            frozenset({"state", "error"}),
+            state="execute_unconfirmed",
+            error="no readable output",
+        )
+
+        seen = []
+        original = handler.STRUCTURED_EXECUTE_FN
+        handler.STRUCTURED_EXECUTE_FN = (
+            lambda execution, recover=False: seen.append((execution, recover))
+        )
+        try:
+            response = self._post(f"/api/tasks/{task['id']}/cowork/retry")
+        finally:
+            handler.STRUCTURED_EXECUTE_FN = original
+
+        self.assertEqual(response.code, 202, response.body)
+        self.assertEqual(len(seen), 1)
+        # Teams must never be re-run blindly; it has to look first.
+        self.assertTrue(seen[0][1], "teams retry must run in recovery mode")
+        self.assertEqual(seen[0][0]["id"], action["id"])
+        self.assertEqual(
+            get_latest_task_action(task["id"])["state"], "executing"
+        )
 
     def test_retry_is_refused_unless_the_action_is_unconfirmed(self):
         from src.handlers import cowork as handler
