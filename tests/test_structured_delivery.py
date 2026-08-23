@@ -17,6 +17,7 @@ from src.models import (
     create_task,
     create_task_action,
     get_latest_task_action,
+    get_task,
     update_task_action,
 )
 from src.services import structured_delivery
@@ -1202,7 +1203,213 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         self.assertFalse(certified)
 
 
+class TestEmailBodyFidelity(StructuredDeliveryTestBase):
+    """The delivered mail must look like the draft that was approved.
+
+    Observed in production 2026-08-23 (task 2124): the approved draft had
+    paragraph breaks, the model sent it as contentType "html" with the raw
+    plain text inside, and every newline collapsed. The words survived, the
+    structure did not. Riveter approves a specific artifact, so Riveter renders
+    the wire format rather than leaving it to the worker.
+    """
+
+    def test_plain_body_becomes_html_with_preserved_breaks(self):
+        html_body = structured_delivery.plain_text_to_html(
+            "Hi Phil,\n\nKickstarter turns a use case into a plan.\n\n"
+            "Thanks,\nPhil"
+        )
+        self.assertIn("Hi Phil,<br>", html_body)
+        self.assertIn("Thanks,<br>\nPhil", html_body)
+        # Every newline must survive as a break.
+        self.assertEqual(html_body.count("<br>"), 5)
+
+    def test_rendering_escapes_markup_so_content_cannot_inject(self):
+        html_body = structured_delivery.plain_text_to_html(
+            "5 < 6 & <script>alert('x')</script>"
+        )
+        self.assertNotIn("<script>", html_body)
+        self.assertIn("&lt;script&gt;", html_body)
+        self.assertIn("&amp;", html_body)
+
+    def test_email_prompt_supplies_the_rendered_html_verbatim(self):
+        payload = {
+            "schema_version": 1, "channel": "email", "mode": "reply",
+            "message_id": "message-1", "to": ["sarah@microsoft.com"],
+            "subject": "Re: Project update",
+            "body": "Hi Sarah,\n\nApproved body.\n\nThanks,\nPhil",
+        }
+        prompt = structured_delivery.execute_prompt(
+            payload, "corr-1", "riveter-mail-t1-a1"
+        )
+        lowered = prompt.lower()
+
+        self.assertIn("Approved body.<br>", prompt)
+        self.assertIn('"contenttype":"html"', lowered.replace(" ", ""))
+        # It must not leave the wire format to the worker's judgement.
+        self.assertTrue(
+            "do not reformat" in lowered or "verbatim" in lowered,
+            "the prompt must pin the rendered body",
+        )
+
+    def test_single_newlines_are_not_lost_either(self):
+        rendered = structured_delivery.plain_text_to_html("a\nb\nc")
+        self.assertEqual(rendered, "a<br>\nb<br>\nc")
+
+    def test_empty_body_renders_empty(self):
+        self.assertEqual(structured_delivery.plain_text_to_html(""), "")
+        self.assertEqual(structured_delivery.plain_text_to_html(None), "")
+
+
+class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
+    """The address you approved must be the address that receives it.
+
+    Observed in production 2026-08-23 (task 2124): the approved destination was
+    phil@topness.com, but the send used Graph's /reply, which addresses the
+    thread and ignores the payload's `to` list entirely. The mail arrived at
+    Phil.Topness@microsoft.com. Same human that time; a thread with other
+    participants would have delivered to people who were never approved.
+    """
+
+    def _email_action(self, destination="sarah@microsoft.com"):
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="email",
+            destination_ref=destination,
+            destination_display=destination,
+            structured_payload=json.dumps({
+                "schema_version": 1, "channel": "email", "mode": "reply",
+                "message_id": "message-1", "to": [destination],
+                "subject": "Re: Project update", "body": "Approved body",
+            }),
+        )
+        update_task_action(action["id"], frozenset({"state"}), state="executing")
+        return task, action
+
+    def test_preview_prompt_demands_the_real_reply_recipients(self):
+        task = create_task("Reply to Sarah", action_type="respond-email",
+                           source_type="email")
+        payload = structured_delivery.initial_payload(task, "email")
+        prompt = structured_delivery.preview_prompt(task, payload)
+        lowered = prompt.lower()
+
+        self.assertIn("reply", lowered)
+        self.assertTrue(
+            "actually" in lowered or "actual recipients" in lowered,
+            "preview must record who the reply will really reach",
+        )
+
+    def test_execution_rejects_delivery_to_an_unapproved_address(self):
+        _task, action = self._email_action()
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "AAMkAD-sent",
+                    "idempotency_key": "k1",
+                    "recipients": ["someone.else@microsoft.com"],
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="", exit_code=0, correlation_id="corr-1",
+            expected_idempotency_key="k1",
+            expected_recipients={"sarah@microsoft.com"},
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+        self.assertIsNone(latest["workiq_delivery_ref"])
+        self.assertIn("recipient", latest["error"].lower())
+
+    def test_execution_confirms_when_recipients_match(self):
+        _task, action = self._email_action()
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "AAMkAD-sent",
+                    "idempotency_key": "k1",
+                    # Case and display differences must not trip it.
+                    "recipients": ["Sarah@Microsoft.com"],
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="", exit_code=0, correlation_id="corr-1",
+            expected_idempotency_key="k1",
+            expected_recipients={"sarah@microsoft.com"},
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "executed", latest.get("error"))
+        self.assertEqual(latest["workiq_delivery_ref"], "AAMkAD-sent")
+
+    def test_execution_requires_recipients_to_be_reported_at_all(self):
+        """Silence is not proof; an unreported recipient set is unverified."""
+        _task, action = self._email_action()
+
+        structured_delivery.finish_execute(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": "corr-1", "phase": "execute", "ok": True,
+                    "delivery_ref": "AAMkAD-sent", "idempotency_key": "k1",
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="", exit_code=0, correlation_id="corr-1",
+            expected_idempotency_key="k1",
+            expected_recipients={"sarah@microsoft.com"},
+        )
+
+        latest = get_latest_task_action(action["task_id"])
+        self.assertEqual(latest["state"], "execute_unconfirmed")
+
+    def test_execute_prompt_asks_for_the_sent_recipients(self):
+        payload = {
+            "schema_version": 1, "channel": "email", "mode": "reply",
+            "message_id": "message-1", "to": ["sarah@microsoft.com"],
+            "subject": "Re: Project update", "body": "Approved body",
+        }
+        prompt = structured_delivery.execute_prompt(
+            payload, "corr-1", "riveter-mail-t1-a1"
+        )
+        self.assertIn("recipients", prompt.lower())
+        self.assertIn("torecipients", prompt.lower().replace(" ", ""))
+
+
+
 class TestStructuredDeliveryMigration(unittest.TestCase):
+    def test_expression_default_survives_a_constraint_rebuild(self):
+        """PRAGMA strips the parens SQLite demands around expression defaults.
+
+        Re-emitting one bare aborts the rebuild with a syntax error, which would
+        take init_db -- and therefore startup -- down with it.
+        """
+        conn = db_module.sqlite3.connect(":memory:")
+        conn.row_factory = db_module.sqlite3.Row
+        conn.executescript(db_module.SCHEMA_SQL)
+        row = next(
+            r for r in conn.execute("PRAGMA table_info(tasks)")
+            if r["name"] == "created_at"
+        )
+
+        definition = db_module._task_column_definition(row)
+
+        self.assertIn("strftime", definition, "default should be carried over")
+        conn.execute(f"CREATE TABLE probe ({definition})")
+        conn.execute("INSERT INTO probe DEFAULT VALUES")
+        stamped = conn.execute("SELECT created_at FROM probe").fetchone()[0]
+        self.assertRegex(stamped, r"^\d{4}-\d{2}-\d{2}T")
+        conn.close()
+
     def test_partial_legacy_schema_rebuild_preserves_rows(self):
         conn = db_module.sqlite3.connect(":memory:")
         conn.row_factory = db_module.sqlite3.Row

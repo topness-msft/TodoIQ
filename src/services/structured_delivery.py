@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -242,6 +243,17 @@ def preview_prompt(task: dict, payload: dict) -> str:
         if channel == "calendar"
         else ""
     )
+    if channel == "email":
+        # A reply is addressed to its thread, so `to` is not a choice: it is a
+        # fact about the thread. Recording the address from the task text
+        # instead let Riveter approve one recipient and deliver to another.
+        content_rule = (
+            "\nFor reply mode, `to` must be the addresses the reply will "
+            "actually reach - read them from the message being replied to - "
+            "not the address written in the task. For new mail, `to` is the "
+            "recipient you are addressing. Either way it must match who will "
+            "really receive it, because the user approves that list."
+        )
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
@@ -288,6 +300,20 @@ def idempotency_key(action: dict) -> str | None:
     return f"riveter-{prefix}-t{action.get('task_id')}-a{action.get('id')}"
 
 
+def plain_text_to_html(text: str | None) -> str:
+    """Render an approved plain-text body as HTML without changing it.
+
+    Mail is delivered as HTML, where a newline is only whitespace. Sending the
+    approved plain text straight into an HTML body silently collapsed every
+    paragraph break (production, task 2124). Riveter approves a specific
+    artifact, so Riveter renders the wire format itself rather than leaving the
+    choice to the worker. Escaping first means the body can never inject markup.
+    """
+    if not text:
+        return ""
+    return html.escape(str(text), quote=False).replace("\n", "<br>\n")
+
+
 CORRELATION_HEADER = "x-riveter-correlation-id"
 # How long a Teams post stays recoverable. Teams cannot be stamped with a key,
 # so recovery works by reading recent messages and matching sender and body.
@@ -321,10 +347,18 @@ def execute_prompt(
             )
             marker_extra = f',\n"idempotency_key":"{idempotency_key_value}"'
     elif channel == "email":
+        rendered = plain_text_to_html(payload.get("body"))
         operation = (
             "Call workiq-do_action exactly once to send. For reply mode use "
             "/me/messages/{message_id}/reply. For new mode use /me/sendMail with "
-            "the exact recipients, subject, and body."
+            "the exact recipients and subject.\n\n"
+            "Send the body as HTML, using this exact rendered content verbatim. "
+            "Do not reformat it, re-wrap it, restyle it, or substitute the plain "
+            'text version. Set the message body to {"contentType":"html",'
+            '"content": <<<the block below>>>}:\n'
+            "-----BEGIN APPROVED HTML BODY-----\n"
+            f"{rendered}\n"
+            "-----END APPROVED HTML BODY-----"
         )
         if idempotency_key_value:
             operation += (
@@ -333,19 +367,26 @@ def execute_prompt(
                 "Set internetMessageHeaders on the message object to exactly "
                 f'[{{"name":"{CORRELATION_HEADER}",'
                 f'"value":"{idempotency_key_value}"}}]. For reply mode this goes '
-                'in the "Message" property alongside "Comment"; for new mail it '
+                'in the "Message" property alongside the body; for new mail it '
                 'goes in the "Message" property of /me/sendMail.'
                 "\n\nAfter sending, the send returns 202 with no body, so it "
                 "carries no reference. Do NOT invent one. Instead read "
                 "/me/mailFolders/sentitems/messages"
-                "?$top=5&$select=id,internetMessageId,internetMessageHeaders"
-                "&$orderby=sentDateTime desc with workiq-fetch, find the message "
-                f'whose {CORRELATION_HEADER} header equals '
+                "?$top=5&$select=id,internetMessageId,internetMessageHeaders,"
+                "toRecipients&$orderby=sentDateTime desc with workiq-fetch, find "
+                f'the message whose {CORRELATION_HEADER} header equals '
                 f'"{idempotency_key_value}", and return that message\'s id as '
                 "delivery_ref. If no such message is found, return ok=false: "
-                "never report a delivery reference you did not read back."
+                "never report a delivery reference you did not read back.\n\n"
+                "Also report that sent message's actual toRecipients addresses "
+                'as "recipients". A reply is addressed to its thread, so the '
+                "delivered recipients can differ from the payload; report what "
+                "the sent copy really shows, not what the payload asked for."
             )
-            marker_extra = f',\n"idempotency_key":"{idempotency_key_value}"'
+            marker_extra = (
+                f',\n"idempotency_key":"{idempotency_key_value}"'
+                ',\n"recipients":["actual addresses from the sent message"]'
+            )
     elif channel == "teams":
         operation = (
             "Call workiq-create_entity exactly once. For a chat use "
@@ -701,6 +742,7 @@ def finish_execute(
     correlation_id: str,
     expected_idempotency_key: str | None = None,
     require_post_disposition: bool = False,
+    expected_recipients: set[str] | None = None,
 ) -> dict | None:
     """Persist execution only when correlated external delivery evidence exists."""
     if exit_code != 0:
@@ -736,6 +778,23 @@ def finish_execute(
             raise ValueError(
                 "The recovery run did not report whether it had already posted"
             )
+        if expected_recipients is not None:
+            reported = {
+                str(value).strip().lower()
+                for value in (result.get("recipients") or [])
+                if str(value).strip()
+            }
+            if not reported:
+                raise ValueError(
+                    "The send did not report who actually received it"
+                )
+            if reported != {str(v).strip().lower() for v in expected_recipients}:
+                # A reply is addressed to its thread, so Graph can deliver to
+                # people the approved destination never named.
+                raise ValueError(
+                    "The message went to different recipients than the ones "
+                    f"approved ({', '.join(sorted(reported))})"
+                )
         delivery_ref = str(result["delivery_ref"]).strip()
         return update_task_action(
             action_id,
@@ -805,6 +864,17 @@ def _execute_worker(action: dict, recover: bool = False) -> None:
     # stays findable instead of being sent twice.
     key = idempotency_key(action)
     teams_recovery = recover and payload.get("channel") == "teams"
+    # The user approved a specific recipient list; Graph's /reply can deliver
+    # somewhere else entirely, so the sent copy is checked against it.
+    expected_recipients = (
+        {
+            str(value).strip().lower()
+            for value in payload.get("to") or []
+            if str(value).strip()
+        }
+        if payload.get("channel") == "email"
+        else None
+    ) or None
     try:
         result = _run(
             execute_command(
@@ -821,6 +891,7 @@ def _execute_worker(action: dict, recover: bool = False) -> None:
             correlation_id=correlation_id,
             expected_idempotency_key=key,
             require_post_disposition=teams_recovery,
+            expected_recipients=expected_recipients,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured execution failed")
