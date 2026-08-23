@@ -1036,6 +1036,172 @@ class TestTeamsRecovery(StructuredDeliveryTestBase):
         self.assertEqual(latest["workiq_delivery_ref"], "1787429363102")
 
 
+class TestEvidenceProvenance(StructuredDeliveryTestBase):
+    """Slot evidence must say where it actually came from.
+
+    finish_preview stamped {"source": "FindMeetingTimes+interaction"} while the
+    preview worker only ever had workiq-ask/retrieve/fetch. Graph's
+    findMeetingTimes and getSchedule are POST actions needing workiq-do_action,
+    which preview deliberately does not have, so that label could never be
+    earned. Worse, schedule_interaction_is_certified() gated slot selection by
+    checking for that exact string, so Riveter was certifying meetings by
+    reading back a label it had written itself.
+    """
+
+    def _evidence_from_preview(self):
+        task = create_task(
+            "Schedule a 25-minute review",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        duration = structured_delivery._meeting_duration(task)
+        start = datetime(2028, 8, 21, 9, 5, tzinfo=timezone(timedelta(hours=-7)))
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=(
+                f"{structured_delivery.RESULT_START}\n"
+                + json.dumps({
+                    "correlation_id": envelope["correlation_id"],
+                    "phase": "preview", "ok": True,
+                    "payload": {
+                        "schema_version": 1, "channel": "calendar",
+                        "subject": "Quarterly review", "body": "Agree the plan.",
+                        "duration_minutes": duration,
+                        "attendees": [
+                            {"name": "Rima Reyes", "email": "rima@microsoft.com"}
+                        ],
+                        "timezone": "America/Los_Angeles",
+                        "slots": [{
+                            "id": "0", "label": "Monday 9:05",
+                            "start": start.isoformat(),
+                            "end": (start + timedelta(minutes=duration)).isoformat(),
+                            "timezone": "America/Los_Angeles",
+                            "availability": {"rima@microsoft.com": "free"},
+                        }],
+                    },
+                })
+                + f"\n{structured_delivery.RESULT_END}"
+            ),
+            stderr="", exit_code=0,
+            correlation_id=envelope["correlation_id"],
+            expected_channel="calendar",
+            expected_attendees={"rima@microsoft.com"},
+            expected_duration=duration,
+        )
+        latest = get_latest_task_action(task["id"])
+        interaction = json.loads(latest["blocked_question"])
+        return task, interaction
+
+    def test_preview_does_not_claim_a_scheduler_it_cannot_call(self):
+        _task, interaction = self._evidence_from_preview()
+        evidence = interaction["schedule_evidence"]
+
+        self.assertNotEqual(
+            evidence["source"], "FindMeetingTimes+interaction",
+            "preview cannot call findMeetingTimes; it has no do_action",
+        )
+        # It was still a live M365 query, just a different class of one.
+        self.assertTrue(evidence["query_backed"])
+        self.assertTrue(str(evidence["source"]).strip())
+
+    def test_certifier_accepts_the_honest_preview_source(self):
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        certified = schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        )
+        self.assertTrue(
+            certified,
+            "an honestly-labelled live query must still certify, otherwise "
+            "telling the truth silently disables scheduling",
+        )
+
+    def test_certifier_still_accepts_cowork_scheduler_evidence(self):
+        """Cowork really does call FindMeetingTimes; those rows stay valid."""
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        interaction["schedule_evidence"]["source"] = "FindMeetingTimes+interaction"
+
+        self.assertTrue(schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        ))
+
+    def test_certifier_rejects_an_unknown_evidence_source(self):
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        interaction["schedule_evidence"]["source"] = "guessed-it"
+
+        self.assertFalse(schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        ))
+
+    def test_raw_graph_scheduler_slots_would_fail_the_start_offset_rule(self):
+        """Why Riveter does not simply relay findMeetingTimes output.
+
+        A real /me/findMeetingTimes call on 2026-08-22 returned slots at 15:00,
+        18:00 and 21:30 UTC - minute % 30 == 0. The user's standing rule puts
+        meetings at :05/:35, and the certifier enforces that modulus, so Graph's
+        own suggestions would be rejected by Riveter's own gate. Relaying them
+        requires solving the offset first; this test pins that trap.
+        """
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        evidence = interaction["schedule_evidence"]
+        graph_start = datetime(
+            2028, 8, 21, 9, 0, tzinfo=timezone(timedelta(hours=-7))
+        )
+        duration = schedule_duration_minutes(task)
+        evidence["slots"] = [{
+            "value": "0", "label": "Monday 9:00",
+            "start": graph_start.isoformat(),
+            "end": (graph_start + timedelta(minutes=duration)).isoformat(),
+            "timezone": "America/Los_Angeles",
+            "availability": {"rima@microsoft.com": "free"},
+        }]
+
+        # Production configures the :05 rule. Without this the certifier falls
+        # back to the first slot's own minute, which makes the check
+        # self-satisfying and hides the mismatch entirely.
+        with mock.patch(
+            "src.services.cowork_runner.meeting_preferences",
+            return_value={"default_minutes": 25, "start_offset_minutes": 5},
+        ):
+            certified = schedule_interaction_is_certified(
+                interaction, schedule_attendees(task), duration
+            )
+        self.assertFalse(certified)
+
+
 class TestStructuredDeliveryMigration(unittest.TestCase):
     def test_partial_legacy_schema_rebuild_preserves_rows(self):
         conn = db_module.sqlite3.connect(":memory:")

@@ -9,7 +9,16 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
 - WorkIQ detects tasks and owns structured meeting, email, and Teams delivery;
   Cowork researches/drafts all other actions. TodoIQ owns durable task state and
   human-facing approval boundaries.
-- Structured WorkIQ previews expose read-only tools. Execution exposes one
+- Structured WorkIQ previews expose read-only tools. "Read-only" means the tool
+  itself cannot write, not that the operation is conceptually a read: Graph's
+  `findMeetingTimes` and `getSchedule` are POST actions reachable only through
+  `workiq-do_action`, the same primitive that sends mail, so they stay out of
+  preview even though they only read. Slots offered to the user must come from a
+  live M365 query, and the evidence records which class of query produced them
+  (`FindMeetingTimes+interaction` for Cowork's scheduler call, `copilot-ask` for
+  the structured preview's Copilot query). Execution is gated on that evidence
+  being a recognised live source, never on a label the writer chose for itself.
+  Execution exposes one
   channel-specific write primitive and requires a correlated external reference.
   Cowork previews remain write-barriered. External M365 writes require a separate
   TodoIQ execution action, an exact-draft confirmation, and a durable child audit

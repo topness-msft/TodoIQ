@@ -3516,6 +3516,19 @@ def schedule_interaction_is_attendee_clarification(interaction) -> bool:
     )
 
 
+# Which live-query sources may back a slot the user is allowed to select.
+# "FindMeetingTimes+interaction" is Cowork, which really does call the Graph
+# scheduler. "copilot-ask" is the structured preview, whose tools are read-only
+# and so reason over a Copilot M365 answer instead. Both are live queries; they
+# differ in strength, and recording which one produced a slot is the point. The
+# check used to be equality against the single string finish_preview itself
+# wrote, which certified nothing.
+CERTIFIED_SCHEDULE_SOURCES = frozenset({
+    "FindMeetingTimes+interaction",
+    "copilot-ask",
+})
+
+
 def schedule_interaction_is_certified(
     interaction,
     attendees,
@@ -3530,7 +3543,7 @@ def schedule_interaction_is_certified(
     duration = evidence.get("duration_minutes")
     if (
         evidence.get("valid") is not True
-        or evidence.get("source") != "FindMeetingTimes+interaction"
+        or evidence.get("source") not in CERTIFIED_SCHEDULE_SOURCES
         or evidence.get("query_backed") is not True
         or evidence.get("attendees") != _attendee_emails(attendees)
         or not isinstance(duration, int)

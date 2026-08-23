@@ -655,7 +655,15 @@ def finish_preview(
                 }],
                 "schedule_evidence": {
                     "valid": True,
-                    "source": "FindMeetingTimes+interaction",
+                    # Preview holds only read tools, and Graph's findMeetingTimes
+                    # and getSchedule are POST actions needing do_action, so this
+                    # worker cannot call the scheduler. Availability here comes
+                    # from Copilot M365 answering a live query. That is a genuine
+                    # query, just a weaker evidence class than the scheduler's
+                    # confidence-ranked output, and the certifier is told which
+                    # one it is rather than being handed a label it will match
+                    # against itself.
+                    "source": "copilot-ask",
                     "attendees": attendees,
                     "query_backed": True,
                     "duration_minutes": duration,
