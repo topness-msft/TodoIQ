@@ -45,7 +45,7 @@ def _task_column_definition(row) -> str:
         return (
             f"{quoted} TEXT DEFAULT 'general' CHECK (action_type IN "
             "('schedule-meeting','respond-email','review-document','follow-up',"
-            "'awaiting-response','prepare','general'))"
+            "'awaiting-response','prepare','teams-message','general'))"
         )
 
     definition = f"{quoted} {_value(row, 'type', 2) or 'TEXT'}"
@@ -53,7 +53,14 @@ def _task_column_definition(row) -> str:
         definition += " NOT NULL"
     default = _value(row, "dflt_value", 4)
     if default is not None:
-        definition += f" DEFAULT {default}"
+        text = str(default).strip()
+        # SQLite requires an expression default to be parenthesised, but
+        # PRAGMA table_info reports it without the parentheses. Re-emitting one
+        # bare produces "syntax error near (" and would abort the rebuild, so
+        # any call-shaped default is wrapped back up.
+        if "(" in text and not text.startswith("("):
+            text = f"({text})"
+        definition += f" DEFAULT {text}"
     if _value(row, "pk", 5):
         definition += " PRIMARY KEY"
     return definition
@@ -181,7 +188,11 @@ def _migrate(conn: sqlite3.Connection):
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
     ).fetchone()
     sql = (task_sql[0] or "") if task_sql else ""
-    if "'snoozed'" not in sql or "'error'" not in sql:
+    if (
+        "'snoozed'" not in sql
+        or "'error'" not in sql
+        or "'teams-message'" not in sql
+    ):
         _rebuild_tasks_constraints(conn)
 
     action_cols = [
@@ -490,7 +501,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     source_snippet  TEXT,
     coaching_text   TEXT,
     action_type     TEXT DEFAULT 'general'
-                        CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','general')),
+                        CHECK (action_type IN ('schedule-meeting','respond-email','review-document','follow-up','awaiting-response','prepare','teams-message','general')),
     skill_output    TEXT,
     cowork_prompt   TEXT,
     key_people      TEXT,

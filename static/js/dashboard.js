@@ -3307,6 +3307,7 @@ function cwTaskUsesWorkIQ(task) {
     if (!task) return false;
     return task.action_type === 'schedule-meeting'
         || task.action_type === 'respond-email'
+        || task.action_type === 'teams-message'
         || ((task.action_type === 'follow-up'
                 || task.action_type === 'awaiting-response')
             && ['chat', 'teams', 'teams_chat', 'teams-channel']

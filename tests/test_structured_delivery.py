@@ -1385,6 +1385,89 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
         self.assertIn("torecipients", prompt.lower().replace(" ", ""))
 
 
+class TestTeamsMessageRouting(StructuredDeliveryTestBase):
+    """A manually written Teams task must be able to reach the Teams channel.
+
+    Production 2026-08-23 (task 2125): "Send phil topness a teams message
+    about the lighthouse program" parsed to action_type "general" and so fell
+    through to Cowork, which reported terminal_status ok with unnamed tool
+    calls and no delivery evidence. Teams routing keyed only on source_type,
+    which assumes the task came FROM a Teams thread; a typed instruction never
+    can. `teams-message` already existed as a skill, a UI label and a valid
+    skill name - only the schema and the router had never learned it.
+    """
+
+    def test_teams_message_action_routes_to_teams_regardless_of_source(self):
+        for source in ("manual", "chat", "email", "meeting"):
+            task = {
+                "action_type": "teams-message",
+                "source_type": source,
+            }
+            self.assertEqual(
+                structured_delivery.channel_for_task(task), "teams",
+                f"teams-message must route to teams from source {source!r}",
+            )
+
+    def test_existing_teams_routing_still_works(self):
+        self.assertEqual(
+            structured_delivery.channel_for_task(
+                {"action_type": "follow-up", "source_type": "chat"}
+            ),
+            "teams",
+        )
+        self.assertEqual(
+            structured_delivery.channel_for_task(
+                {"action_type": "awaiting-response", "source_type": "teams"}
+            ),
+            "teams",
+        )
+
+    def test_a_plain_general_task_still_falls_back_to_cowork(self):
+        self.assertIsNone(
+            structured_delivery.channel_for_task(
+                {"action_type": "general", "source_type": "manual"}
+            )
+        )
+
+    def test_database_accepts_the_teams_message_action_type(self):
+        task = create_task(
+            "Message Phil about the Lighthouse program",
+            action_type="teams-message",
+        )
+        stored = get_task(task["id"])
+        self.assertEqual(stored["action_type"], "teams-message")
+        self.assertEqual(
+            structured_delivery.channel_for_task(stored), "teams"
+        )
+
+    def test_legacy_database_is_widened_for_teams_message(self):
+        """An existing db predates the value; init_db must widen it in place."""
+        conn = db_module.sqlite3.connect(":memory:")
+        conn.row_factory = db_module.sqlite3.Row
+        legacy = db_module.SCHEMA_SQL.replace(
+            "'awaiting-response','prepare','general','teams-message'",
+            "'awaiting-response','prepare','general'",
+        ).replace(
+            "'awaiting-response','prepare','teams-message','general'",
+            "'awaiting-response','prepare','general'",
+        )
+        conn.executescript(legacy)
+        conn.execute("INSERT INTO tasks (title) VALUES ('legacy row')")
+        conn.commit()
+
+        db_module.init_db(conn)
+
+        conn.execute(
+            "INSERT INTO tasks (title, action_type) VALUES (?,?)",
+            ("new teams task", "teams-message"),
+        )
+        conn.commit()
+        kept = conn.execute(
+            "SELECT title FROM tasks WHERE id=1"
+        ).fetchone()["title"]
+        self.assertEqual(kept, "legacy row")
+        conn.close()
+
 
 class TestStructuredDeliveryMigration(unittest.TestCase):
     def test_expression_default_survives_a_constraint_rebuild(self):

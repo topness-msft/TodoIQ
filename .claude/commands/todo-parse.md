@@ -182,6 +182,7 @@ For each task's `raw_input`, use your intelligence to infer ALL of the following
   |---|---|
   | `schedule-meeting` | scheduling, finding time, setting up a meeting |
   | `respond-email` | replying to, responding to, drafting an email |
+  | `teams-message` | sending or drafting a Teams/chat message, pinging someone on Teams |
   | `review-document` | reviewing, reading, giving feedback on a doc/PR/report |
   | `follow-up` | checking in, nudging, getting a status update |
   | `prepare` | preparing for a meeting, presentation, demo |

@@ -44,6 +44,12 @@ def channel_for_task(task: dict) -> str | None:
         return "calendar"
     if action_type == "respond-email":
         return "email"
+    # A typed "message X on Teams" never originates in a Teams thread, so
+    # keying only on source_type sent those tasks to Cowork, which returned no
+    # delivery evidence. The action type says what the user asked for; the
+    # source says where it came from. Either is enough to know the channel.
+    if action_type == "teams-message":
+        return "teams"
     if action_type in {"follow-up", "awaiting-response"} and source_type in {
         "teams",
         "chat",
