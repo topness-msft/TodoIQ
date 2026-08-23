@@ -4549,14 +4549,18 @@ function renderCoworkCard(task) {
         // that was blocked on him the whole time.
         // But waiting_on_user is ALSO set when Cowork pauses for its own
         // internal tool approval, which never produces a question the user can
-        // answer. That only happens once execution is under way, so the blocked
-        // view belongs to the preview phase: during execution the run reports
-        // progress instead of prompting for an answer nobody owes it. 48ff6c3
-        // asserted exactly this in test_execution_progress_and_approval_states
-        // while leaving this branch covering 'executing' too, so the two have
-        // disagreed since 2026-08-15.
-        if (a.waiting_on_user && a.interaction_request
-                && a.state === 'previewing') {
+        // answer. blocked_question is the server's signal that a run is
+        // genuinely stopped on the user, so during execution that is what the
+        // blocked view keys on; a bare waiting_on_user there asked for input
+        // nobody owed (48ff6c3 asserted this in
+        // test_execution_progress_and_approval_states while leaving the branch
+        // keyed on the flag). Preview has no such internal pauses, so there a
+        // question is simply a question.
+        var blockedOnUser = a.state === 'previewing'
+            ? Boolean(a.interaction_request)
+            : Boolean(a.blocked_question && a.interaction_request);
+        if (a.waiting_on_user && blockedOnUser
+                && ['previewing', 'executing'].indexOf(a.state) >= 0) {
             var interaction = a.interaction_request;
             var question = cwInteractionFields(task.id, interaction);
             var answerButton = '<button class="cw-btn cw-btn-go" '
