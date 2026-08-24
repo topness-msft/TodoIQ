@@ -27,8 +27,11 @@ DRAFT = (
 
 
 def _seed(page: Page, base_url: str) -> int:
+    # The Cowork card is gated on a parsed task (4aa3bad); an unparsed one
+    # renders no card, so there is no draft editor to measure.
     response = page.request.post(
-        f"{base_url}/api/tasks", data={"title": "Draft editor layout probe"}
+        f"{base_url}/api/tasks",
+        data={"title": "Draft editor layout probe", "parse_status": "parsed"},
     )
     assert response.ok, response.text()
     return response.json()["task"]["id"]

@@ -10,7 +10,12 @@ SCREENSHOTS_DIR = os.path.join("temp", "cowork-handoff")
 def test_running_handoff_badge_refreshes_until_completion(page: Page, base_url):
     created = page.request.post(
         f"{base_url}/api/tasks",
-        data={"title": "Refresh completed Cowork handoff"},
+        data={
+            "title": "Refresh completed Cowork handoff",
+            # The Cowork card is gated on a parsed task (4aa3bad); an unparsed
+            # one renders no card, so there is no badge to refresh.
+            "parse_status": "parsed",
+        },
     )
     task_id = created.json()["task"]["id"]
     calls = {"count": 0}
@@ -32,6 +37,12 @@ def test_running_handoff_badge_refreshes_until_completion(page: Page, base_url):
                     "intent": "research and draft",
                     "channel": "teams",
                     "conversation_id": "t:u:handoff",
+                    # cwActionMatchesTask drops an action whose action_type or
+                    # cowork_revision does not match the task, so without these
+                    # the badge never renders. Tasks default to 'general'
+                    # (src/db.py:503).
+                    "action_type": "general",
+                    "cowork_revision": 0,
                     "handoff": {
                         "state": handoff_state,
                         "waiting_on_user": False,

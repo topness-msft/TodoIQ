@@ -25,7 +25,12 @@ PROGRESS = [
 
 
 def _seed(page: Page, base_url: str) -> int:
-    r = page.request.post(f"{base_url}/api/tasks", data={"title": "Progress probe"})
+    # The Cowork card is gated on a parsed task (4aa3bad); an unparsed one
+    # renders no card, so there is no progress line to read.
+    r = page.request.post(
+        f"{base_url}/api/tasks",
+        data={"title": "Progress probe", "parse_status": "parsed"},
+    )
     assert r.ok, r.text()
     return r.json()["task"]["id"]
 
@@ -36,6 +41,10 @@ def _delete(page: Page, base_url: str, task_id: int) -> None:
 
 def _stub_preview(page: Page, task_id: int, progress, state="previewing"):
     """Serve a running preview with progress, without invoking Cowork."""
+    # cwActionMatchesTask discards any action whose action_type/cowork_revision
+    # does not match the task it is being attached to, so a stub that omits
+    # them is dropped and the card falls back to "not run" with no progress
+    # line. Tasks default to action_type 'general' (src/db.py:503).
     body = json.dumps(
         {
             "action": {
@@ -47,6 +56,8 @@ def _stub_preview(page: Page, task_id: int, progress, state="previewing"):
                 "draft": "",
                 "intent": "draft a reply",
                 "channel": "email",
+                "action_type": "general",
+                "cowork_revision": 0,
             }
         }
     )

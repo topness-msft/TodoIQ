@@ -78,8 +78,8 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
 - Lint / typecheck / build: not configured. Use `node --check <changed-js>` for
   JavaScript syntax.
 - Coverage / mutation gates: not configured.
-- Current suite status: 263 unit tests + 52 subtests and 48 E2E tests green on
-  2026-08-01.
+- Current suite status: 1123 unit tests + 201 subtests, and 214 E2E tests, all
+  green on 2026-08-24 (full e2e run 3m16s).
 - E2E must run in a separate pytest invocation; `pytest.ini` deselects it by
   default because Playwright's sync API conflicts with Tornado test loops.
 - E2E tests share ONE session-scoped server and database. `tests/e2e/conftest.py`

@@ -13,6 +13,9 @@ def _seed_task(page: Page, base_url: str) -> int:
             "title": "Cowork Run again gate",
             "description": "Run again should never silently no-op",
             "action_type": "follow-up",
+            # The Cowork card is gated on a parsed task (4aa3bad); an unparsed
+            # one renders no card, so there is no Run again control.
+            "parse_status": "parsed",
         },
     )
     assert response.ok

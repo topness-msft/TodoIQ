@@ -27,8 +27,11 @@ OLD_CONV = "tenant:user:cw-oldconversation"
 
 
 def _seed(page: Page, base_url: str) -> int:
+    # The Cowork card is gated on a parsed task (4aa3bad); an unparsed one
+    # renders no card, so the Start over control never exists.
     response = page.request.post(
-        f"{base_url}/api/tasks", data={"title": "Start over probe"}
+        f"{base_url}/api/tasks",
+        data={"title": "Start over probe", "parse_status": "parsed"},
     )
     assert response.ok, response.text()
     return response.json()["task"]["id"]
