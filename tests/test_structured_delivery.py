@@ -1385,6 +1385,126 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
         self.assertIn("torecipients", prompt.lower().replace(" ", ""))
 
 
+class TestAvailabilityVerification(StructuredDeliveryTestBase):
+    """Riveter must check attendee availability instead of believing it.
+
+    Production 2026-08-23 (task 2478, action 258): the preview offered
+    Wednesday 26 August 13:05 ET recording every attendee "free", under a
+    heading reading "Choose one verified time". Graph's getSchedule reports
+    jabali@microsoft.com as OOF for the whole of that day
+    (2026-08-25T05:00Z -> 2026-08-28T05:00Z, availabilityView all 3s).
+
+    The preview worker holds read-only tools and getSchedule/findMeetingTimes
+    are POST, so it cannot measure availability -- yet the payload schema has
+    an availability field, and finish_preview additionally rejected any value
+    other than free/tentative. Honesty was structurally impossible, so the
+    worker guessed and the guess certified.
+
+    The interval arithmetic below is deliberately Riveter's own: the
+    subprocess is a transport that returns Graph's raw response, never the
+    judge of whether a slot is free.
+    """
+
+    VIEW_START = "2026-08-26T12:00:00-04:00"
+
+    def test_free_view_reads_as_free(self):
+        status = structured_delivery._status_from_view(
+            "000000000000", self.VIEW_START, 5,
+            "2026-08-26T12:05:00-04:00", "2026-08-26T12:30:00-04:00",
+        )
+        self.assertEqual(status, "free")
+
+    def test_out_of_office_is_detected(self):
+        """The exact production case: an all-OOF day reported as free."""
+        status = structured_delivery._status_from_view(
+            "3" * 24, self.VIEW_START, 15,
+            "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00",
+        )
+        self.assertEqual(status, "oof")
+
+    def test_worst_status_across_the_slot_wins(self):
+        """A slot that is free then busy is not a free slot."""
+        status = structured_delivery._status_from_view(
+            "000022220000", self.VIEW_START, 5,
+            "2026-08-26T12:10:00-04:00", "2026-08-26T12:35:00-04:00",
+        )
+        self.assertEqual(status, "busy")
+
+    def test_slot_outside_the_measured_window_is_unknown(self):
+        status = structured_delivery._status_from_view(
+            "0000", self.VIEW_START, 5,
+            "2026-08-27T09:00:00-04:00", "2026-08-27T09:25:00-04:00",
+        )
+        self.assertIsNone(status)
+
+    def test_window_spans_every_slot(self):
+        slots = [
+            {"start": "2026-08-26T13:05:00-04:00", "end": "2026-08-26T13:30:00-04:00"},
+            {"start": "2026-08-31T10:35:00-04:00", "end": "2026-08-31T11:00:00-04:00"},
+        ]
+        start, end = structured_delivery._availability_window(slots)
+        self.assertTrue(start.startswith("2026-08-26T13:05"))
+        self.assertTrue(end.startswith("2026-08-31T11:00"))
+
+    def test_oof_slot_is_dropped_and_free_slot_survives(self):
+        slots = [
+            {"value": "0", "label": "Wed", "start": "2026-08-26T13:05:00-04:00",
+             "end": "2026-08-26T13:30:00-04:00", "timezone": "Eastern Standard Time",
+             "availability": {"jabali@microsoft.com": "free"}},
+            {"value": "1", "label": "Mon", "start": "2026-08-26T15:05:00-04:00",
+             "end": "2026-08-26T15:30:00-04:00", "timezone": "Eastern Standard Time",
+             "availability": {"jabali@microsoft.com": "free"}},
+        ]
+        schedules = [{
+            "scheduleId": "jabali@microsoft.com",
+            # 12:00 onward in 5-minute steps: OOF until 14:00, then free.
+            "availabilityView": ("3" * 24) + ("0" * 48),
+        }]
+        kept, dropped = structured_delivery._apply_verified_availability(
+            ["jabali@microsoft.com"], slots, schedules, self.VIEW_START, 5
+        )
+
+        self.assertEqual([s["value"] for s in kept], ["1"])
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("jabali@microsoft.com", dropped[0]["conflicts"])
+        self.assertEqual(dropped[0]["conflicts"]["jabali@microsoft.com"], "oof")
+
+    def test_busy_attendee_keeps_the_slot_but_corrects_the_claim(self):
+        slots = [{
+            "value": "0", "label": "Wed", "start": "2026-08-26T12:05:00-04:00",
+            "end": "2026-08-26T12:30:00-04:00", "timezone": "Eastern Standard Time",
+            "availability": {"a@x.com": "free", "b@x.com": "free"},
+        }]
+        schedules = [
+            {"scheduleId": "a@x.com", "availabilityView": "0" * 24},
+            {"scheduleId": "b@x.com", "availabilityView": "2" * 24},
+        ]
+        kept, dropped = structured_delivery._apply_verified_availability(
+            ["a@x.com", "b@x.com"], slots, schedules, self.VIEW_START, 5
+        )
+
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, [])
+        # The claim is corrected, not left as the worker wrote it.
+        self.assertEqual(kept[0]["availability"]["b@x.com"], "busy")
+        self.assertEqual(kept[0]["availability"]["a@x.com"], "free")
+
+    def test_description_stops_claiming_everyone_is_available(self):
+        slot = {
+            "value": "0", "label": "Wed",
+            "availability": {"a@x.com": "free", "b@x.com": "busy"},
+        }
+        text = structured_delivery._availability_description(slot)
+        self.assertNotIn("All confirmed attendees are available", text)
+        self.assertIn("b@x.com", text)
+
+    def test_description_may_claim_availability_when_all_are_free(self):
+        slot = {"value": "0", "availability": {"a@x.com": "free"}}
+        self.assertIn(
+            "available", structured_delivery._availability_description(slot)
+        )
+
+
 class TestTeamsDestinationDiscovery(StructuredDeliveryTestBase):
     """The Teams preview worker must be told where chats live.
 

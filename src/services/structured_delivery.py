@@ -345,6 +345,148 @@ def plain_text_to_html(text: str | None) -> str:
 
 
 CORRELATION_HEADER = "x-riveter-correlation-id"
+
+# Graph reports free/busy as a digit per interval. Severity order matters more
+# than the digits: a slot is only as good as its worst moment.
+AVAILABILITY_CODES = {
+    "0": "free",
+    "1": "tentative",
+    "2": "busy",
+    "3": "oof",
+    "4": "workingElsewhere",
+}
+AVAILABILITY_SEVERITY = ["free", "workingElsewhere", "tentative", "busy", "oof"]
+# Only these keep a slot offerable. OOF is a deliberate absence, not a busy
+# calendar, so a slot containing one is withdrawn rather than annotated.
+BLOCKING_AVAILABILITY = {"oof"}
+AVAILABILITY_INTERVAL_MINUTES = 5
+
+
+def _parse_offset_datetime(value: str):
+    from datetime import datetime
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def _availability_window(slots: list) -> tuple[str, str] | None:
+    """The single span that covers every proposed slot."""
+    starts, ends = [], []
+    for slot in slots or []:
+        start = _parse_offset_datetime(slot.get("start"))
+        end = _parse_offset_datetime(slot.get("end"))
+        if not start or not end:
+            return None
+        starts.append(start)
+        ends.append(end)
+    if not starts:
+        return None
+    return min(starts).isoformat(), max(ends).isoformat()
+
+
+def _status_from_view(
+    view: str,
+    view_start: str,
+    interval_minutes: int,
+    slot_start: str,
+    slot_end: str,
+) -> str | None:
+    """Worst availability across a slot, or None if it was never measured.
+
+    Riveter does this arithmetic itself. The subprocess that fetches Graph's
+    response is a transport; letting it decide whether a slot is free would
+    reproduce the very problem this exists to fix.
+    """
+    origin = _parse_offset_datetime(view_start)
+    start = _parse_offset_datetime(slot_start)
+    end = _parse_offset_datetime(slot_end)
+    if not origin or not start or not end or not view or interval_minutes <= 0:
+        return None
+    if end <= start:
+        return None
+
+    first = int((start - origin).total_seconds() // 60 // interval_minutes)
+    last_seconds = (end - origin).total_seconds() / 60 / interval_minutes
+    last = int(last_seconds) - 1 if last_seconds.is_integer() else int(last_seconds)
+    if first < 0 or last < first or last >= len(view):
+        return None
+
+    worst = "free"
+    for index in range(first, last + 1):
+        status = AVAILABILITY_CODES.get(view[index])
+        if status is None:
+            return None
+        if AVAILABILITY_SEVERITY.index(status) > AVAILABILITY_SEVERITY.index(worst):
+            worst = status
+    return worst
+
+
+def _apply_verified_availability(
+    attendees: list,
+    slots: list,
+    schedules: list,
+    view_start: str,
+    interval_minutes: int,
+) -> tuple[list, list]:
+    """Replace claimed availability with measured availability.
+
+    Returns the slots still worth offering and those withdrawn, each with the
+    conflicts that withdrew them so the card can say why.
+    """
+    views = {}
+    for entry in schedules or []:
+        email = str(entry.get("scheduleId") or "").strip().lower()
+        if email:
+            views[email] = str(entry.get("availabilityView") or "")
+
+    kept, dropped = [], []
+    for slot in slots or []:
+        measured, conflicts = {}, {}
+        for email in attendees:
+            key = str(email).strip().lower()
+            status = _status_from_view(
+                views.get(key, ""), view_start, interval_minutes,
+                slot.get("start"), slot.get("end"),
+            )
+            if status is None:
+                # Never measured: keep what the preview claimed rather than
+                # inventing a verdict in either direction.
+                measured[key] = str(slot.get("availability", {}).get(key, "unknown"))
+                continue
+            measured[key] = status
+            if status in BLOCKING_AVAILABILITY:
+                conflicts[key] = status
+        updated = dict(slot)
+        updated["availability"] = measured
+        if conflicts:
+            updated["conflicts"] = conflicts
+            dropped.append(updated)
+        else:
+            kept.append(updated)
+    return kept, dropped
+
+
+def _availability_description(slot: dict) -> str:
+    """Say what the calendars actually show, not what we hoped they showed."""
+    availability = slot.get("availability") or {}
+    notable = sorted(
+        email for email, status in availability.items()
+        if str(status).strip().lower() not in {"free", ""}
+    )
+    if not notable:
+        return "All confirmed attendees are available."
+    parts = []
+    for email in notable:
+        parts.append(f"{email} is {str(availability[email]).strip().lower()}")
+    return "; ".join(parts) + "."
 # How long a Teams post stays recoverable. Teams cannot be stamped with a key,
 # so recovery works by reading recent messages and matching sender and body.
 # That look is only trustworthy while the message is still near the top of the
