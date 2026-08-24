@@ -250,6 +250,21 @@ broadcast-audience callers needs its own parity audit.
   5. Verify task count, latest sync timestamp and all probes above.
 
 ## Known gotchas / latent bugs
+- The `master` branch (origin, `475a68a`) diverged from `main` on 2026-04-11 and
+  is tagged `archive/pre-riveter-master`. Most of its work was re-implemented on
+  main (person_identity, source_date, person-matching dedup). Still main-only:
+  the **`/briefing` Chief-of-Staff UI** (route, `mock-briefing.html`, its API
+  adapter, the `cowork-prompt` skill — main has no `/briefing` route) and
+  `tests/test_refresh_dedup.py` + `tests/test_shadow_dedup.py`. Recover with
+  `git checkout archive/pre-riveter-master -- <path>`.
+  The repo's MAIN worktree (`C:\Users\phtopnes\claude\projects\ClaudeTodo`) sits
+  on that branch and holds `.git` for every worktree, so it must NOT be deleted.
+  Note the installer's stale-checkout guard cannot protect it: that checkout
+  predates `instance_guard.py`, so running ITS copy of `install_startup.py`
+  would register it with no warning. The real protections are that the logon
+  task now works (so nothing needs launching by hand) and that its tray binds
+  port 8766 directly, which fails hard while Riveter holds it rather than
+  silently forking the database.
 - Main and worktree DB files do not synchronize. One must be explicitly
   authoritative during a rollout. Production is
   `C:\Users\phtopnes\Riveter\app\data\claudetodo.db`; the copy that used to be
