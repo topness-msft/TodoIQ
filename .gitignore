@@ -41,3 +41,13 @@ temp/
 # only escapes the rule above because it was tracked before it existed.
 !/requirements.txt
 !/requirements-dev.txt
+
+# Verification screenshots and debug dumps dropped at the root during a
+# session. manifest.json is tracked, so it is unaffected by the json rule.
+/*.png
+/deep-link-debug.json
+
+# The agent-team findings ledger. Worth keeping on disk (132 reports of why
+# things were done) but it is working notes, not source.
+/findings/
+/.copilot/
