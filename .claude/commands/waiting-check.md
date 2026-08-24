@@ -91,35 +91,62 @@ Determine the **query start date**:
 
 **Then**, read for activity. Prefer the originating thread; fall back to the person.
 
-**(a) Thread-scoped — use this when the task has a re-openable thread.**
+**(a) Thread-scoped — use this when the task has a re-openable origin.**
 
 Prefer `source_locator` (JSON) over `source_url`: it is the recorded identifier,
 and for a channel it carries the team/channel/message triple a URL does not.
 Fall back to parsing `source_url` only when the locator is null.
 
-Read the conversation by id. Do **not** search for the URL as text: a live run
-on task 2057 did exactly that ("I searched for the exact Teams message URL and
-identifiers embedded in it"), found nothing, and had to record a failed check —
-the same mistake commit `3b5e16d` fixed for the Teams preview worker, which
-gave up claiming chat ids were "not exposed" while `/me/chats` returns them.
-A worker that is not shown an endpoint will not invent one.
+Read by id. Do **not** search for the URL as text: a live run on task 2057 did
+exactly that ("I searched for the exact Teams message URL and identifiers
+embedded in it"), found nothing, and had to record a failed check — the same
+mistake commit `3b5e16d` fixed for the Teams preview worker, which gave up
+claiming chat ids were "not exposed" while `/me/chats` returns them. A worker
+that is not shown an endpoint will not invent one, so the endpoints are here.
 
-1. If `source_locator` has `kind: "teams_chat"`, use its `conversation_id`
-   directly. If `kind: "teams_channel"`, read
-   `/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies?$top=50`.
-   Otherwise take the conversation id out of `source_url`: it is the `19:...`
-   segment of `https://teams.microsoft.com/l/message/<conversation-id>/<message-id>`.
-   URL-decode it (`%3a` → `:`, `%40` → `@`). A 1:1 looks like
-   `19:<guid>_<guid>@unq.gbl.spaces`; a group looks like `19:<hex>@thread.v2`.
-2. Read that chat directly with workiq-fetch:
-   `/me/chats/{conversation_id}/messages?$top=50`
-   Then keep only messages whose `createdDateTime` is after `check_since`.
-3. If that id 404s or returns nothing readable, list `/me/chats?$select=id,topic,chatType,webUrl&$top=50`
-   and match on `webUrl`, or on the members via `/me/chats/{chat_id}/members`
-   for a 1:1. Only after both fail is the thread genuinely unreadable.
-4. If it is unreadable, fall back to the person-scoped query in (b) and record
-   `source_scope: "person"` — do NOT claim a thread read you did not do. Record
-   a failed check only if the person-scoped query also fails.
+Every sequence below was run against live Graph on 2026-08-24 and returned 200.
+
+**`kind: "teams_chat"`** — one hop:
+> `/me/chats/{conversation_id}/messages?$top=50`
+
+**`kind: "teams_channel"`** — one hop:
+> `/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies?$top=50`
+
+**`kind: "email"`** — two hops. The stored `message_id` is the Graph message id
+taken from the Outlook link's `ItemID`:
+> 1. `/me/messages/{message_id}?$select=id,subject,conversationId,internetMessageId,receivedDateTime,from`
+> 2. `/me/messages?$filter=conversationId eq '{conversationId from step 1}'&$select=id,subject,receivedDateTime,from&$top=25`
+>
+> Do **not** add `$orderby` to step 2. Graph rejects that filter combined with a
+> sort as `InefficientFilter` (400). Sort the results yourself.
+>
+> This is thread-scoped, not a mailbox scan: it asks for one known conversation
+> by id, which is the narrow question the project's email policy permits. Do not
+> widen it into a general inbox search.
+
+**`kind: "meeting"`** — one hop if a `conversation_id` is already known,
+otherwise two:
+> 1. `/me/events/{event_id}?$select=id,subject,start,end,organizer,onlineMeeting`
+> 2. Take `onlineMeeting.joinUrl`, pull the `19:meeting_...@thread.v2` thread id
+>    out of it (URL-decode `%3a` → `:`, `%40` → `@`), then
+>    `/me/chats/{that id}/messages?$top=50`
+
+For any of these, keep only messages whose `createdDateTime` (or
+`receivedDateTime`) is after `check_since`.
+
+If no locator is stored, take the conversation id out of `source_url`: it is the
+`19:...` segment of `https://teams.microsoft.com/l/message/<conversation-id>/<message-id>`.
+URL-decode it. A 1:1 looks like `19:<guid>_<guid>@unq.gbl.spaces`; a group looks
+like `19:<hex>@thread.v2`.
+
+If an id 404s or returns nothing readable, list
+`/me/chats?$select=id,topic,chatType,webUrl&$top=50` and match on `webUrl`, or on
+members via `/me/chats/{chat_id}/members` for a 1:1. Only after that fails is the
+thread genuinely unreadable.
+
+If it is unreadable, fall back to the person-scoped query in (b) and record
+`source_scope: "person"` — do NOT claim a thread read you did not do. Record a
+failed check only if the person-scoped query also fails.
 
 Record `source_scope: "thread"` and the conversation id when you did read the
 thread.

@@ -33,6 +33,106 @@ GROUP = (
     "19:2ff5b5b3ca2d44e1bd3a32eba70c7a31@thread.v2/1756000000000"
 )
 OUTLOOK = "https://outlook.office365.com/mail/inbox/id/AAQkAG..."
+OUTLOOK_ITEM = (
+    "https://outlook.office365.com/owa/?ItemID=AAMkADFkODcy"
+    "ODkwLTE0MjItNDVmOC05Yjk4LWYzYjRkMWNjMWRjOABGAAAAAAAbRXCQ%2brCcTGYSHAAWFAKN7AAA%3d"
+    "&exvsurl=1&viewmodel=ReadMessageItem"
+)
+MEETING_DETAILS = (
+    "https://teams.microsoft.com/l/meeting/details?eventId=AAMkADFkODcyODkw"
+    "LTE0MjItNDVmOC05Yjk4LWYzYjRkMWNjMWRjOABGAAAAAACqtvZcafJO%3d"
+)
+
+
+class TestIdentifiersProvenAgainstGraph(unittest.TestCase):
+    """Email and meeting links DO carry re-openable ids.
+
+    Both were first recorded as unresolved spikes and their fields left null.
+    Probing live Graph through WorkIQ on 2026-08-24 settled both, so leaving
+    them null stopped being caution and became wrong:
+
+      Outlook `?ItemID=` IS a Graph message id.
+        GET /me/messages/{ItemID} -> 200, carrying conversationId.
+        GET /me/messages?$filter=conversationId eq '...' -> 200, whole thread.
+        Combining that filter with $orderby is rejected: InefficientFilter.
+
+      Teams `/l/meeting/details?eventId=` IS a Graph event id.
+        GET /me/events/{eventId} -> 200, carrying onlineMeeting.joinUrl,
+        which embeds 19:meeting_...@thread.v2.
+        GET /me/chats/{that id}/messages -> 200, real messages.
+
+    Measured on the live database: 87 Outlook and 300 meeting URLs carry one of
+    these and were being discarded.
+    """
+
+    def test_an_outlook_item_id_is_captured_as_an_email_locator(self):
+        got = sl.from_source_url(OUTLOOK_ITEM)
+        self.assertEqual(got["kind"], sl.KIND_EMAIL)
+        self.assertTrue(got["message_id"].startswith("AAMkADFk"))
+
+    def test_the_item_id_is_url_decoded(self):
+        # %3d must become '=' or Graph rejects the id.
+        self.assertTrue(sl.from_source_url(OUTLOOK_ITEM)["message_id"].endswith("="))
+
+    def test_a_meeting_details_link_is_captured_as_an_event(self):
+        got = sl.from_source_url(MEETING_DETAILS)
+        self.assertEqual(got["kind"], sl.KIND_MEETING)
+        self.assertTrue(got["event_id"].startswith("AAMkADFk"))
+
+    def test_an_outlook_url_without_an_item_id_still_yields_nothing(self):
+        self.assertIsNone(sl.from_source_url(OUTLOOK))
+
+
+class TestReadPlan(unittest.TestCase):
+    """The endpoint sequence, owned here rather than re-derived per prompt.
+
+    A worker that is not shown an endpoint does not invent one - that is what
+    3b5e16d fixed for Teams delivery, and what a live run repeated for the
+    thread read. So the proven sequence lives in one place.
+    """
+
+    def test_nothing_to_read_without_a_locator(self):
+        self.assertEqual(sl.read_plan(None), [])
+
+    def test_a_chat_is_one_hop(self):
+        plan = sl.read_plan(sl.normalise(
+            {"kind": "teams_chat", "conversation_id": "19:a@thread.v2"}))
+        self.assertEqual(len(plan), 1)
+        self.assertIn("/me/chats/19:a@thread.v2/messages", plan[0])
+
+    def test_a_channel_reads_the_reply_thread(self):
+        plan = sl.read_plan(sl.normalise(
+            {"kind": "teams_channel", "team_id": "t", "channel_id": "c",
+             "message_id": "1"}))
+        self.assertEqual(len(plan), 1)
+        self.assertIn("/teams/t/channels/c/messages/1/replies", plan[0])
+
+    def test_an_email_is_two_hops_ending_in_the_conversation(self):
+        plan = sl.read_plan(sl.normalise(
+            {"kind": "email", "message_id": "AAMk123="}))
+        self.assertEqual(len(plan), 2)
+        self.assertIn("/me/messages/AAMk123=", plan[0])
+        self.assertIn("conversationId", plan[1])
+
+    def test_the_email_plan_never_adds_an_orderby(self):
+        # $filter=conversationId with $orderby is rejected by Graph as
+        # InefficientFilter; measured 2026-08-24.
+        plan = sl.read_plan(sl.normalise({"kind": "email", "message_id": "AAMk123="}))
+        self.assertNotIn("$orderby", " ".join(plan))
+
+    def test_a_meeting_is_two_hops_via_the_join_url(self):
+        plan = sl.read_plan(sl.normalise(
+            {"kind": "meeting", "event_id": "AAMkEvent="}))
+        self.assertEqual(len(plan), 2)
+        self.assertIn("/me/events/AAMkEvent=", plan[0])
+        self.assertIn("onlineMeeting", plan[0])
+        self.assertIn("/me/chats/", plan[1])
+
+    def test_a_meeting_known_only_by_its_chat_reads_that_chat_directly(self):
+        plan = sl.read_plan(sl.normalise(
+            {"kind": "meeting", "conversation_id": "19:meeting_x@thread.v2"}))
+        self.assertEqual(len(plan), 1)
+        self.assertIn("/me/chats/19:meeting_x@thread.v2/messages", plan[0])
 
 
 class TestDerivingFromASourceUrl(unittest.TestCase):
@@ -65,7 +165,9 @@ class TestDerivingFromASourceUrl(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIsNone(sl.from_source_url(url))
 
-    def test_email_and_event_identifiers_are_reserved_but_never_populated(self):
+    def test_a_chat_locator_carries_no_email_or_event_identifiers(self):
+        # Not because they are unknowable - both were later proven reachable -
+        # but because a Teams chat link simply has neither.
         got = sl.from_source_url(ONE_TO_ONE)
         self.assertIn("internet_message_id", got)
         self.assertIn("event_id", got)
@@ -134,13 +236,36 @@ class TestReadability(unittest.TestCase):
             {"kind": "teams_channel", "team_id": "t", "channel_id": "c",
              "message_id": "1"})))
 
-    def test_a_meeting_is_not_treated_as_a_readable_thread(self):
-        # A meeting URL gives the meeting CHAT, not the calendar event, and the
-        # event-id mapping is an open spike. Calling it readable would promise a
-        # re-read we cannot perform.
+    def test_a_meeting_is_readable_through_its_chat(self):
+        # Originally recorded as unreadable, on the assumption that a meeting
+        # link gave no way through to a conversation. Probing Graph showed
+        # otherwise: the event carries onlineMeeting.joinUrl, which embeds the
+        # meeting chat thread. Two hops, but proven, so it is readable.
         got = sl.normalise({"kind": "meeting", "conversation_id": "19:m@thread.v2"})
         self.assertIsNotNone(got)
-        self.assertFalse(sl.is_thread_readable(got))
+        self.assertTrue(sl.is_thread_readable(got))
+
+    def test_a_meeting_known_only_by_its_event_is_readable(self):
+        self.assertTrue(sl.is_thread_readable(
+            sl.normalise({"kind": "meeting", "event_id": "AAMkEvent="})))
+
+    def test_an_email_with_a_message_id_is_readable(self):
+        self.assertTrue(sl.is_thread_readable(
+            sl.normalise({"kind": "email", "message_id": "AAMk123="})))
+
+    def test_readable_means_exactly_that_there_is_a_way_to_read_it(self):
+        # One definition, so a caller cannot be told "readable" and then handed
+        # an empty plan.
+        for payload in (
+            {"kind": "teams_chat", "conversation_id": "19:a"},
+            {"kind": "teams_channel", "team_id": "t", "channel_id": "c", "message_id": "1"},
+            {"kind": "email", "message_id": "AAMk="},
+            {"kind": "meeting", "event_id": "AAMkE="},
+        ):
+            with self.subTest(kind=payload["kind"]):
+                located = sl.normalise(payload)
+                self.assertEqual(
+                    sl.is_thread_readable(located), bool(sl.read_plan(located)))
 
 
 class TestProducerReaderContract(unittest.TestCase):
