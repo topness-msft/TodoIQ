@@ -150,6 +150,52 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def backfill_source_locators(conn: sqlite3.Connection) -> int:
+    """Recover re-openable source ids from links already on disk.
+
+    1,270 of the 2,371 live tasks carry a resolvable Teams conversation inside
+    `source_url` that nothing had ever read out. This reads them once, at
+    startup, rather than on every request: `list_tasks` fetches the whole
+    non-deleted set (models.py), so deriving per read would put ~1,900 regexes
+    on each dashboard load for a value that does not change.
+
+    Only rows with an empty column are touched, so anything captured at task
+    creation - better evidence than anything reconstructable afterwards - is
+    left exactly as it was. Returns how many rows were filled.
+    """
+    # Imported here rather than at module scope to keep db.py free of a
+    # dependency on the services layer, which is the direction the rest of the
+    # package imports in.
+    from .services import source_locator
+
+    # A sufficiently old database may predate either column. There is nothing to
+    # recover from a table with no links in it, and this runs on every startup,
+    # so it asks rather than assumes.
+    columns = {_value(row, "name", 1)
+               for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if not {"source_locator", "source_url"} <= columns:
+        return 0
+
+    rows = conn.execute(
+        "SELECT id, source_url FROM tasks "
+        "WHERE source_locator IS NULL AND source_url IS NOT NULL "
+        "AND TRIM(source_url) != ''"
+    ).fetchall()
+
+    filled = []
+    for row in rows:
+        located = source_locator.from_source_url(_value(row, "source_url", 1))
+        if located:
+            filled.append((source_locator.to_json(located), _value(row, "id", 0)))
+
+    if filled:
+        conn.executemany(
+            "UPDATE tasks SET source_locator = ? WHERE id = ?", filled
+        )
+        conn.commit()
+    return len(filled)
+
+
 def _migrate(conn: sqlite3.Connection):
     """Add columns that may be missing from older databases."""
     cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
@@ -176,6 +222,11 @@ def _migrate(conn: sqlite3.Connection):
         ("error_message", "TEXT"),
         ("cowork_prompt", "TEXT"),
         ("is_quick_hit", "INTEGER NOT NULL DEFAULT 0"),
+        # Where the task came from, in a form that can be re-opened. source_id
+        # cannot do this: it is a dedup key built from type/person/subject, so
+        # two different threads about one subject collide by design. No CHECK
+        # constraint here, so this never triggers _rebuild_tasks_constraints.
+        ("source_locator", "TEXT"),
     ):
         if column not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
@@ -473,6 +524,10 @@ def init_db(conn: sqlite3.Connection | None = None):
     )
     conn.commit()
 
+    # After the schema is settled, recover locators from links already stored.
+    # Cheap and idempotent: it only touches rows whose column is still empty.
+    backfill_source_locators(conn)
+
     if close:
         conn.close()
 
@@ -497,6 +552,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                         CHECK (source_type IN ('email','meeting','chat','manual')),
     source_id       TEXT,
     source_url      TEXT,
+    source_locator  TEXT,
     source_date     TEXT,
     source_snippet  TEXT,
     coaching_text   TEXT,

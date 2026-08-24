@@ -105,6 +105,41 @@ WorkIQ returns task suggestions with most fields already populated. For **each i
 | **action_type** | WorkIQ `Action type` | Use as-is (respond-email, follow-up, awaiting-response, schedule-meeting, prepare, general) |
 | **source_snippet** | WorkIQ `Description` | Same as description — the contextual summary |
 | **source_url** | WorkIQ link references | Extract from markdown links in WorkIQ response if available, otherwise null |
+| **source_locator** | WorkIQ identifiers | JSON identifying the thread so it can be re-opened later. See below. Null unless the ids were actually returned. |
+
+### `source_locator` — the identifier a later check can re-open
+
+`source_id` cannot do this job. It is a dedup key built from type, person and
+subject, so two different threads about one subject collide by design and
+nothing can be re-opened from it.
+
+When WorkIQ returns stable identifiers for the item, record them:
+
+```json
+{"version": 1, "kind": "teams_chat",
+ "conversation_id": "19:<id>@thread.v2", "message_id": "1756000000000",
+ "team_id": null, "channel_id": null,
+ "internet_message_id": null, "event_id": null,
+ "source": "captured"}
+```
+
+- `kind`: `teams_chat` for a 1:1 or group chat, `teams_channel` for a channel
+  post, `meeting` for a meeting, `email` for mail.
+- A `teams_chat` needs `conversation_id`. A `teams_channel` needs `team_id`,
+  `channel_id` AND the root `message_id` — a partial triple locates nothing and
+  is refused on read, so store null rather than a fragment.
+- `internet_message_id` and `event_id` are reserved and must stay **null**.
+  Whether an Outlook link maps to a Graph message id, and whether a meeting
+  link yields a Calendar event id, are unresolved. Leave them null rather than
+  writing a plausible-looking value nobody has verified.
+- `source` is `"captured"` only when the ids came back from WorkIQ on this run.
+  Never write `"captured"` for something reconstructed from a URL — the app
+  recovers those itself and marks them `"derived_from_url"`, and the difference
+  is how a reader tells a recorded fact from a reconstruction.
+
+If WorkIQ did not return identifiers, store null. The app already recovers a
+locator from `source_url` for Teams links, so a null here costs nothing; a
+guess would cost the distinction above.
 
 **Claude generates** (not from WorkIQ):
 - **source_id**: Composite dedup key from the original subject + first key person's **primary email** (must be `first.last@microsoft.com` format — resolve aliases via WorkIQ if needed): `{source_type}::{first_person_primary_email_lower}::{root_subject_first_50_lower}` (strip Re:/Fwd: prefixes; do NOT include date)

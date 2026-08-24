@@ -46,7 +46,8 @@ class TestDatabaseSchema(unittest.TestCase):
         expected = {
             "id", "title", "description", "status", "parse_status",
             "raw_input", "priority", "due_date", "committed_date",
-            "source_type", "source_id", "source_url", "source_date", "source_snippet",
+            "source_type", "source_id", "source_url", "source_locator",
+            "source_date", "source_snippet",
             "coaching_text", "key_people", "related_meeting", "user_notes",
             "suggestion_refreshed_at", "created_at", "updated_at",
             "action_type", "is_quick_hit", "error_message", "cowork_prompt",

@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from .db import get_connection, init_db
 from .services import person_identity as _person_identity
+from .services import source_locator
 from .services import waiting_activity
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,18 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
         task["waiting_signal"] = {
             "signal": waiting_activity.signal_for(task.get("status"), activity),
             "activity": activity,
+        }
+    if "source_locator" in task:
+        # The stored column wins: it was recorded when the task was created and
+        # is better evidence than anything reconstructed from a link. The
+        # fallback exists for a task created after the startup backfill ran,
+        # and is a single regex over one URL, not a scan.
+        located = source_locator.normalise(task["source_locator"])
+        if located is None:
+            located = source_locator.from_source_url(task.get("source_url"))
+        task["source_locator_resolved"] = {
+            "locator": located,
+            "thread_readable": source_locator.is_thread_readable(located),
         }
     return task
 

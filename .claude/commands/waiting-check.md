@@ -18,9 +18,9 @@ python -c "
 import sqlite3, json
 conn = sqlite3.connect('data/claudetodo.db')
 conn.row_factory = sqlite3.Row
-r = conn.execute('SELECT id, title, description, key_people, source_type, source_id, source_url, created_at, status, waiting_activity, user_notes FROM tasks WHERE id = ?', (TASK_ID,)).fetchone()
+r = conn.execute('SELECT id, title, description, key_people, source_type, source_id, source_url, source_locator, created_at, status, waiting_activity, user_notes FROM tasks WHERE id = ?', (TASK_ID,)).fetchone()
 if r:
-    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
+    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'source_locator': r['source_locator'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
 conn.close()
 "
 ```
@@ -40,7 +40,7 @@ import sqlite3, json
 conn = sqlite3.connect('data/claudetodo.db')
 conn.row_factory = sqlite3.Row
 rows = conn.execute(\"\"\"
-    SELECT id, title, description, key_people, source_type, source_id, source_url, created_at, status, waiting_activity, user_notes
+    SELECT id, title, description, key_people, source_type, source_id, source_url, source_locator, created_at, status, waiting_activity, user_notes
     FROM tasks
     WHERE status = 'waiting'
        OR (status = 'snoozed'
@@ -49,7 +49,7 @@ rows = conn.execute(\"\"\"
                 OR json_extract(waiting_activity, '\$.checked_at') < datetime('now', '-20 hours')))
 \"\"\").fetchall()
 for r in rows:
-    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
+    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'source_locator': r['source_locator'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
 conn.close()
 "
 ```
@@ -91,7 +91,11 @@ Determine the **query start date**:
 
 **Then**, read for activity. Prefer the originating thread; fall back to the person.
 
-**(a) Thread-scoped — use this when `source_url` is a `teams.microsoft.com` link.**
+**(a) Thread-scoped — use this when the task has a re-openable thread.**
+
+Prefer `source_locator` (JSON) over `source_url`: it is the recorded identifier,
+and for a channel it carries the team/channel/message triple a URL does not.
+Fall back to parsing `source_url` only when the locator is null.
 
 Read the conversation by id. Do **not** search for the URL as text: a live run
 on task 2057 did exactly that ("I searched for the exact Teams message URL and
@@ -100,8 +104,11 @@ the same mistake commit `3b5e16d` fixed for the Teams preview worker, which
 gave up claiming chat ids were "not exposed" while `/me/chats` returns them.
 A worker that is not shown an endpoint will not invent one.
 
-1. Take the conversation id out of the URL: it is the `19:...` segment of
-   `https://teams.microsoft.com/l/message/<conversation-id>/<message-id>`.
+1. If `source_locator` has `kind: "teams_chat"`, use its `conversation_id`
+   directly. If `kind: "teams_channel"`, read
+   `/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies?$top=50`.
+   Otherwise take the conversation id out of `source_url`: it is the `19:...`
+   segment of `https://teams.microsoft.com/l/message/<conversation-id>/<message-id>`.
    URL-decode it (`%3a` → `:`, `%40` → `@`). A 1:1 looks like
    `19:<guid>_<guid>@unq.gbl.spaces`; a group looks like `19:<hex>@thread.v2`.
 2. Read that chat directly with workiq-fetch:
