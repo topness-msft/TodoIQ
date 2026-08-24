@@ -360,6 +360,101 @@ AVAILABILITY_SEVERITY = ["free", "workingElsewhere", "tentative", "busy", "oof"]
 # calendar, so a slot containing one is withdrawn rather than annotated.
 BLOCKING_AVAILABILITY = {"oof"}
 AVAILABILITY_INTERVAL_MINUTES = 5
+# getSchedule is the one write-shaped call this worker may make, and it writes
+# nothing. Riveter mints it; the model never chooses to call it and never sees
+# a tool that could create an event or send a message.
+AVAILABILITY_TOOLS = "workiq-do_action"
+
+
+def availability_prompt(attendees: list, start: str, end: str) -> str:
+    """Ask Graph what the calendars say, and ask for the answer unchanged."""
+    schedules = _json([str(email).strip() for email in attendees])
+    return f"""
+You are Riveter's availability probe. Make exactly one call and return its
+result. Do not interpret it, summarise it, or decide whether any time is
+suitable - that judgement is not yours to make.
+
+Call workiq-do_action once with actionUrl /me/calendar/getSchedule and this
+exact body:
+{{"schedules": {schedules},
+ "startTime": {{"dateTime": "{start}", "timeZone": "UTC"}},
+ "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}},
+ "availabilityViewInterval": {AVAILABILITY_INTERVAL_MINUTES}}}
+
+Return exactly one result block containing the scheduleId and
+availabilityView of every schedule in the response, verbatim:
+{RESULT_START}
+{{"schedules":[{{"scheduleId":"...","availabilityView":"..."}}]}}
+{RESULT_END}
+
+If the call fails, return {RESULT_START}{{"schedules":null}}{RESULT_END}.
+Never invent an availabilityView.
+""".strip()
+
+
+def availability_command(prompt: str) -> list[str]:
+    """A subprocess that can ask Graph for free/busy and nothing else."""
+    return [
+        "copilot",
+        "-p",
+        prompt,
+        f"--available-tools={AVAILABILITY_TOOLS}",
+        "--allow-tool=workiq",
+        "--no-ask-user",
+    ]
+
+
+def _parse_schedules(output: str) -> list | None:
+    """Pull the schedules array out of the probe's result block."""
+    text = output or ""
+    start = text.find(RESULT_START)
+    end = text.find(RESULT_END)
+    if start < 0 or end < 0 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start + len(RESULT_START):end].strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    schedules = parsed.get("schedules") if isinstance(parsed, dict) else None
+    return schedules if isinstance(schedules, list) and schedules else None
+
+
+def fetch_availability(attendees: list, slots: list) -> tuple[list | None, str]:
+    """Measure the attendees' calendars across every proposed slot.
+
+    Returns the raw schedules and the UTC instant the view starts from, so the
+    caller can do its own interval arithmetic. Returns (None, "") when the
+    measurement could not be taken - never a cheerful default.
+    """
+    window = _availability_window(slots)
+    if not window or not attendees:
+        return None, ""
+    from datetime import timezone
+
+    start_dt = _parse_offset_datetime(window[0])
+    end_dt = _parse_offset_datetime(window[1])
+    if not start_dt or not end_dt:
+        return None, ""
+    view_start = start_dt.astimezone(timezone.utc)
+    graph_start = view_start.strftime("%Y-%m-%dT%H:%M:%S")
+    graph_end = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        proc = _run(
+            availability_command(
+                availability_prompt(attendees, graph_start, graph_end)
+            ),
+            timeout=180,
+        )
+    except Exception as exc:  # noqa: BLE001 - a probe must never break preview
+        logger.warning("Availability probe failed to run: %s", exc)
+        return None, ""
+    schedules = _parse_schedules(proc.stdout or "")
+    if not schedules:
+        logger.warning("Availability probe returned no readable schedules")
+        return None, ""
+    return schedules, view_start.isoformat()
+
 
 
 def _parse_offset_datetime(value: str):
@@ -840,7 +935,7 @@ def finish_preview(
                         str(email).strip().lower() for email in availability
                     } != set(attendees)
                     or any(
-                        str(status).strip().lower() not in {"free", "tentative"}
+                        str(status).strip().lower() not in AVAILABILITY_SEVERITY
                         for status in availability.values()
                     )
                 ):
@@ -874,6 +969,51 @@ def finish_preview(
                     "timezone": timezone_name,
                     "availability": normalized_availability,
                 })
+            # The worker cannot reach getSchedule, so everything above is a
+            # claim. Riveter measures it before offering it: task 2478 proposed
+            # a Wednesday its own evidence called free while the attendee was
+            # out of office all day.
+            schedules, view_start = fetch_availability(attendees, evidence_slots)
+            availability_verified = bool(schedules)
+            withdrawn: list = []
+            if availability_verified:
+                evidence_slots, withdrawn = _apply_verified_availability(
+                    attendees, evidence_slots, schedules, view_start,
+                    AVAILABILITY_INTERVAL_MINUTES,
+                )
+            else:
+                # Unmeasured is not the same as free. Say so, and let the
+                # certifier refuse the selection rather than book on a guess.
+                for slot_record in evidence_slots:
+                    if any(
+                        str(status).strip().lower() in BLOCKING_AVAILABILITY
+                        for status in slot_record["availability"].values()
+                    ):
+                        withdrawn.append(slot_record)
+                evidence_slots = [
+                    slot_record for slot_record in evidence_slots
+                    if slot_record not in withdrawn
+                ]
+            options = [
+                {
+                    "label": slot_record["label"],
+                    "value": slot_record["value"],
+                    "description": _availability_description(slot_record),
+                }
+                for slot_record in evidence_slots
+            ]
+            if not options:
+                # Every candidate conflicted. An empty chooser is worse than an
+                # honest dead end, so the card stops asking and says why.
+                blocked = sorted({
+                    f"{email} is {status}"
+                    for slot_record in withdrawn
+                    for email, status in (slot_record.get("conflicts") or {}).items()
+                })
+                raise ValueError(
+                    "No proposed time survived an availability check"
+                    + (f" ({'; '.join(blocked)})" if blocked else "")
+                )
             interaction = {
                 "invocation_id": f"structured-calendar-{action_id}",
                 "questions": [{
@@ -899,6 +1039,11 @@ def finish_preview(
                     "source": "copilot-ask",
                     "attendees": attendees,
                     "query_backed": True,
+                    # Whether the availability above was measured against the
+                    # attendees' calendars or is only the worker's claim. The
+                    # certifier refuses a selection when this is False rather
+                    # than booking on an unchecked guess.
+                    "availability_verified": availability_verified,
                     "duration_minutes": duration,
                     "start_offset_minutes": None,
                     "slots": evidence_slots,

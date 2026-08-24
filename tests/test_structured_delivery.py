@@ -32,8 +32,22 @@ class StructuredDeliveryTestBase(unittest.TestCase):
         conn = db_module.get_connection()
         db_module.init_db(conn)
         conn.close()
+        # finish_preview measures attendee availability, which spawns a real
+        # subprocess against WorkIQ. Tests must never make that call: it hangs
+        # the suite and would make results depend on someone's live calendar.
+        # Cases that care about verification drive the functions directly or
+        # install their own probe.
+        self._real_fetch_availability = structured_delivery.fetch_availability
+        self.availability_probe_calls = []
+
+        def _no_probe(attendees, slots):
+            self.availability_probe_calls.append((list(attendees), list(slots)))
+            return None, ""
+
+        structured_delivery.fetch_availability = _no_probe
 
     def tearDown(self):
+        structured_delivery.fetch_availability = self._real_fetch_availability
         db_module.DB_PATH = self.original_db_path
         os.unlink(self.tmp.name)
 
@@ -1065,6 +1079,13 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         )
         duration = structured_delivery._meeting_duration(task)
         start = datetime(2028, 8, 21, 9, 5, tzinfo=timezone(timedelta(hours=-7)))
+        # These cases are about how the evidence is LABELLED, so give them a
+        # probe that genuinely measures the slot free. Availability that was
+        # never measured is covered separately.
+        structured_delivery.fetch_availability = lambda attendees, slots: (
+            [{"scheduleId": "rima@microsoft.com", "availabilityView": "0" * 288}],
+            start.astimezone(timezone.utc).isoformat(),
+        )
         structured_delivery.finish_preview(
             action["id"],
             stdout=(
@@ -1130,6 +1151,44 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             "an honestly-labelled live query must still certify, otherwise "
             "telling the truth silently disables scheduling",
         )
+
+    def test_certifier_refuses_availability_that_was_never_measured(self):
+        """The task 2478 failure: a claim the worker could not have checked.
+
+        A read-only preview cannot reach getSchedule, so "copilot-ask"
+        availability is only a claim. Until Riveter measures it, selecting the
+        slot must be refused rather than booked over someone's absence.
+        """
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        interaction["schedule_evidence"]["availability_verified"] = False
+
+        self.assertFalse(schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        ))
+
+    def test_scheduler_evidence_does_not_need_riveter_to_remeasure(self):
+        """FindMeetingTimes measured availability itself; do not gate it."""
+        from src.services.cowork_runner import (
+            schedule_attendees, schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        interaction["schedule_evidence"]["source"] = "FindMeetingTimes+interaction"
+        interaction["schedule_evidence"].pop("availability_verified", None)
+
+        self.assertTrue(schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        ))
 
     def test_certifier_still_accepts_cowork_scheduler_evidence(self):
         """Cowork really does call FindMeetingTimes; those rows stay valid."""
@@ -1504,6 +1563,150 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             "available", structured_delivery._availability_description(slot)
         )
 
+    def test_fetch_prompt_asks_for_the_raw_response(self):
+        """The subprocess is a transport: it must not judge the slots."""
+        prompt = structured_delivery.availability_prompt(
+            ["a@x.com", "b@x.com"],
+            "2026-08-26T13:05:00-04:00",
+            "2026-08-26T13:30:00-04:00",
+        )
+        self.assertIn("/me/calendar/getSchedule", prompt)
+        self.assertIn("a@x.com", prompt)
+        self.assertIn("b@x.com", prompt)
+        lowered = prompt.lower()
+        self.assertIn("availabilityview", lowered)
+        # It must be told to hand back what Graph said, not an opinion.
+        self.assertTrue(
+            "do not interpret" in lowered or "verbatim" in lowered,
+            "the worker must return the raw response, not a verdict",
+        )
+
+    def test_fetch_command_can_reach_workiq_but_cannot_send(self):
+        argv = structured_delivery.availability_command("prompt")
+        joined = " ".join(argv)
+        self.assertIn("workiq-do_action", joined)
+        # getSchedule is the only write-shaped call it may make; it must not be
+        # able to create events or send messages.
+        self.assertNotIn("workiq-create_entity", joined)
+
+    def test_parses_schedules_out_of_a_result_block(self):
+        raw = (
+            "noise before\n"
+            + structured_delivery.RESULT_START
+            + '{"schedules":[{"scheduleId":"a@x.com",'
+            '"availabilityView":"000"}]}'
+            + structured_delivery.RESULT_END
+            + "\nnoise after"
+        )
+        schedules = structured_delivery._parse_schedules(raw)
+        self.assertEqual(len(schedules), 1)
+        self.assertEqual(schedules[0]["scheduleId"], "a@x.com")
+
+    def test_unreadable_response_yields_no_schedules(self):
+        self.assertIsNone(structured_delivery._parse_schedules(""))
+        self.assertIsNone(structured_delivery._parse_schedules("no block here"))
+
+    def _calendar_preview(self, probe):
+        """Drive a real finish_preview with a controllable availability probe."""
+        task = create_task("Schedule the kickoff", action_type="schedule-meeting")
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        structured_delivery.fetch_availability = probe
+        payload = {
+            "schema_version": 1,
+            "channel": "calendar",
+            "subject": "Kickoff",
+            "body": "Agenda",
+            "duration_minutes": structured_delivery._meeting_duration(task),
+            "timezone": "Eastern Standard Time",
+            "attendees": [{"name": "A", "email": "a@x.com"}],
+            "slots": [
+                {"id": "0", "label": "Wed",
+                 "start": "2099-08-26T13:05:00-04:00",
+                 "end": "2099-08-26T13:30:00-04:00",
+                 "timezone": "Eastern Standard Time",
+                 "availability": {"a@x.com": "free"}},
+                {"id": "1", "label": "Thu",
+                 "start": "2099-08-27T13:05:00-04:00",
+                 "end": "2099-08-27T13:30:00-04:00",
+                 "timezone": "Eastern Standard Time",
+                 "availability": {"a@x.com": "free"}},
+            ],
+        }
+        duration = payload["duration_minutes"]
+        for slot in payload["slots"]:
+            begin = datetime.fromisoformat(slot["start"])
+            slot["end"] = (begin + timedelta(minutes=duration)).isoformat()
+        stdout = (
+            structured_delivery.RESULT_START + "\n"
+            + json.dumps({
+                "correlation_id": envelope["correlation_id"],
+                "phase": "preview",
+                "ok": True,
+                "payload": payload,
+            })
+            + "\n" + structured_delivery.RESULT_END
+        )
+        return action, structured_delivery.finish_preview(
+            action["id"],
+            stdout=stdout,
+            stderr="",
+            exit_code=0,
+            correlation_id=envelope["correlation_id"],
+        )
+
+    def test_preview_consults_the_probe(self):
+        seen = []
+
+        def probe(attendees, slots):
+            seen.append((attendees, slots))
+            return None, ""
+
+        self._calendar_preview(probe)
+        self.assertEqual(len(seen), 1, "preview must measure availability")
+        self.assertEqual(seen[0][0], ["a@x.com"])
+        self.assertEqual(len(seen[0][1]), 2)
+
+    def test_preview_withdraws_a_slot_the_probe_says_is_oof(self):
+        def probe(attendees, slots):
+            # Wednesday OOF, Thursday free, measured from the first slot start.
+            return ([{
+                "scheduleId": "a@x.com",
+                "availabilityView": ("3" * 288) + ("0" * 288),
+            }], "2099-08-26T17:05:00+00:00")
+
+        _action, updated = self._calendar_preview(probe)
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+
+        self.assertTrue(evidence["availability_verified"])
+        self.assertEqual([s["value"] for s in evidence["slots"]], ["1"])
+
+    def test_preview_records_when_availability_could_not_be_measured(self):
+        _action, updated = self._calendar_preview(lambda a, s: (None, ""))
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+
+        self.assertFalse(evidence["availability_verified"])
+        # Unmeasured still offers the times; it simply stops calling them checked.
+        self.assertEqual(len(evidence["slots"]), 2)
+
+    def test_preview_fails_closed_when_every_slot_conflicts(self):
+        """An empty chooser is worse than an honest dead end."""
+        def probe(attendees, slots):
+            return ([{
+                "scheduleId": "a@x.com", "availabilityView": "3" * 576,
+            }], "2099-08-26T17:05:00+00:00")
+
+        _action, updated = self._calendar_preview(probe)
+
+        self.assertEqual(updated["state"], "failed")
+        self.assertIn("availability", (updated["error"] or "").lower())
+        # It must not leave a chooser offering nothing.
+        self.assertFalse(updated["blocked_question"])
+
 
 class TestTeamsDestinationDiscovery(StructuredDeliveryTestBase):
     """The Teams preview worker must be told where chats live.
@@ -1773,9 +1976,34 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         conn.close()
         self.preview_started = []
         self.execute_started = []
+        # Same rule as StructuredDeliveryTestBase: no test may reach WorkIQ.
+        # These cases drive slot selection, so the stand-in reports clear
+        # calendars rather than a failed measurement -- "not measured" is a
+        # separate case, covered by TestAvailabilityVerification.
+        self._real_fetch_availability = structured_delivery.fetch_availability
+
+        def _all_free(attendees, slots):
+            window = structured_delivery._availability_window(slots)
+            if not window:
+                return None, ""
+            from datetime import timezone as _timezone
+
+            start = structured_delivery._parse_offset_datetime(window[0])
+            if not start:
+                return None, ""
+            return (
+                [
+                    {"scheduleId": str(email), "availabilityView": "0" * 8064}
+                    for email in attendees
+                ],
+                start.astimezone(_timezone.utc).isoformat(),
+            )
+
+        structured_delivery.fetch_availability = _all_free
         super().setUp()
 
     def tearDown(self):
+        structured_delivery.fetch_availability = self._real_fetch_availability
         super().tearDown()
         db_module.DB_PATH = self.original_db_path
         os.unlink(self.tmp.name)
