@@ -1617,6 +1617,165 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             "available", structured_delivery._availability_description(slot)
         )
 
+    # ---- working hours -------------------------------------------------
+    CENTRAL = {
+        "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+        "startTime": "08:00:00.0000000",
+        "endTime": "17:00:00.0000000",
+        "timeZone": {"name": "Central Standard Time"},
+    }
+    EASTERN = dict(CENTRAL, timeZone={"name": "Eastern Standard Time"})
+
+    def test_slot_inside_working_hours_is_fine(self):
+        # 13:05 ET on a Wednesday is 12:05 Central, well inside 08:00-17:00.
+        self.assertFalse(structured_delivery._outside_working_hours(
+            self.CENTRAL,
+            "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00",
+        ))
+
+    def test_evening_slot_just_past_an_eastern_day_is_a_reasonable_ask(self):
+        """17:30 finish against a 17:00 day: 30 minutes over, so acceptable."""
+        self.assertEqual(structured_delivery._working_hours_status(
+            self.EASTERN,
+            "2026-08-26T17:05:00-04:00", "2026-08-26T17:30:00-04:00",
+        ), "nearWorkingHours")
+
+    def test_slot_well_past_the_day_is_outside_working_hours(self):
+        """19:05 ET is over two hours past a 17:00 Eastern finish."""
+        self.assertEqual(structured_delivery._working_hours_status(
+            self.EASTERN,
+            "2026-08-26T19:05:00-04:00", "2026-08-26T19:30:00-04:00",
+        ), "outsideWorkingHours")
+
+    def test_grace_applies_before_the_day_starts_too(self):
+        # 07:05 Central start against an 08:00 day: 55 minutes early.
+        self.assertEqual(structured_delivery._working_hours_status(
+            self.CENTRAL,
+            "2026-08-26T08:05:00-04:00", "2026-08-26T08:30:00-04:00",
+        ), "nearWorkingHours")
+        # 05:05 Central: nearly three hours early.
+        self.assertEqual(structured_delivery._working_hours_status(
+            self.CENTRAL,
+            "2026-08-26T06:05:00-04:00", "2026-08-26T06:30:00-04:00",
+        ), "outsideWorkingHours")
+
+    def test_same_evening_slot_is_inside_a_central_day(self):
+        """The same instant is 16:05 Central, which is still a working hour."""
+        self.assertIsNone(structured_delivery._working_hours_status(
+            self.CENTRAL,
+            "2026-08-26T17:05:00-04:00", "2026-08-26T17:30:00-04:00",
+        ))
+
+    def test_weekend_is_outside_the_working_week(self):
+        # Saturday 29 August 2026.
+        self.assertEqual(structured_delivery._working_hours_status(
+            self.CENTRAL,
+            "2026-08-29T13:05:00-04:00", "2026-08-29T13:30:00-04:00",
+        ), "outsideWorkingHours")
+
+    def test_missing_working_hours_is_not_treated_as_a_conflict(self):
+        """Absent data must not invent an objection."""
+        self.assertIsNone(
+            structured_delivery._working_hours_status(None, "x", "y")
+        )
+        self.assertIsNone(structured_delivery._working_hours_status(
+            {"timeZone": {"name": "Nowhere Standard Time"}},
+            "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00",
+        ))
+
+    def test_a_near_miss_is_noted_but_never_blocks(self):
+        """Like a tentative block: say it, do not rule it out."""
+        slots = [{
+            "value": "0", "label": "evening",
+            "start": "2026-08-26T17:05:00-04:00",
+            "end": "2026-08-26T17:30:00-04:00", "availability": {},
+        }]
+        schedules = [{
+            "scheduleId": "ryanedward@microsoft.com",
+            "availabilityView": "0" * 288,
+            "workingHours": self.EASTERN,
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["ryanedward@microsoft.com"], slots, schedules,
+            "2026-08-26T16:00:00+00:00", 5,
+        )
+
+        self.assertFalse(ranked[0].get("conflicts"), "a near miss is not a veto")
+        self.assertEqual(
+            ranked[0]["availability"]["ryanedward@microsoft.com"],
+            "nearWorkingHours",
+        )
+        text = structured_delivery._availability_description(
+            ranked[0], {"ryanedward@microsoft.com": "Ed Ryan"}
+        )
+        self.assertIn("Ed Ryan", text)
+        self.assertIn("just outside working hours", text)
+
+    def test_a_clean_slot_still_outranks_a_near_miss(self):
+        slots = [
+            {"value": "near", "label": "n",
+             "start": "2026-08-26T17:05:00-04:00",
+             "end": "2026-08-26T17:30:00-04:00", "availability": {}},
+            {"value": "clean", "label": "c",
+             "start": "2026-08-26T13:05:00-04:00",
+             "end": "2026-08-26T13:30:00-04:00", "availability": {}},
+        ]
+        schedules = [{
+            "scheduleId": "a@x.com",
+            "availabilityView": "0" * 288,
+            "workingHours": self.EASTERN,
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
+        )
+        self.assertEqual([entry["value"] for entry in ranked], ["clean", "near"])
+
+    def test_a_near_miss_still_outranks_a_real_conflict(self):
+        slots = [
+            {"value": "busy", "label": "b",
+             "start": "2026-08-26T12:05:00-04:00",
+             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
+            {"value": "near", "label": "n",
+             "start": "2026-08-26T17:05:00-04:00",
+             "end": "2026-08-26T17:30:00-04:00", "availability": {}},
+        ]
+        schedules = [{
+            "scheduleId": "a@x.com",
+            "availabilityView": ("2" * 12) + ("0" * 276),
+            "workingHours": self.EASTERN,
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
+        )
+        self.assertEqual([entry["value"] for entry in ranked], ["near", "busy"])
+
+    def test_being_busy_outranks_being_well_out_of_hours(self):
+        """An hour past someone's day is a smaller ask than a double booking."""
+        slots = [
+            {"value": "busy", "label": "b",
+             "start": "2026-08-26T12:05:00-04:00",
+             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
+            {"value": "late", "label": "l",
+             "start": "2026-08-26T20:05:00-04:00",
+             "end": "2026-08-26T20:30:00-04:00", "availability": {}},
+        ]
+        schedules = [{
+            "scheduleId": "a@x.com",
+            "availabilityView": ("2" * 12) + ("0" * 276),
+            "workingHours": self.EASTERN,
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
+        )
+        self.assertEqual([entry["value"] for entry in ranked], ["late", "busy"])
+
+    def test_probe_asks_for_working_hours(self):
+        prompt = structured_delivery.availability_prompt(
+            ["a@x.com"],
+            "2026-08-26T17:05:00", "2026-08-26T17:30:00",
+        )
+        self.assertIn("workingHours", prompt)
+
     def test_fetch_prompt_asks_for_the_raw_response(self):
         """The subprocess is a transport: it must not judge the slots."""
         prompt = structured_delivery.availability_prompt(

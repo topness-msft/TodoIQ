@@ -360,14 +360,96 @@ AVAILABILITY_SEVERITY = ["free", "workingElsewhere", "tentative", "busy", "oof"]
 # block as bookable, and working elsewhere still means working, so neither
 # counts against a slot. OOF weighs heavier than busy: a meeting can be moved,
 # a holiday cannot.
-CONFLICT_WEIGHTS = {"busy": 1, "oof": 2}
+# What actually stops someone attending, and what is merely worth saying.
+# OOF weighs heaviest: a meeting can be moved, a holiday cannot. Soft notes
+# carry a small cost so a slot that suits everyone outright still leads, but
+# they never make a time unofferable -- the standing rule treats a tentative
+# block as bookable, and an ask just past someone's day is the same kind of
+# small favour.
+CONFLICT_WEIGHTS = {"outsideWorkingHours": 4, "busy": 8, "oof": 16}
+SOFT_WEIGHTS = {"tentative": 1, "workingElsewhere": 1, "nearWorkingHours": 1}
+# How far past the edge of a working day still counts as a reasonable ask.
+WORKING_HOURS_GRACE_MINUTES = 90
 AVAILABILITY_PHRASES = {
     "oof": "out of office",
     "busy": "busy",
     "tentative": "tentative",
     "workingElsewhere": "working elsewhere",
+    "outsideWorkingHours": "outside working hours",
+    "nearWorkingHours": "just outside working hours",
 }
 AVAILABILITY_INTERVAL_MINUTES = 5
+_WEEKDAY_NAMES = [
+    "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+]
+
+
+def _working_hours_status(working_hours, slot_start: str, slot_end: str):
+    """How far outside the attendee's own working day this slot falls.
+
+    Returns None when it sits inside the day, "nearWorkingHours" when it is
+    close enough to be a reasonable ask, and "outsideWorkingHours" beyond that.
+    A calendar can be clear at a time nobody would take the meeting, and only
+    the attendee's own timezone can say which it is: a 17:05 ET slot is a
+    normal afternoon on Central and after hours on Eastern. Missing or
+    unreadable data never invents an objection.
+    """
+    if not isinstance(working_hours, dict):
+        return None
+    zone_name = str(
+        (working_hours.get("timeZone") or {}).get("name") or ""
+    ).strip()
+    start = _parse_offset_datetime(slot_start)
+    end = _parse_offset_datetime(slot_end)
+    if not zone_name or not start or not end:
+        return None
+    from dateutil import tz as _tz
+
+    zone = _tz.gettz(zone_name)
+    if zone is None:
+        return None
+
+    local_start = start.astimezone(zone)
+    local_end = end.astimezone(zone)
+
+    days = {
+        str(day).strip().lower()
+        for day in (working_hours.get("daysOfWeek") or [])
+    }
+    if days and _WEEKDAY_NAMES[local_start.weekday()] not in days:
+        return "outsideWorkingHours"
+
+    def _clock(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        parts = text.split(".")[0].split(":")
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except (IndexError, ValueError):
+            return None
+
+    day_start = _clock(working_hours.get("startTime"))
+    day_end = _clock(working_hours.get("endTime"))
+    if day_start is None or day_end is None:
+        return None
+    begins = local_start.hour * 60 + local_start.minute
+    finishes = local_end.hour * 60 + local_end.minute
+    # An end exactly on the closing time still counts as inside the day.
+    overshoot = max(day_start - begins, finishes - day_end, 0)
+    if overshoot <= 0:
+        return None
+    if overshoot <= WORKING_HOURS_GRACE_MINUTES:
+        return "nearWorkingHours"
+    return "outsideWorkingHours"
+
+
+def _outside_working_hours(working_hours, slot_start: str, slot_end: str) -> bool:
+    """True only when a slot is beyond a reasonable ask of the attendee."""
+    return _working_hours_status(
+        working_hours, slot_start, slot_end
+    ) == "outsideWorkingHours"
 # getSchedule is the one write-shaped call this worker may make, and it writes
 # nothing. Riveter mints it; the model never chooses to call it and never sees
 # a tool that could create an event or send a message.
@@ -389,14 +471,16 @@ exact body:
  "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}},
  "availabilityViewInterval": {AVAILABILITY_INTERVAL_MINUTES}}}
 
-Return exactly one result block containing the scheduleId and
-availabilityView of every schedule in the response, verbatim:
+Return exactly one result block containing the scheduleId, availabilityView
+and workingHours of every schedule in the response, verbatim:
 {RESULT_START}
-{{"schedules":[{{"scheduleId":"...","availabilityView":"..."}}]}}
+{{"schedules":[{{"scheduleId":"...","availabilityView":"...",
+"workingHours":{{"daysOfWeek":["monday"],"startTime":"08:00:00",
+"endTime":"17:00:00","timeZone":{{"name":"..."}}}}}}]}}
 {RESULT_END}
 
 If the call fails, return {RESULT_START}{{"schedules":null}}{RESULT_END}.
-Never invent an availabilityView.
+Never invent an availabilityView or a working-hours timezone.
 """.strip()
 
 
@@ -547,10 +631,12 @@ def _apply_verified_availability(
     each carries the conflicts that cost it its place.
     """
     views = {}
+    hours = {}
     for entry in schedules or []:
         email = str(entry.get("scheduleId") or "").strip().lower()
         if email:
             views[email] = str(entry.get("availabilityView") or "")
+            hours[email] = entry.get("workingHours")
 
     ranked = []
     for position, slot in enumerate(slots or []):
@@ -569,6 +655,19 @@ def _apply_verified_availability(
             measured[key] = status
             if status in CONFLICT_WEIGHTS:
                 conflicts[key] = status
+                continue
+            hours_status = _working_hours_status(
+                hours.get(key), slot.get("start"), slot.get("end")
+            )
+            if hours_status == "outsideWorkingHours":
+                # A clear calendar well outside someone's own day is still a
+                # poor time for them, and only their timezone can say so.
+                measured[key] = hours_status
+                conflicts[key] = hours_status
+            elif hours_status == "nearWorkingHours" and status == "free":
+                # Close enough to be a reasonable ask. Worth saying, not worth
+                # ruling out -- the same standing as a tentative block.
+                measured[key] = hours_status
         updated = dict(slot)
         updated["availability"] = measured
         if conflicts:
@@ -576,6 +675,13 @@ def _apply_verified_availability(
         else:
             updated.pop("conflicts", None)
         cost = sum(CONFLICT_WEIGHTS[status] for status in conflicts.values())
+        # Soft notes never block a time, but they should not outrank a slot
+        # that suits everyone outright.
+        cost += sum(
+            SOFT_WEIGHTS.get(str(status), 0)
+            for email, status in measured.items()
+            if email not in conflicts
+        )
         # Cost first, then the worker's own ordering, which carries its sense
         # of which times suit the task.
         ranked.append((cost, len(conflicts), position, updated))
@@ -584,8 +690,21 @@ def _apply_verified_availability(
     return [entry[3] for entry in ranked]
 
 
+def _availability_phrase(status) -> str:
+    """Plain words for a status, tolerant of casing."""
+    text = str(status or "").strip()
+    if text in AVAILABILITY_PHRASES:
+        return AVAILABILITY_PHRASES[text]
+    lowered = text.lower()
+    for key, phrase in AVAILABILITY_PHRASES.items():
+        if key.lower() == lowered:
+            return phrase
+    return lowered
+
+
 def _availability_description(slot: dict, names: dict | None = None) -> str:
     """Say who cannot make it, by name, so the choice is an informed one."""
+    lookup = names or {}
     conflicts = slot.get("conflicts") or {}
     if not conflicts:
         availability = slot.get("availability") or {}
@@ -595,21 +714,15 @@ def _availability_description(slot: dict, names: dict | None = None) -> str:
         )
         if not soft:
             return "All confirmed attendees are available."
-        lookup = names or {}
         return "; ".join(
             f"{lookup.get(email, email)} is "
-            f"{AVAILABILITY_PHRASES.get(str(availability[email]).strip().lower(), availability[email])}"
+            f"{_availability_phrase(availability[email])}"
             for email in soft
         ) + "."
-    lookup = names or {}
-    parts = []
-    for email in sorted(conflicts):
-        status = str(conflicts[email]).strip().lower()
-        parts.append(
-            f"{lookup.get(email, email)} is "
-            f"{AVAILABILITY_PHRASES.get(status, status)}"
-        )
-    return "; ".join(parts) + "."
+    return "; ".join(
+        f"{lookup.get(email, email)} is {_availability_phrase(conflicts[email])}"
+        for email in sorted(conflicts)
+    ) + "."
 # How long a Teams post stays recoverable. Teams cannot be stamped with a key,
 # so recovery works by reading recent messages and matching sender and body.
 # That look is only trustworthy while the message is still near the top of the
