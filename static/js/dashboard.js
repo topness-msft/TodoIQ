@@ -2489,7 +2489,7 @@ function renderWaitingActivityCard(task) {
 
 var _waitingCheckPollTimer = null;
 
-function requestWaitingCheck() {
+function requestWaitingCheck(taskId) {
     var btn = document.getElementById('waiting-check-btn');
     if (btn && btn.classList.contains('syncing')) return;
     if (btn) {
@@ -2497,10 +2497,15 @@ function requestWaitingCheck() {
         btn.title = 'Checking activity...';
     }
 
+    // With a task id the server checks only that task. Without one it checks
+    // every waiting task, which is what the header button means.
+    var payload = { waiting_check: true };
+    if (taskId) payload.task_id = taskId;
+
     fetch('/api/sync-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ waiting_check: true })
+        body: JSON.stringify(payload)
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
@@ -2511,6 +2516,7 @@ function requestWaitingCheck() {
                 btn.classList.remove('syncing');
                 btn.title = 'Check for activity from key people';
             }
+            _resetCheckNowButton();
         }
     })
     .catch(function(err) {
@@ -2518,8 +2524,19 @@ function requestWaitingCheck() {
             btn.classList.remove('syncing');
             btn.title = 'Check for activity from key people';
         }
+        _resetCheckNowButton();
         console.error('Waiting check request failed:', err);
     });
+}
+
+function _resetCheckNowButton() {
+    // The card button disables itself on click; a refused or failed request
+    // must give it back rather than leave a dead "Checking…".
+    var checkBtn = document.getElementById('check-now-btn');
+    if (checkBtn) {
+        checkBtn.disabled = false;
+        checkBtn.textContent = 'Check Now';
+    }
 }
 
 function requestWaitingCheckSingle(taskId) {
@@ -2528,7 +2545,9 @@ function requestWaitingCheckSingle(taskId) {
         checkBtn.disabled = true;
         checkBtn.textContent = 'Checking\u2026';
     }
-    requestWaitingCheck();
+    // This used to drop taskId and re-run every waiting task - one WorkIQ
+    // subprocess each - in response to a click on a single card.
+    requestWaitingCheck(taskId);
 }
 
 function refreshAllWaiting() {

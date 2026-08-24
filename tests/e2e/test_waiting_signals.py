@@ -228,6 +228,80 @@ class TestNothingCompletesItself:
             _delete(page, base_url, task_id)
 
 
+class TestCheckNowChecksThisTask:
+    """The button takes a task id; it must actually send it.
+
+    It previously dropped the id and re-ran every waiting task - one WorkIQ
+    subprocess each - which is the wrong answer to "retry this one", and worst
+    of all on the failed card where retrying is the obvious move.
+    """
+
+    def _capture(self, page: Page):
+        captured = {}
+
+        def handler(route):
+            captured["body"] = route.request.post_data_json
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "message": "started"}))
+
+        page.route("**/api/sync-status", handler)
+        return captured
+
+    def test_the_card_button_names_the_task(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Check now probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "quiet", status="no_activity", summary="nothing yet"))
+            captured = self._capture(page)
+            page.locator("#check-now-btn").click()
+            page.wait_for_timeout(600)
+            assert captured.get("body"), "no request was sent"
+            assert captured["body"].get("waiting_check") is True
+            assert captured["body"].get("task_id") == task_id, captured["body"]
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_retrying_a_failed_check_does_not_rerun_the_whole_list(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Retry probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "check_failed", check_state="failed", error="no output"))
+            captured = self._capture(page)
+            page.locator("#check-now-btn").click()
+            page.wait_for_timeout(600)
+            assert captured["body"].get("task_id") == task_id, captured["body"]
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_the_header_button_still_checks_everything(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Header probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "quiet", status="no_activity", summary="nothing yet"))
+            captured = self._capture(page)
+            page.evaluate("requestWaitingCheck()")
+            page.wait_for_timeout(600)
+            assert captured["body"].get("waiting_check") is True
+            assert "task_id" not in captured["body"], captured["body"]
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_a_refused_request_gives_the_button_back(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Refusal probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "quiet", status="no_activity", summary="nothing yet"))
+            page.route("**/api/sync-status", lambda route: route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({"ok": False, "message": "'waiting-check' already running."})))
+            page.locator("#check-now-btn").click()
+            page.wait_for_timeout(600)
+            btn = page.locator("#check-now-btn")
+            assert btn.is_enabled(), "button left disabled after a refusal"
+            assert "Check Now" in btn.inner_text()
+        finally:
+            _delete(page, base_url, task_id)
+
 class TestTheListRowAgrees:
     """The row icon and the card must not tell different stories."""
 

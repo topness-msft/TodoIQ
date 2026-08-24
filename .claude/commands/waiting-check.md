@@ -6,6 +6,30 @@ Check all "waiting" tasks for recent activity from their key people using WorkIQ
 
 Today's date is $CURRENT_DATE.
 
+## Scope: all waiting tasks, or one
+
+If this command was invoked with a task id (`/waiting-check 2129`), check **only
+that task** — load it by id regardless of its status, since the user asked for
+it explicitly by pressing Check Now on that card. Skip the OOF re-check sweep in
+Step 1 and use this query instead:
+
+```bash
+python -c "
+import sqlite3, json
+conn = sqlite3.connect('data/claudetodo.db')
+conn.row_factory = sqlite3.Row
+r = conn.execute('SELECT id, title, description, key_people, source_type, source_id, source_url, created_at, status, waiting_activity, user_notes FROM tasks WHERE id = ?', (TASK_ID,)).fetchone()
+if r:
+    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
+conn.close()
+"
+```
+
+Everything else — the cursor, the queries, the classification, the write — is
+identical. Then stop; do not sweep the rest.
+
+With no task id, check every waiting task as described below.
+
 ## Step 1: Load waiting tasks (including snoozed OOF tasks due for re-check)
 
 Use the Bash tool to run this Python script to get all waiting tasks and snoozed OOF tasks:

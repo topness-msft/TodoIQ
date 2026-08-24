@@ -11,11 +11,15 @@ import sqlite3
 import tornado.web
 
 from ..db import get_connection
-from ..models import get_last_sync
+from ..models import get_last_sync, get_task
 from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 
 logger = logging.getLogger(__name__)
+
+# One task should not wait behind a budget sized for the whole list. The global
+# check has no explicit timeout and falls back to claude_runner's default.
+SINGLE_WAITING_CHECK_TIMEOUT = 180
 
 
 def is_sync_running() -> bool:
@@ -75,9 +79,38 @@ class SyncStatusHandler(tornado.web.RequestHandler):
             }))
             return
 
-        # On-demand waiting activity check
+        # On-demand waiting activity check.
+        #
+        # With a task_id this checks that ONE task. The Check Now button on a
+        # card used to pass an id that was thrown away, so clicking it re-ran
+        # every waiting task - one WorkIQ subprocess each - which is a poor
+        # answer to "retry this one". The label stays "waiting-check" either
+        # way, so claude_runner's single-flight guard still prevents a per-task
+        # run and a global run from writing the same rows at once.
         if body.get("waiting_check"):
-            result = run_copilot("/waiting-check", label="waiting-check")
+            raw_id = body.get("task_id")
+            if raw_id is None:
+                result = run_copilot("/waiting-check", label="waiting-check")
+            else:
+                # The command string reaches a subprocess, so the id may be
+                # nothing but digits.
+                try:
+                    task_id = int(str(raw_id).strip())
+                except (TypeError, ValueError):
+                    self.set_status(400)
+                    self.write(json.dumps({"error": "task_id must be a number"}))
+                    return
+                if not get_task(task_id):
+                    # Falling through to the global check here would spend a
+                    # run per waiting task because of a stale dashboard row.
+                    self.set_status(404)
+                    self.write(json.dumps({"error": "Not found"}))
+                    return
+                result = run_copilot(
+                    f"/waiting-check {task_id}",
+                    label="waiting-check",
+                    timeout=SINGLE_WAITING_CHECK_TIMEOUT,
+                )
             if not result["ok"] and "already running" not in result["message"].lower():
                 self.set_status(500)
             self.write(json.dumps(result))
