@@ -155,8 +155,15 @@ broadcast-audience callers needs its own parity audit.
 
 ## Deploy
 - Environments:
-  - Dev/dogfood: `http://localhost:8768` from this worktree.
-  - Production/tray: `http://localhost:8766`, scheduled task `TodoNess`.
+  - **Production/tray: `C:\Users\phtopnes\Riveter\app`**, a dedicated clone on
+    `main`, serving `http://localhost:8766` via scheduled task `TodoNess`. Its
+    database is `C:\Users\phtopnes\Riveter\app\data\claudetodo.db`. Update it
+    with `git -C C:\Users\phtopnes\Riveter\app pull`, then re-run the installer.
+    Production deliberately does NOT run from a worktree: worktrees are
+    disposable, and pinning logon startup to one meant the tray broke or fell
+    back to older code when it was cleaned up.
+  - Dev/dogfood: `http://localhost:8768` from a worktree. It uses that
+    worktree's own `data/claudetodo.db`, which is NOT production data.
   - Isolated live demo: `http://localhost:8776`, fictional seed plus explicitly
     enabled parsing/Cowork capabilities, with all local state under `data/demo/`.
 - Dev deploy command: from the selected checkout,
@@ -243,14 +250,11 @@ broadcast-audience callers needs its own parity audit.
   5. Verify task count, latest sync timestamp and all probes above.
 
 ## Known gotchas / latent bugs
-- `install_startup.py` "start now" does NOT stop the tray already holding port
-  8766 before spawning the replacement. The new tray's port-owner guard then
-  blocks on a Windows dialog, which an unattended or tool-driven deploy cannot
-  answer — so the deploy appears to hang while the OLD binary is still serving.
-  Stop the port-8766 owner by PID first, clear any stale `data/todoness.pid`
-  left by a force-kill, then start the tray. Observed 2026-08-24.
 - Main and worktree DB files do not synchronize. One must be explicitly
-  authoritative during a rollout.
+  authoritative during a rollout. Production is
+  `C:\Users\phtopnes\Riveter\app\data\claudetodo.db`; the copy that used to be
+  live in this worktree is renamed `claudetodo.superseded-20260824.db` so
+  nothing can serve it by accident.
 - `task_actions` latest row is ordered by integer `id`, not second-precision
   timestamps.
 - Cowork `tool_trace[].ok` means the call returned, not that a write executed.
