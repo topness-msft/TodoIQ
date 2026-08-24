@@ -108,6 +108,35 @@ finding: "could not check" and "checked, found nothing" are different answers.
 `may_be_resolved` is an inference and renders as "Looks done?" with a magnifier
 — never the completion tick, and nothing auto-completes a task from it.
 
+## `tasks.source_locator` contract
+`source_id` is a dedup key (`{type}::{person}::{subject_first_50}`), NOT a
+locator — different threads about one subject collide by design. `source_locator`
+is the re-openable identifier: JSON, one plain column (no CHECK, so it never
+triggers `_rebuild_tasks_constraints`), shape owned by
+`src/services/source_locator.py`.
+
+`db.backfill_source_locators` runs once at startup and recovers locators from
+links already in `source_url` (1,386 of 2,434 live tasks; 1,277 thread-readable).
+It is idempotent and only touches rows whose column is empty, so anything
+captured at creation is never overwritten. Deriving on read instead would put
+~1,900 regexes on every `list_tasks` call; `_row_to_dict` keeps a single-URL
+fallback for tasks created after the pass.
+
+Honesty rules baked into the shape:
+- A `teams_channel` needs team_id + channel_id + message_id. A partial triple is
+  refused — it would read as a locator and locate nothing.
+- `internet_message_id` and `event_id` are reserved and stay null. The Outlook→
+  Graph message id and meeting→Calendar event id mappings are unresolved spikes.
+- A meeting is NOT thread-readable: its link yields the meeting chat, not the event.
+- `"captured"` (recorded at creation) is never the fallback for an unrecognised
+  value; reconstructions are always `"derived_from_url"`.
+
+`/todo-refresh` writes this inline from bash and cannot import the module, so
+`tests/test_source_locator.py::TestProducerReaderContract` holds writer and
+reader together. Delivery paths (`cowork_runner`, `structured_delivery`) still
+call `parse_source_url` directly — this module wraps it, and replacing those
+broadcast-audience callers needs its own parity audit.
+
 ## Deploy
 - Environments:
   - Dev/dogfood: `http://localhost:8768` from this worktree.
