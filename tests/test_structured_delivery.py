@@ -1505,57 +1505,111 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertTrue(start.startswith("2026-08-26T13:05"))
         self.assertTrue(end.startswith("2026-08-31T11:00"))
 
-    def test_oof_slot_is_dropped_and_free_slot_survives(self):
+    def test_conflicted_slot_is_offered_rather_than_withdrawn(self):
+        """A meeting with three of five is often still the right call.
+
+        Withdrawing every conflicted slot left the user with nothing and no way
+        to say who matters. The slot is kept, ranked below cleaner ones, and
+        labelled with who cannot make it so the choice is informed.
+        """
         slots = [
             {"value": "0", "label": "Wed", "start": "2026-08-26T13:05:00-04:00",
              "end": "2026-08-26T13:30:00-04:00", "timezone": "Eastern Standard Time",
              "availability": {"jabali@microsoft.com": "free"}},
-            {"value": "1", "label": "Mon", "start": "2026-08-26T15:05:00-04:00",
+            {"value": "1", "label": "Later", "start": "2026-08-26T15:05:00-04:00",
              "end": "2026-08-26T15:30:00-04:00", "timezone": "Eastern Standard Time",
              "availability": {"jabali@microsoft.com": "free"}},
         ]
         schedules = [{
             "scheduleId": "jabali@microsoft.com",
-            # 12:00 onward in 5-minute steps: OOF until 14:00, then free.
             "availabilityView": ("3" * 24) + ("0" * 48),
         }]
-        kept, dropped = structured_delivery._apply_verified_availability(
+        ranked = structured_delivery._apply_verified_availability(
             ["jabali@microsoft.com"], slots, schedules, self.VIEW_START, 5
         )
 
-        self.assertEqual([s["value"] for s in kept], ["1"])
-        self.assertEqual(len(dropped), 1)
-        self.assertIn("jabali@microsoft.com", dropped[0]["conflicts"])
-        self.assertEqual(dropped[0]["conflicts"]["jabali@microsoft.com"], "oof")
+        self.assertEqual(len(ranked), 2, "no slot may be silently withdrawn")
+        # The clean slot outranks the one nobody can attend.
+        self.assertEqual(ranked[0]["value"], "1")
+        self.assertEqual(ranked[1]["value"], "0")
+        self.assertEqual(
+            ranked[1]["conflicts"], {"jabali@microsoft.com": "oof"}
+        )
+        self.assertFalse(ranked[0].get("conflicts"))
 
-    def test_busy_attendee_keeps_the_slot_but_corrects_the_claim(self):
-        slots = [{
-            "value": "0", "label": "Wed", "start": "2026-08-26T12:05:00-04:00",
-            "end": "2026-08-26T12:30:00-04:00", "timezone": "Eastern Standard Time",
-            "availability": {"a@x.com": "free", "b@x.com": "free"},
-        }]
-        schedules = [
-            {"scheduleId": "a@x.com", "availabilityView": "0" * 24},
-            {"scheduleId": "b@x.com", "availabilityView": "2" * 24},
+    def test_slots_rank_by_how_many_cannot_attend(self):
+        slots = [
+            {"value": "two-out", "label": "two-out",
+             "start": "2026-08-26T12:05:00-04:00",
+             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
+            {"value": "one-out", "label": "one-out",
+             "start": "2026-08-26T13:05:00-04:00",
+             "end": "2026-08-26T13:30:00-04:00", "availability": {}},
+            {"value": "none-out", "label": "none-out",
+             "start": "2026-08-26T14:05:00-04:00",
+             "end": "2026-08-26T14:30:00-04:00", "availability": {}},
         ]
-        kept, dropped = structured_delivery._apply_verified_availability(
+        # From 12:00 in 5-minute steps: a is busy for one hour, b for two.
+        schedules = [
+            {"scheduleId": "a@x.com", "availabilityView": ("2" * 12) + ("0" * 60)},
+            {"scheduleId": "b@x.com", "availabilityView": ("2" * 24) + ("0" * 48)},
+        ]
+        ranked = structured_delivery._apply_verified_availability(
             ["a@x.com", "b@x.com"], slots, schedules, self.VIEW_START, 5
         )
 
-        self.assertEqual(len(kept), 1)
-        self.assertEqual(dropped, [])
-        # The claim is corrected, not left as the worker wrote it.
-        self.assertEqual(kept[0]["availability"]["b@x.com"], "busy")
-        self.assertEqual(kept[0]["availability"]["a@x.com"], "free")
+        self.assertEqual(
+            [entry["value"] for entry in ranked],
+            ["none-out", "one-out", "two-out"],
+        )
 
-    def test_description_stops_claiming_everyone_is_available(self):
+    def test_out_of_office_ranks_below_merely_busy(self):
+        slots = [
+            {"value": "busy", "label": "b", "start": "2026-08-26T12:05:00-04:00",
+             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
+            {"value": "oof", "label": "o", "start": "2026-08-26T13:05:00-04:00",
+             "end": "2026-08-26T13:30:00-04:00", "availability": {}},
+        ]
+        schedules = [{
+            "scheduleId": "a@x.com",
+            "availabilityView": ("2" * 12) + ("3" * 60),
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"], slots, schedules, self.VIEW_START, 5
+        )
+        self.assertEqual([entry["value"] for entry in ranked], ["busy", "oof"])
+
+    def test_tentative_is_not_a_conflict(self):
+        """The standing rule treats tentative as bookable."""
+        slots = [{
+            "value": "0", "label": "t", "start": "2026-08-26T12:05:00-04:00",
+            "end": "2026-08-26T12:30:00-04:00", "availability": {},
+        }]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            slots,
+            [{"scheduleId": "a@x.com", "availabilityView": "1" * 24}],
+            self.VIEW_START,
+            5,
+        )
+        self.assertFalse(ranked[0].get("conflicts"))
+        self.assertEqual(ranked[0]["availability"]["a@x.com"], "tentative")
+
+    def test_description_names_who_cannot_attend(self):
         slot = {
-            "value": "0", "label": "Wed",
-            "availability": {"a@x.com": "free", "b@x.com": "busy"},
+            "value": "0",
+            "availability": {"a@x.com": "oof", "b@x.com": "busy",
+                             "c@x.com": "free"},
+            "conflicts": {"a@x.com": "oof", "b@x.com": "busy"},
         }
-        text = structured_delivery._availability_description(slot)
+        names = {"a@x.com": "Jason Balingit", "b@x.com": "Ed Ryan"}
+        text = structured_delivery._availability_description(slot, names)
+
+        self.assertIn("Jason Balingit", text)
+        self.assertIn("out of office", text)
+        self.assertIn("Ed Ryan", text)
+        self.assertIn("busy", text)
         self.assertNotIn("All confirmed attendees are available", text)
-        self.assertIn("b@x.com", text)
 
     def test_description_may_claim_availability_when_all_are_free(self):
         slot = {"value": "0", "availability": {"a@x.com": "free"}}
@@ -1671,7 +1725,7 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertEqual(seen[0][0], ["a@x.com"])
         self.assertEqual(len(seen[0][1]), 2)
 
-    def test_preview_withdraws_a_slot_the_probe_says_is_oof(self):
+    def test_preview_ranks_a_conflicted_slot_below_a_clear_one(self):
         def probe(attendees, slots):
             # Wednesday OOF, Thursday free, measured from the first slot start.
             return ([{
@@ -1680,10 +1734,16 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             }], "2099-08-26T17:05:00+00:00")
 
         _action, updated = self._calendar_preview(probe)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        interaction = json.loads(updated["blocked_question"])
+        evidence = interaction["schedule_evidence"]
 
         self.assertTrue(evidence["availability_verified"])
-        self.assertEqual([s["value"] for s in evidence["slots"]], ["1"])
+        # Both survive; the clear one leads and the other says who is missing.
+        self.assertEqual([s["value"] for s in evidence["slots"]], ["1", "0"])
+        options = interaction["questions"][0]["options"]
+        self.assertEqual(options[0]["description"],
+                         "All confirmed attendees are available.")
+        self.assertIn("out of office", options[1]["description"])
 
     def test_preview_records_when_availability_could_not_be_measured(self):
         _action, updated = self._calendar_preview(lambda a, s: (None, ""))
@@ -1693,19 +1753,24 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         # Unmeasured still offers the times; it simply stops calling them checked.
         self.assertEqual(len(evidence["slots"]), 2)
 
-    def test_preview_fails_closed_when_every_slot_conflicts(self):
-        """An empty chooser is worse than an honest dead end."""
+    def test_preview_offers_the_best_of_a_bad_set_and_invites_steering(self):
+        """Nobody is free. Offer the least-bad times and say who is missing."""
         def probe(attendees, slots):
             return ([{
                 "scheduleId": "a@x.com", "availabilityView": "3" * 576,
             }], "2099-08-26T17:05:00+00:00")
 
         _action, updated = self._calendar_preview(probe)
+        interaction = json.loads(updated["blocked_question"])
 
-        self.assertEqual(updated["state"], "failed")
-        self.assertIn("availability", (updated["error"] or "").lower())
-        # It must not leave a chooser offering nothing.
-        self.assertFalse(updated["blocked_question"])
+        self.assertEqual(updated["state"], "previewing")
+        options = interaction["questions"][0]["options"]
+        self.assertEqual(len(options), 2, "the user must still have a choice")
+        for option in options:
+            self.assertIn("out of office", option["description"])
+        question = interaction["questions"][0]["question"]
+        self.assertIn("No time suits everyone", question)
+        self.assertIn("matters most", question)
 
 
 class TestTeamsDestinationDiscovery(StructuredDeliveryTestBase):

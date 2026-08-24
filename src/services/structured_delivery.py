@@ -356,9 +356,17 @@ AVAILABILITY_CODES = {
     "4": "workingElsewhere",
 }
 AVAILABILITY_SEVERITY = ["free", "workingElsewhere", "tentative", "busy", "oof"]
-# Only these keep a slot offerable. OOF is a deliberate absence, not a busy
-# calendar, so a slot containing one is withdrawn rather than annotated.
-BLOCKING_AVAILABILITY = {"oof"}
+# What actually stops someone attending. The standing rule treats a tentative
+# block as bookable, and working elsewhere still means working, so neither
+# counts against a slot. OOF weighs heavier than busy: a meeting can be moved,
+# a holiday cannot.
+CONFLICT_WEIGHTS = {"busy": 1, "oof": 2}
+AVAILABILITY_PHRASES = {
+    "oof": "out of office",
+    "busy": "busy",
+    "tentative": "tentative",
+    "workingElsewhere": "working elsewhere",
+}
 AVAILABILITY_INTERVAL_MINUTES = 5
 # getSchedule is the one write-shaped call this worker may make, and it writes
 # nothing. Riveter mints it; the model never chooses to call it and never sees
@@ -530,11 +538,13 @@ def _apply_verified_availability(
     schedules: list,
     view_start: str,
     interval_minutes: int,
-) -> tuple[list, list]:
-    """Replace claimed availability with measured availability.
+) -> list:
+    """Replace claimed availability with measured availability, best first.
 
-    Returns the slots still worth offering and those withdrawn, each with the
-    conflicts that withdrew them so the card can say why.
+    Nothing is withdrawn. A time that suits three of five people is often the
+    right meeting to hold, and withdrawing it leaves the user with no options
+    and no way to say who matters. Slots are ranked so the cleanest lead, and
+    each carries the conflicts that cost it its place.
     """
     views = {}
     for entry in schedules or []:
@@ -542,8 +552,8 @@ def _apply_verified_availability(
         if email:
             views[email] = str(entry.get("availabilityView") or "")
 
-    kept, dropped = [], []
-    for slot in slots or []:
+    ranked = []
+    for position, slot in enumerate(slots or []):
         measured, conflicts = {}, {}
         for email in attendees:
             key = str(email).strip().lower()
@@ -557,30 +567,48 @@ def _apply_verified_availability(
                 measured[key] = str(slot.get("availability", {}).get(key, "unknown"))
                 continue
             measured[key] = status
-            if status in BLOCKING_AVAILABILITY:
+            if status in CONFLICT_WEIGHTS:
                 conflicts[key] = status
         updated = dict(slot)
         updated["availability"] = measured
         if conflicts:
             updated["conflicts"] = conflicts
-            dropped.append(updated)
         else:
-            kept.append(updated)
-    return kept, dropped
+            updated.pop("conflicts", None)
+        cost = sum(CONFLICT_WEIGHTS[status] for status in conflicts.values())
+        # Cost first, then the worker's own ordering, which carries its sense
+        # of which times suit the task.
+        ranked.append((cost, len(conflicts), position, updated))
+
+    ranked.sort(key=lambda entry: entry[:3])
+    return [entry[3] for entry in ranked]
 
 
-def _availability_description(slot: dict) -> str:
-    """Say what the calendars actually show, not what we hoped they showed."""
-    availability = slot.get("availability") or {}
-    notable = sorted(
-        email for email, status in availability.items()
-        if str(status).strip().lower() not in {"free", ""}
-    )
-    if not notable:
-        return "All confirmed attendees are available."
+def _availability_description(slot: dict, names: dict | None = None) -> str:
+    """Say who cannot make it, by name, so the choice is an informed one."""
+    conflicts = slot.get("conflicts") or {}
+    if not conflicts:
+        availability = slot.get("availability") or {}
+        soft = sorted(
+            email for email, status in availability.items()
+            if str(status).strip().lower() not in {"free", ""}
+        )
+        if not soft:
+            return "All confirmed attendees are available."
+        lookup = names or {}
+        return "; ".join(
+            f"{lookup.get(email, email)} is "
+            f"{AVAILABILITY_PHRASES.get(str(availability[email]).strip().lower(), availability[email])}"
+            for email in soft
+        ) + "."
+    lookup = names or {}
     parts = []
-    for email in notable:
-        parts.append(f"{email} is {str(availability[email]).strip().lower()}")
+    for email in sorted(conflicts):
+        status = str(conflicts[email]).strip().lower()
+        parts.append(
+            f"{lookup.get(email, email)} is "
+            f"{AVAILABILITY_PHRASES.get(status, status)}"
+        )
     return "; ".join(parts) + "."
 # How long a Teams post stays recoverable. Teams cannot be stamped with a key,
 # so recovery works by reading recent messages and matching sender and body.
@@ -975,53 +1003,49 @@ def finish_preview(
             # out of office all day.
             schedules, view_start = fetch_availability(attendees, evidence_slots)
             availability_verified = bool(schedules)
-            withdrawn: list = []
             if availability_verified:
-                evidence_slots, withdrawn = _apply_verified_availability(
+                evidence_slots = _apply_verified_availability(
                     attendees, evidence_slots, schedules, view_start,
                     AVAILABILITY_INTERVAL_MINUTES,
                 )
-            else:
-                # Unmeasured is not the same as free. Say so, and let the
-                # certifier refuse the selection rather than book on a guess.
-                for slot_record in evidence_slots:
-                    if any(
-                        str(status).strip().lower() in BLOCKING_AVAILABILITY
-                        for status in slot_record["availability"].values()
-                    ):
-                        withdrawn.append(slot_record)
-                evidence_slots = [
-                    slot_record for slot_record in evidence_slots
-                    if slot_record not in withdrawn
-                ]
+            attendee_names = {
+                str(person.get("email") or "").strip().lower():
+                    str(person.get("name") or "").strip()
+                for person in (payload.get("attendees") or [])
+                if isinstance(person, dict) and person.get("name")
+            }
             options = [
                 {
                     "label": slot_record["label"],
                     "value": slot_record["value"],
-                    "description": _availability_description(slot_record),
+                    "description": _availability_description(
+                        slot_record, attendee_names
+                    ),
                 }
                 for slot_record in evidence_slots
             ]
             if not options:
-                # Every candidate conflicted. An empty chooser is worse than an
-                # honest dead end, so the card stops asking and says why.
-                blocked = sorted({
-                    f"{email} is {status}"
-                    for slot_record in withdrawn
-                    for email, status in (slot_record.get("conflicts") or {}).items()
-                })
-                raise ValueError(
-                    "No proposed time survived an availability check"
-                    + (f" ({'; '.join(blocked)})" if blocked else "")
-                )
+                raise ValueError("Calendar preview must contain one to three slots")
+            contested = [
+                slot_record for slot_record in evidence_slots
+                if slot_record.get("conflicts")
+            ]
             interaction = {
                 "invocation_id": f"structured-calendar-{action_id}",
                 "questions": [{
                     "id": "0",
                     "header": "Select & create meeting",
                     "question": (
-                        "Choose one verified time, then press Select & create "
-                        "meeting. There is no second confirmation."
+                        # When nobody is free the honest move is to say so and
+                        # invite steering, rather than hide the conflict or
+                        # offer nothing at all.
+                        "No time suits everyone. Times are ordered by who can "
+                        "attend, and each says who cannot. Choose the best one, "
+                        "or say whose availability matters most and I will look "
+                        "again. There is no second confirmation."
+                        if contested and len(contested) == len(evidence_slots)
+                        else "Choose one verified time, then press Select & "
+                        "create meeting. There is no second confirmation."
                     ),
                     "multi_select": False,
                     "options": options,
