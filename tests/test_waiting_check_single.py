@@ -80,16 +80,23 @@ class TestSingleTaskWaitingCheck(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual({entry["label"] for entry in self.launched},
                          {"waiting-check"})
 
-    def test_a_single_task_check_is_not_given_the_whole_fleet_timeout(self):
-        # One task should not sit behind a timeout budgeted for all of them.
+    def test_a_single_task_check_gets_a_realistic_budget(self):
+        """180s killed a real run before it could write anything.
+
+        The cost of a check is WorkIQ latency, not task count: it chains a
+        presence probe, a thread read and possibly a person-scoped fallback,
+        and individual WorkIQ calls in this project have been measured at
+        95-250s. When the subprocess is killed mid-run nothing is written at
+        all, so the card keeps showing its previous answer under the previous
+        timestamp - the confusion the check exists to remove.
+        """
+        from src.handlers.sync_api import SINGLE_WAITING_CHECK_TIMEOUT
+
         task = create_task(title="Waiting on Jason", status="waiting")
         self._post({"waiting_check": True, "task_id": task["id"]})
-        single = self.launched[0]["timeout"]
-        self._post({"waiting_check": True})
-        whole = self.launched[1]["timeout"]
-        self.assertIsNotNone(single)
-        if whole is not None:
-            self.assertLess(single, whole)
+        self.assertEqual(self.launched[0]["timeout"], SINGLE_WAITING_CHECK_TIMEOUT)
+        # Comfortably above the slowest single-task run observed (200s+).
+        self.assertGreaterEqual(SINGLE_WAITING_CHECK_TIMEOUT, 300)
 
     def test_an_unknown_task_is_refused_rather_than_run_globally(self):
         # Falling back to the global check would spend a WorkIQ run per waiting

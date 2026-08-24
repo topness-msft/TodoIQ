@@ -302,6 +302,70 @@ class TestCheckNowChecksThisTask:
         finally:
             _delete(page, base_url, task_id)
 
+class TestARunThatFailedIsNotSilent:
+    """A check that never completed must not look like one that found nothing.
+
+    The stored contract already separates those, but only when the command gets
+    far enough to write. When the SUBPROCESS is killed - a timeout, a crash -
+    nothing is written at all, and the poller simply refetched and reset the
+    button. The card then showed its previous answer under its previous
+    timestamp, which reads as "checked just now, nothing changed".
+
+    Observed live: a Check Now run was killed by a 180s timeout and the card
+    silently kept a four-hour-old result. /api/runner-status reports the error
+    in `_completed`; it was being discarded.
+    """
+
+    def _finish_with(self, page: Page, task_id: int, completed: dict):
+        page.route("**/api/sync-status", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"ok": True, "message": "started"})))
+        page.route("**/api/runner-status", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"_completed": {"waiting-check": completed}})))
+        page.evaluate(f"requestWaitingCheckSingle({task_id})")
+        page.wait_for_timeout(6500)
+
+    def test_a_timed_out_run_says_so(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Timeout probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "quiet", status="no_activity", summary="No response since the 1st"))
+            self._finish_with(page, task_id, {
+                "exit_code": -1, "error": "Process timed out after 3 minutes"})
+            text = page.get_by_test_id("waiting-signal").inner_text().lower()
+            assert "couldn't check" in text or "could not check" in text, text
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_the_previous_answer_is_not_presented_as_current(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Stale probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "looks_done", status="may_be_resolved", summary="looked done"))
+            self._finish_with(page, task_id, {
+                "exit_code": -1, "error": "Process timed out after 3 minutes"})
+            text = page.get_by_test_id("waiting-signal").inner_text().lower()
+            assert "looks done" not in text, text
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_a_clean_run_does_not_raise_a_failure(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Clean probe")
+        try:
+            _open_with_signal(page, base_url, task_id, _sig(
+                "quiet", status="no_activity", summary="No response since the 1st"))
+            self._finish_with(page, task_id, {"exit_code": 0, "error": None})
+            # A clean run refetches, so the card legitimately reverts to the
+            # server's view of this unseeded task. What matters is that no
+            # failure is claimed.
+            text = page.get_by_test_id("waiting-signal").inner_text().lower()
+            assert "couldn't check" not in text, text
+            assert "could not check" not in text, text
+        finally:
+            _delete(page, base_url, task_id)
+
+
 class TestTheListRowAgrees:
     """The row icon and the card must not tell different stories."""
 

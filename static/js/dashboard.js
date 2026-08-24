@@ -2420,6 +2420,30 @@ function renderWaitingActivityCard(task) {
     var checkBtn = '<button class="btn btn-sm" id="check-now-btn" onclick="requestWaitingCheckSingle('
         + task.id + ')" style="margin-left:auto">Check Now</button>';
 
+    // A run that was killed never wrote anything, so it cannot appear in the
+    // stored contract. Present it in the same language as a recorded failure:
+    // the previous finding is kept, but visibly as the PREVIOUS one.
+    if (_waitingCheckFailure && _waitingCheckFailure.taskId === task.id) {
+        var prior = '';
+        if (activity && activity.summary) {
+            prior = '<div class="waiting-activity-previous">Earlier result ('
+                + timeAgo(activity.checked_at) + '): '
+                + escapeHtml(activity.summary) + '</div>';
+        }
+        return '<div class="waiting-activity-card">'
+            + '<div class="detail-label">Activity Check</div>'
+            + '<div class="waiting-activity-body">'
+            + '<span class="waiting-activity-status activity-signal-check_failed" '
+            + 'data-testid="waiting-signal">'
+            + WAITING_SIGNAL_ICONS.check_failed + ' ' + escapeHtml("Couldn't check")
+            + '</span>' + checkBtn
+            + '</div>'
+            + '<div class="waiting-activity-summary">'
+            + escapeHtml(_waitingCheckFailure.message) + '</div>'
+            + prior
+            + '</div>';
+    }
+
     if (sig.signal === 'unchecked' || !activity) {
         if (task.status === 'waiting') {
             return '<div class="waiting-activity-card">'
@@ -2488,6 +2512,14 @@ function renderWaitingActivityCard(task) {
 }
 
 var _waitingCheckPollTimer = null;
+// Which task the in-flight check is for, and how the last one failed. A run
+// that is killed - a timeout, a crash - never reaches the point where the
+// command writes its result, so the stored contract cannot record it. Without
+// this the poller just refetched and reset the button, leaving the previous
+// answer on screen under its previous timestamp: "checked just now, nothing
+// changed". Observed live when a 180s timeout killed a real run.
+var _waitingCheckTaskId = null;
+var _waitingCheckFailure = null;
 
 function requestWaitingCheck(taskId) {
     var btn = document.getElementById('waiting-check-btn');
@@ -2496,6 +2528,10 @@ function requestWaitingCheck(taskId) {
         btn.classList.add('syncing');
         btn.title = 'Checking activity...';
     }
+
+    // A new attempt clears the previous verdict about the previous attempt.
+    _waitingCheckTaskId = taskId || null;
+    _waitingCheckFailure = null;
 
     // With a task id the server checks only that task. Without one it checks
     // every waiting task, which is what the header button means.
@@ -2614,6 +2650,17 @@ function _startWaitingCheckPoll() {
                         btn.classList.remove('syncing');
                         btn.title = 'Check for activity from key people';
                     }
+                    // "Finished" is not "succeeded". A killed run writes
+                    // nothing, so the only record of it is here.
+                    var done = (data._completed || {})['waiting-check'];
+                    if (done && (done.error || done.exit_code)) {
+                        _waitingCheckFailure = {
+                            taskId: _waitingCheckTaskId,
+                            message: done.error
+                                || ('The check ended with code ' + done.exit_code + '.')
+                        };
+                    }
+                    _resetCheckNowButton();
                     // Re-fetch tasks and refresh detail pane
                     fetchTasks();
                 }

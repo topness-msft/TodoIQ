@@ -17,9 +17,18 @@ from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 
 logger = logging.getLogger(__name__)
 
-# One task should not wait behind a budget sized for the whole list. The global
-# check has no explicit timeout and falls back to claude_runner's default.
-SINGLE_WAITING_CHECK_TIMEOUT = 180
+# A single-task check gets a generous budget, not a small one.
+#
+# This was first set to 180s on the reasoning that one task should not wait
+# behind a budget sized for the whole list. That reasoning was wrong: the cost
+# is dominated by WorkIQ latency, not by how many tasks are being checked. A
+# check chains several calls - presence, then the thread read, then possibly a
+# person-scoped fallback - and this project has measured individual WorkIQ
+# calls at 95-250s. Observed single-task runs: 155s, and one that blew the 180s
+# limit outright, which killed the subprocess before it could write anything -
+# leaving the card showing its previous answer with the previous timestamp,
+# which is the exact confusion the check exists to remove.
+SINGLE_WAITING_CHECK_TIMEOUT = 420
 
 
 def is_sync_running() -> bool:
