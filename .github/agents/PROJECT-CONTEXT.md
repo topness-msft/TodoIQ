@@ -116,7 +116,8 @@ triggers `_rebuild_tasks_constraints`), shape owned by
 `src/services/source_locator.py`.
 
 `db.backfill_source_locators` runs once at startup and recovers locators from
-links already in `source_url` (1,386 of 2,434 live tasks; 1,277 thread-readable).
+links already in `source_url` (1,775 of 2,434 live tasks, all thread-readable:
+1,277 Teams chats, 411 meetings, 87 email).
 It is idempotent and only touches rows whose column is empty, so anything
 captured at creation is never overwritten. Deriving on read instead would put
 ~1,900 regexes on every `list_tasks` call; `_row_to_dict` keeps a single-URL
@@ -125,11 +126,26 @@ fallback for tasks created after the pass.
 Honesty rules baked into the shape:
 - A `teams_channel` needs team_id + channel_id + message_id. A partial triple is
   refused — it would read as a locator and locate nothing.
-- `internet_message_id` and `event_id` are reserved and stay null. The Outlook→
-  Graph message id and meeting→Calendar event id mappings are unresolved spikes.
-- A meeting is NOT thread-readable: its link yields the meeting chat, not the event.
 - `"captured"` (recorded at creation) is never the fallback for an unrecognised
   value; reconstructions are always `"derived_from_url"`.
+- `is_thread_readable` is defined as "`read_plan` returns something", so a caller
+  cannot be told a thread is readable and then handed nothing to read.
+
+`read_plan` owns the endpoint sequences, all verified against live Graph on
+2026-08-24 (the recurring failure here is a worker shown no endpoint inventing
+none):
+- `teams_chat` — `/me/chats/{conversation_id}/messages`
+- `teams_channel` — `/teams/{team}/channels/{channel}/messages/{id}/replies`
+- `email` — `/me/messages/{ItemID}` for `conversationId`, then
+  `/me/messages?$filter=conversationId eq '...'`. **Never add `$orderby`** to
+  that filter: Graph rejects the pair as `InefficientFilter` (400). This is one
+  conversation by id, not a mailbox scan, so it stays inside the email policy.
+- `meeting` — `/me/events/{eventId}` for `onlineMeeting.joinUrl`, extract
+  `19:meeting_...@thread.v2`, then read that chat.
+
+Outlook `?ItemID=` is a Graph message id and Teams `/l/meeting/details?eventId=`
+is a Graph event id. Both were once recorded here as unresolved spikes with the
+fields left null; probing settled both, and the nulls were costing 387 tasks.
 
 `/todo-refresh` writes this inline from bash and cannot import the module, so
 `tests/test_source_locator.py::TestProducerReaderContract` holds writer and
