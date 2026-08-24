@@ -198,6 +198,12 @@ finding: "could not check" and "checked, found nothing" are different answers.
   5. Verify task count, latest sync timestamp and all probes above.
 
 ## Known gotchas / latent bugs
+- `install_startup.py` "start now" does NOT stop the tray already holding port
+  8766 before spawning the replacement. The new tray's port-owner guard then
+  blocks on a Windows dialog, which an unattended or tool-driven deploy cannot
+  answer — so the deploy appears to hang while the OLD binary is still serving.
+  Stop the port-8766 owner by PID first, clear any stale `data/todoness.pid`
+  left by a force-kill, then start the tray. Observed 2026-08-24.
 - Main and worktree DB files do not synchronize. One must be explicitly
   authoritative during a rollout.
 - `task_actions` latest row is ordered by integer `id`, not second-precision
