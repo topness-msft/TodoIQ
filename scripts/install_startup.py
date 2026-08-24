@@ -82,6 +82,78 @@ Register-ScheduledTask -TaskName "{TASK_NAME}" -Action $action -Trigger $trigger
     return True
 
 
+def confirm_this_checkout(assume_yes=False):
+    """Show what is about to be pinned, and stop if it looks wrong.
+
+    PROJECT_ROOT comes from this script's own location, so running the
+    installer from an old copy of the repo silently registers that copy to
+    start at every logon - which is how the tray ends up serving old code with
+    a different database. Say which checkout this is, and refuse a doubtful one
+    unless the user insists.
+    """
+    try:
+        from src.services.instance_guard import (
+            describe_checkout, stale_checkout_warning,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Note: could not inspect this checkout ({exc}).")
+        return True
+
+    described = describe_checkout(PROJECT_ROOT)
+    print("This will run at every logon:")
+    print(f"  Directory: {described['root']}")
+    print(f"  Branch:    {described['branch'] or 'unknown'}")
+    print(f"  Commit:    {described['commit'] or 'unknown'}")
+    if described["behind"]:
+        print(f"  Behind:    {described['behind']} commits behind origin/main")
+    print()
+
+    warning = stale_checkout_warning(described)
+    if not warning:
+        return True
+
+    print(warning)
+    print()
+    if assume_yes:
+        print("  Continuing anyway (--yes).")
+        return True
+    answer = input("Register this checkout anyway? [y/N] ").strip().lower()
+    if answer in ("y", "yes"):
+        return True
+    print("Nothing was changed. Re-run the installer from the checkout you "
+          "want to start at logon.")
+    return False
+
+
+def stop_running_trays():
+    """Stop any tray already running, from any checkout.
+
+    Without this the installer starts a replacement while the incumbent still
+    holds port 8766. The new tray's guard refuses - correctly - but does so via
+    a dialog, so an unattended install appears to hang while the OLD binary
+    goes on serving. Observed twice before it was written down.
+    """
+    try:
+        from src.services.instance_guard import (
+            stop_tray_processes, tray_process_ids,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Note: could not look for a running tray ({exc}).")
+        return
+
+    pids = tray_process_ids()
+    if not pids:
+        return
+    print(f"Stopping the tray already running (PID {', '.join(map(str, pids))})...")
+    stopped = stop_tray_processes(pids)
+    for pid in pids:
+        if pid not in stopped:
+            print(f"  WARNING: could not stop PID {pid}; it may still hold port 8766.")
+    # A forced stop never clears the PID file, which is what start_tray_now
+    # cleans up next.
+    time.sleep(1.5)
+
+
 def start_tray_now(pythonw):
     """Start the tray application immediately, and verify it actually came up.
 
@@ -137,6 +209,12 @@ def main():
     print("=" * 50)
     print()
 
+    assume_yes = "--yes" in sys.argv or "-y" in sys.argv
+
+    # Step 0: Say which checkout this is, and stop if it looks wrong.
+    if not confirm_this_checkout(assume_yes=assume_yes):
+        sys.exit(1)
+
     # Step 1: Check/install dependencies
     if not ensure_dependencies():
         sys.exit(1)
@@ -154,8 +232,13 @@ def main():
     print()
 
     # Step 4: Optionally start now
-    answer = input("Start TodoNess tray app now? [Y/n] ").strip().lower()
+    if assume_yes:
+        answer = "y"
+    else:
+        answer = input("Start TodoNess tray app now? [Y/n] ").strip().lower()
     if answer in ("", "y", "yes"):
+        # Replace the incumbent rather than racing it for the port.
+        stop_running_trays()
         start_tray_now(pythonw)
     else:
         print("Skipped. The tray app will start at next logon.")

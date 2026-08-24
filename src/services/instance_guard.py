@@ -209,6 +209,160 @@ def _tcp_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _git(root: Path, *args: str) -> str | None:
+    """Run a git command in *root*, or None if git/the repo is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
+def describe_checkout(root) -> dict:
+    """What is in this directory, so the installer can say what it will pin.
+
+    `install_startup.py` derives PROJECT_ROOT from its own location, so running
+    it from an old copy silently registers that copy to run at every logon.
+    Reporting branch, commit and how far behind it is turns a silent choice into
+    a visible one. Never raises: this only informs a warning.
+    """
+    root = Path(root)
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    commit = _git(root, "rev-parse", "--short", "HEAD")
+
+    # "true" only inside a linked worktree, not the main checkout.
+    is_worktree = _git(root, "rev-parse", "--is-inside-work-tree") == "true" and (
+        _git(root, "rev-parse", "--git-common-dir")
+        not in (None, _git(root, "rev-parse", "--git-dir"))
+    )
+
+    behind = 0
+    counts = _git(root, "rev-list", "--count", "HEAD..origin/main")
+    if counts and counts.isdigit():
+        behind = int(counts)
+
+    return {
+        "root": root,
+        "branch": branch,
+        "commit": commit,
+        "is_worktree": bool(is_worktree),
+        "behind": behind,
+    }
+
+
+def stale_checkout_warning(described: dict) -> str | None:
+    """Reasons this directory is a poor thing to start at every logon.
+
+    Returns None when it looks like a current, durable checkout of the shipping
+    branch. Otherwise a message naming every reason, so the installer can ask
+    before pinning it rather than after.
+    """
+    root = described.get("root")
+    branch = described.get("branch")
+    commit = described.get("commit")
+    reasons = []
+
+    if not branch or not commit:
+        reasons.append(
+            "This does not look like a git checkout, so there is no way to tell "
+            "which version it holds."
+        )
+    else:
+        if branch != "main":
+            reasons.append(
+                f"It is on branch '{branch}', not 'main'. The tray would serve "
+                f"whatever that branch holds, forever, without saying so."
+            )
+        if described.get("behind"):
+            reasons.append(
+                f"It is {described['behind']} commits behind origin/main."
+            )
+    if described.get("is_worktree"):
+        reasons.append(
+            "It is a git worktree. Worktrees are disposable - when this one is "
+            "removed the tray stops working, or quietly starts running an older "
+            "copy instead."
+        )
+
+    if not reasons:
+        return None
+    return (
+        f"This checkout is a questionable thing to run at every logon:\n\n"
+        f"    {root}\n\n"
+        + "\n".join(f"  - {reason}" for reason in reasons)
+    )
+
+
+def tray_process_ids(_run=None) -> list[int]:
+    """PIDs of running tray processes, from any checkout.
+
+    The PID file only ever names an instance from the same directory, which is
+    precisely the case that does not need finding.
+    """
+    runner = _run or _query_processes
+    try:
+        raw = runner()
+    except Exception:
+        return []
+    pids = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def _query_processes() -> str | None:
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name like '%python%'\" | "
+            "Where-Object { $_.CommandLine -match 'todoness_tray' } | "
+            "Select-Object -ExpandProperty ProcessId",
+        ],
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def stop_tray_processes(pids, _kill=None) -> list[int]:
+    """Stop each running tray, and report which ones actually stopped.
+
+    The installer used to start a replacement without stopping the incumbent.
+    The new tray's port guard then refused - correctly - but by way of a dialog
+    that an unattended deploy cannot answer, so the install appeared to hang
+    while the OLD binary carried on serving. One process failing to stop must
+    not prevent the others being stopped, and a process that has already exited
+    is a success, not an error.
+    """
+    kill = _kill or _kill_pid
+    stopped = []
+    for pid in pids:
+        try:
+            kill(pid)
+        except Exception:
+            continue
+        stopped.append(pid)
+    return stopped
+
+
+def _kill_pid(pid: int) -> None:
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f"Stop-Process -Id {int(pid)} -Force -ErrorAction Stop"],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+
+
 def port_owner_message(port: int, probe: object = None) -> str | None:
     """Warn when the port is already served, whoever owns it.
 
