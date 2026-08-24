@@ -3552,15 +3552,14 @@ def schedule_interaction_is_certified(
         evidence.get("valid") is not True
         or evidence.get("source") not in CERTIFIED_SCHEDULE_SOURCES
         or evidence.get("query_backed") is not True
-        # The preview worker cannot reach getSchedule, so its availability is a
-        # claim until Riveter measures it. Task 2478 offered a time its own
-        # evidence called free while the attendee was out of office all day.
-        # Scheduler-sourced evidence measured availability itself and is
-        # unaffected.
-        or (
-            evidence.get("source") in SELF_REPORTED_SCHEDULE_SOURCES
-            and evidence.get("availability_verified") is not True
-        )
+        # Availability measurement is best-effort, not a gate. Riveter checks
+        # the calendars when it can, but the check runs through a subprocess
+        # that takes one to three minutes and frequently returns nothing, and
+        # refusing every unmeasured selection turned a useful check into a
+        # broken feature. The architect set the threshold explicitly: past a
+        # ~20% failure rate, honest labelling beats blocking. So an unverified
+        # preview still books -- it just says plainly that the times were not
+        # checked, and never claims everyone is available.
         or evidence.get("attendees") != _attendee_emails(attendees)
         or not isinstance(duration, int)
         or (

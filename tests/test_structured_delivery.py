@@ -1171,12 +1171,14 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             "telling the truth silently disables scheduling",
         )
 
-    def test_certifier_refuses_availability_that_was_never_measured(self):
-        """The task 2478 failure: a claim the worker could not have checked.
+    def test_certifier_does_not_gate_on_unmeasured_availability(self):
+        """Measurement is best-effort, not a veto.
 
-        A read-only preview cannot reach getSchedule, so "copilot-ask"
-        availability is only a claim. Until Riveter measures it, selecting the
-        slot must be refused rather than booked over someone's absence.
+        Riveter checks the calendars when it can, but that check runs through a
+        subprocess taking one to three minutes which frequently returns
+        nothing. Refusing every unmeasured selection did not make scheduling
+        safer, it made it unusable. The preview says plainly when the times
+        were not checked instead.
         """
         from src.services.cowork_runner import (
             schedule_attendees, schedule_duration_minutes,
@@ -1186,7 +1188,7 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         task, interaction = self._evidence_from_preview()
         interaction["schedule_evidence"]["availability_verified"] = False
 
-        self.assertFalse(schedule_interaction_is_certified(
+        self.assertTrue(schedule_interaction_is_certified(
             interaction,
             schedule_attendees(task),
             schedule_duration_minutes(task),
@@ -1914,10 +1916,36 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
     def test_preview_records_when_availability_could_not_be_measured(self):
         _action, updated = self._calendar_preview(lambda a, s: None)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        interaction = json.loads(updated["blocked_question"])
+        evidence = interaction["schedule_evidence"]
 
         self.assertFalse(evidence["availability_verified"])
         self.assertEqual(len(evidence["slots"]), 2)
+        # It must not imply these times were checked.
+        question = interaction["questions"][0]["question"]
+        self.assertIn("unchecked", question)
+        self.assertNotIn("verified time", question)
+
+    def test_an_unverified_preview_can_still_be_booked(self):
+        """Measurement is best-effort, not a gate.
+
+        The probe runs through a subprocess that takes minutes and often
+        returns nothing. Refusing every unmeasured selection turned a useful
+        check into a broken feature, so an unverified preview still books --
+        it just says plainly that the times were not checked.
+        """
+        from src.services.cowork_runner import schedule_interaction_is_certified
+
+        _action, updated = self._calendar_preview(lambda a, s: None)
+        interaction = json.loads(updated["blocked_question"])
+        self.assertFalse(
+            interaction["schedule_evidence"]["availability_verified"]
+        )
+        self.assertTrue(schedule_interaction_is_certified(
+            interaction,
+            [{"name": "A", "email": "a@x.com"}],
+            interaction["schedule_evidence"]["duration_minutes"],
+        ))
 
     def test_partly_measured_is_not_verified(self):
         """One day's window can succeed while another fails.

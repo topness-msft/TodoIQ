@@ -584,10 +584,11 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
             return None
         bounds.append((start.astimezone(timezone.utc), end.astimezone(timezone.utc)))
 
-    # One window per day. scheduleItems removed the resolution problem but not
-    # the span one: five days across five people is hundreds of meetings, and
-    # the worker cannot echo that back. A single day is a handful each, and
-    # three options on one day still cost one call.
+    # One window per day, run concurrently. scheduleItems removed the
+    # resolution problem but not the span one: five days across five people is
+    # hundreds of meetings, and the worker cannot echo that back. Sequential
+    # day-windows then blew the timeout at ~120s each, so they go in parallel
+    # and the wait is the slowest window rather than their sum.
     groups: dict = {}
     for index, (start, _end) in enumerate(bounds):
         groups.setdefault(start.date(), []).append(index)
@@ -602,20 +603,46 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
             max(bounds[i][1] for i in members).strftime("%Y-%m-%dT%H:%M:%S"),
         ))
 
-    try:
-        proc = _run(
-            availability_command(availability_prompt(attendees, windows)),
-            timeout=240,
-        )
-    except Exception as exc:  # noqa: BLE001 - a probe must never break preview
-        logger.warning("Availability probe failed to run: %s", exc)
+    def _measure_window(window):
+        # One retry: a window can come back unreadable for reasons that have
+        # nothing to do with its size -- a 30-minute window has failed where a
+        # five-hour one succeeded. A second ask is cheap next to reporting a
+        # whole preview unverified.
+        for attempt in (1, 2):
+            try:
+                proc = _run(
+                    availability_command(
+                        availability_prompt(attendees, [window])
+                    ),
+                    timeout=200,
+                )
+            except Exception as exc:  # noqa: BLE001 - never break preview
+                logger.warning(
+                    "Availability probe failed to run (attempt %s): %s",
+                    attempt, exc,
+                )
+                continue
+            parsed = (_parse_windows(proc.stdout or "") or {}).get(0)
+            if parsed:
+                return parsed
+            logger.warning(
+                "Availability window unreadable (attempt %s of 2)", attempt
+            )
         return None
-    measured = _parse_windows(proc.stdout or "")
-    if not measured:
+
+    if len(windows) == 1:
+        results = [_measure_window(windows[0])]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(len(windows), 4)) as pool:
+            results = list(pool.map(_measure_window, windows))
+
+    if not any(results):
         logger.warning("Availability probe returned no readable schedules")
         return None
     return [
-        {"schedules": measured.get(window_for_slot[index])}
+        {"schedules": results[window_for_slot[index]]}
         for index in range(len(slots))
     ]
 
@@ -1269,11 +1296,17 @@ def finish_preview(
                     "question": (
                         # When nobody is free the honest move is to say so and
                         # invite steering, rather than hide the conflict or
-                        # offer nothing at all.
-                        "No time suits everyone. Times are ordered by who can "
-                        "attend, and each says who cannot. Choose the best one, "
-                        "or say whose availability matters most and I will look "
-                        "again. There is no second confirmation."
+                        # offer nothing at all. And when the calendars could
+                        # not be read at all, say that rather than implying
+                        # these times were checked.
+                        "I could not read the attendees' calendars, so these "
+                        "times are unchecked - they may clash. Choose one, or "
+                        "ask me to try again. There is no second confirmation."
+                        if not availability_verified
+                        else "No time suits everyone. Times are ordered by who "
+                        "can attend, and each says who cannot. Choose the best "
+                        "one, or say whose availability matters most and I "
+                        "will look again. There is no second confirmation."
                         if contested and len(contested) == len(evidence_slots)
                         else "Choose one verified time, then press Select & "
                         "create meeting. There is no second confirmation."
