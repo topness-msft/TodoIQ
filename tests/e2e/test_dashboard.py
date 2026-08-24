@@ -30,13 +30,13 @@ class TestDashboardLoads:
         expect(page).to_have_title('Riveter')
         expect(page.locator('.app-title')).to_have_text('Riveter')
         expect(page.locator('link[rel="icon"]')).to_have_attribute(
-            'href', '/static/img/copilot.svg'
+            'href', '/static/img/copilot.png'
         )
         expect(page.locator('link[rel="icon"]')).to_have_attribute(
-            'type', 'image/svg+xml'
+            'type', 'image/png'
         )
         assert page.request.get(
-            base_url + '/static/img/copilot.svg'
+            base_url + '/static/img/copilot.png'
         ).ok
         logo = page.locator('.riveter-logo')
         expect(logo).to_be_visible()

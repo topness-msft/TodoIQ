@@ -3481,7 +3481,7 @@ function cwTaskUsesWorkIQ(task) {
 // provider while the icon was always Cowork's, so the two could disagree in
 // front of the user. Both now read from this one decision.
 var CW_ENGINE_MARK = {
-    workiq: '/static/img/copilot.svg',
+    workiq: '/static/img/copilot.png',
     cowork: '/static/img/coworker.svg'
 };
 

@@ -59,7 +59,7 @@ def test_running_mark_names_the_engine_doing_the_work(page: Page, base_url: str)
         )
         expect(row.locator(".cw-status-running")).to_be_visible()
         expect(
-            row.locator('.cw-status-running img[src="/static/img/copilot.svg"]')
+            row.locator('.cw-status-running img[src="/static/img/copilot.png"]')
         ).to_have_count(1)
         expect(
             row.locator('.cw-status-running img[src="/static/img/coworker.svg"]')
@@ -87,7 +87,7 @@ def test_running_mark_names_the_engine_doing_the_work(page: Page, base_url: str)
             row.locator('.cw-status-running img[src="/static/img/coworker.svg"]')
         ).to_have_count(1)
         expect(
-            row.locator('.cw-status-running img[src="/static/img/copilot.svg"]')
+            row.locator('.cw-status-running img[src="/static/img/copilot.png"]')
         ).to_have_count(0)
         page.screenshot(
             path=os.path.join(TEMP_DIR, "row-cowork-mark.png"), full_page=False
