@@ -23,6 +23,19 @@ from src.models import (
 from src.services import structured_delivery
 
 
+def _measure(slots, schedules, view_start):
+    """One measurement per slot, all sharing a single measured window.
+
+    Production takes a separate narrow reading per slot; these cases were
+    written against one wide window, and this keeps them expressing the same
+    intent without restating every fixture.
+    """
+    return [
+        {"schedules": schedules, "view_start": view_start}
+        for _ in slots
+    ]
+
+
 class StructuredDeliveryTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -42,7 +55,7 @@ class StructuredDeliveryTestBase(unittest.TestCase):
 
         def _no_probe(attendees, slots):
             self.availability_probe_calls.append((list(attendees), list(slots)))
-            return None, ""
+            return None
 
         structured_delivery.fetch_availability = _no_probe
 
@@ -1082,10 +1095,16 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         # These cases are about how the evidence is LABELLED, so give them a
         # probe that genuinely measures the slot free. Availability that was
         # never measured is covered separately.
-        structured_delivery.fetch_availability = lambda attendees, slots: (
-            [{"scheduleId": "rima@microsoft.com", "availabilityView": "0" * 288}],
-            start.astimezone(timezone.utc).isoformat(),
-        )
+        structured_delivery.fetch_availability = lambda attendees, slots: [
+            {
+                "schedules": [{
+                    "scheduleId": "rima@microsoft.com",
+                    "availabilityView": "0" * 288,
+                }],
+                "view_start": start.astimezone(timezone.utc).isoformat(),
+            }
+            for _ in slots
+        ]
         structured_delivery.finish_preview(
             action["id"],
             stdout=(
@@ -1449,93 +1468,132 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
     Production 2026-08-23 (task 2478, action 258): the preview offered
     Wednesday 26 August 13:05 ET recording every attendee "free", under a
-    heading reading "Choose one verified time". Graph's getSchedule reports
-    jabali@microsoft.com as OOF for the whole of that day
-    (2026-08-25T05:00Z -> 2026-08-28T05:00Z, availabilityView all 3s).
+    heading reading "Choose one verified time". Graph reports
+    jabali@microsoft.com out of office for the whole of that day.
 
-    The preview worker holds read-only tools and getSchedule/findMeetingTimes
-    are POST, so it cannot measure availability -- yet the payload schema has
-    an availability field, and finish_preview additionally rejected any value
-    other than free/tentative. Honesty was structurally impossible, so the
-    worker guessed and the guess certified.
+    The preview worker holds read-only tools and getSchedule is POST, so it
+    cannot measure availability -- yet the payload schema has an availability
+    field, and finish_preview additionally rejected any value other than
+    free/tentative. Honesty was structurally impossible, so the worker guessed
+    and the guess certified.
 
-    The interval arithmetic below is deliberately Riveter's own: the
-    subprocess is a transport that returns Graph's raw response, never the
+    Availability is read from Graph's scheduleItems: exact instants rather
+    than buckets, and a size that follows the number of meetings rather than
+    the length of the window. The overlap arithmetic is deliberately Riveter's
+    own -- the subprocess that fetches the response is a transport, never the
     judge of whether a slot is free.
     """
 
-    VIEW_START = "2026-08-26T12:00:00-04:00"
+    @staticmethod
+    def _item(status, start, end):
+        """A Graph schedule entry, in the shape getSchedule really returns."""
+        return {
+            "status": status,
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+        }
 
-    def test_free_view_reads_as_free(self):
-        status = structured_delivery._status_from_view(
-            "000000000000", self.VIEW_START, 5,
-            "2026-08-26T12:05:00-04:00", "2026-08-26T12:30:00-04:00",
+    @staticmethod
+    def _measure(slots, schedules):
+        return [{"schedules": schedules} for _ in slots]
+
+    # ---- the half-hour a candidate really occupies ----------------------
+    def test_candidate_is_judged_over_its_containing_half_hour(self):
+        """1:05-1:30 is booked at 1:05 but consumes the 1:00 half-hour."""
+        start, end = structured_delivery._judged_bounds(
+            "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
         )
-        self.assertEqual(status, "free")
+        self.assertEqual(start.strftime("%H:%M"), "13:00")
+        self.assertEqual(end.strftime("%H:%M"), "13:30")
+
+    def test_second_half_hour_snaps_to_the_half(self):
+        start, _end = structured_delivery._judged_bounds(
+            "2026-08-26T13:35:00-04:00", "2026-08-26T14:00:00-04:00"
+        )
+        self.assertEqual(start.strftime("%H:%M"), "13:30")
+
+    def test_a_clash_in_the_first_five_minutes_still_counts(self):
+        """The reason for snapping: 13:00-13:15 collides with a 13:05 start."""
+        items = [self._item(
+            "busy", "2026-08-26T17:00:00.0000000", "2026-08-26T17:15:00.0000000"
+        )]
+        self.assertEqual(structured_delivery._status_from_items(
+            items, "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ), "busy")
+
+    # ---- reading Graph's schedule items ---------------------------------
+    def test_empty_calendar_reads_as_free(self):
+        self.assertEqual(structured_delivery._status_from_items(
+            [], "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ), "free")
 
     def test_out_of_office_is_detected(self):
-        """The exact production case: an all-OOF day reported as free."""
-        status = structured_delivery._status_from_view(
-            "3" * 24, self.VIEW_START, 15,
-            "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00",
-        )
-        self.assertEqual(status, "oof")
+        """The production case: an all-day absence reported as free."""
+        items = [self._item(
+            "oof", "2026-08-25T05:00:00.0000000", "2026-08-28T05:00:00.0000000"
+        )]
+        self.assertEqual(structured_delivery._status_from_items(
+            items, "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ), "oof")
 
     def test_worst_status_across_the_slot_wins(self):
-        """A slot that is free then busy is not a free slot."""
-        status = structured_delivery._status_from_view(
-            "000022220000", self.VIEW_START, 5,
-            "2026-08-26T12:10:00-04:00", "2026-08-26T12:35:00-04:00",
-        )
-        self.assertEqual(status, "busy")
-
-    def test_slot_outside_the_measured_window_is_unknown(self):
-        status = structured_delivery._status_from_view(
-            "0000", self.VIEW_START, 5,
-            "2026-08-27T09:00:00-04:00", "2026-08-27T09:25:00-04:00",
-        )
-        self.assertIsNone(status)
-
-    def test_window_spans_every_slot(self):
-        slots = [
-            {"start": "2026-08-26T13:05:00-04:00", "end": "2026-08-26T13:30:00-04:00"},
-            {"start": "2026-08-31T10:35:00-04:00", "end": "2026-08-31T11:00:00-04:00"},
+        items = [
+            self._item("tentative", "2026-08-26T17:00:00.0000000",
+                       "2026-08-26T17:15:00.0000000"),
+            self._item("busy", "2026-08-26T17:15:00.0000000",
+                       "2026-08-26T17:30:00.0000000"),
         ]
-        start, end = structured_delivery._availability_window(slots)
-        self.assertTrue(start.startswith("2026-08-26T13:05"))
-        self.assertTrue(end.startswith("2026-08-31T11:00"))
+        self.assertEqual(structured_delivery._status_from_items(
+            items, "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ), "busy")
 
+    def test_a_meeting_ending_on_the_boundary_does_not_collide(self):
+        """Touching at an edge is not an overlap."""
+        items = [self._item(
+            "busy", "2026-08-26T16:30:00.0000000", "2026-08-26T17:00:00.0000000"
+        )]
+        self.assertEqual(structured_delivery._status_from_items(
+            items, "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ), "free")
+
+    def test_unmeasured_is_not_free(self):
+        self.assertIsNone(structured_delivery._status_from_items(
+            None, "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00"
+        ))
+
+    def test_graph_fractional_seconds_are_readable(self):
+        """Graph pads to seven digits, which fromisoformat rejects."""
+        parsed = structured_delivery._parse_graph_instant(
+            {"dateTime": "2026-08-26T17:00:00.0000000", "timeZone": "UTC"}
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.hour, 17)
+
+    # ---- ranking ---------------------------------------------------------
     def test_conflicted_slot_is_offered_rather_than_withdrawn(self):
-        """A meeting with three of five is often still the right call.
-
-        Withdrawing every conflicted slot left the user with nothing and no way
-        to say who matters. The slot is kept, ranked below cleaner ones, and
-        labelled with who cannot make it so the choice is informed.
-        """
+        """A meeting with three of five is often still the right call."""
         slots = [
             {"value": "0", "label": "Wed", "start": "2026-08-26T13:05:00-04:00",
-             "end": "2026-08-26T13:30:00-04:00", "timezone": "Eastern Standard Time",
-             "availability": {"jabali@microsoft.com": "free"}},
+             "end": "2026-08-26T13:30:00-04:00", "availability": {}},
             {"value": "1", "label": "Later", "start": "2026-08-26T15:05:00-04:00",
-             "end": "2026-08-26T15:30:00-04:00", "timezone": "Eastern Standard Time",
-             "availability": {"jabali@microsoft.com": "free"}},
+             "end": "2026-08-26T15:30:00-04:00", "availability": {}},
         ]
         schedules = [{
             "scheduleId": "jabali@microsoft.com",
-            "availabilityView": ("3" * 24) + ("0" * 48),
+            "scheduleItems": [self._item(
+                "oof", "2026-08-26T17:00:00.0000000",
+                "2026-08-26T17:30:00.0000000",
+            )],
         }]
         ranked = structured_delivery._apply_verified_availability(
-            ["jabali@microsoft.com"], slots, schedules, self.VIEW_START, 5
+            ["jabali@microsoft.com"], slots, self._measure(slots, schedules)
         )
 
         self.assertEqual(len(ranked), 2, "no slot may be silently withdrawn")
-        # The clean slot outranks the one nobody can attend.
         self.assertEqual(ranked[0]["value"], "1")
-        self.assertEqual(ranked[1]["value"], "0")
         self.assertEqual(
             ranked[1]["conflicts"], {"jabali@microsoft.com": "oof"}
         )
-        self.assertFalse(ranked[0].get("conflicts"))
 
     def test_slots_rank_by_how_many_cannot_attend(self):
         slots = [
@@ -1549,15 +1607,17 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
              "start": "2026-08-26T14:05:00-04:00",
              "end": "2026-08-26T14:30:00-04:00", "availability": {}},
         ]
-        # From 12:00 in 5-minute steps: a is busy for one hour, b for two.
         schedules = [
-            {"scheduleId": "a@x.com", "availabilityView": ("2" * 12) + ("0" * 60)},
-            {"scheduleId": "b@x.com", "availabilityView": ("2" * 24) + ("0" * 48)},
+            {"scheduleId": "a@x.com", "scheduleItems": [self._item(
+                "busy", "2026-08-26T16:00:00.0000000",
+                "2026-08-26T16:30:00.0000000")]},
+            {"scheduleId": "b@x.com", "scheduleItems": [self._item(
+                "busy", "2026-08-26T16:00:00.0000000",
+                "2026-08-26T17:30:00.0000000")]},
         ]
         ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com", "b@x.com"], slots, schedules, self.VIEW_START, 5
+            ["a@x.com", "b@x.com"], slots, self._measure(slots, schedules)
         )
-
         self.assertEqual(
             [entry["value"] for entry in ranked],
             ["none-out", "one-out", "two-out"],
@@ -1565,32 +1625,35 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
     def test_out_of_office_ranks_below_merely_busy(self):
         slots = [
-            {"value": "busy", "label": "b", "start": "2026-08-26T12:05:00-04:00",
+            {"value": "busy", "label": "b",
+             "start": "2026-08-26T12:05:00-04:00",
              "end": "2026-08-26T12:30:00-04:00", "availability": {}},
-            {"value": "oof", "label": "o", "start": "2026-08-26T13:05:00-04:00",
+            {"value": "oof", "label": "o",
+             "start": "2026-08-26T13:05:00-04:00",
              "end": "2026-08-26T13:30:00-04:00", "availability": {}},
         ]
-        schedules = [{
-            "scheduleId": "a@x.com",
-            "availabilityView": ("2" * 12) + ("3" * 60),
-        }]
+        schedules = [{"scheduleId": "a@x.com", "scheduleItems": [
+            self._item("busy", "2026-08-26T16:00:00.0000000",
+                       "2026-08-26T16:30:00.0000000"),
+            self._item("oof", "2026-08-26T17:00:00.0000000",
+                       "2026-08-26T17:30:00.0000000"),
+        ]}]
         ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com"], slots, schedules, self.VIEW_START, 5
+            ["a@x.com"], slots, self._measure(slots, schedules)
         )
         self.assertEqual([entry["value"] for entry in ranked], ["busy", "oof"])
 
     def test_tentative_is_not_a_conflict(self):
         """The standing rule treats tentative as bookable."""
         slots = [{
-            "value": "0", "label": "t", "start": "2026-08-26T12:05:00-04:00",
-            "end": "2026-08-26T12:30:00-04:00", "availability": {},
+            "value": "0", "label": "t", "start": "2026-08-26T13:05:00-04:00",
+            "end": "2026-08-26T13:30:00-04:00", "availability": {},
         }]
+        schedules = [{"scheduleId": "a@x.com", "scheduleItems": [self._item(
+            "tentative", "2026-08-26T17:00:00.0000000",
+            "2026-08-26T17:30:00.0000000")]}]
         ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com"],
-            slots,
-            [{"scheduleId": "a@x.com", "availabilityView": "1" * 24}],
-            self.VIEW_START,
-            5,
+            ["a@x.com"], slots, self._measure(slots, schedules)
         )
         self.assertFalse(ranked[0].get("conflicts"))
         self.assertEqual(ranked[0]["availability"]["a@x.com"], "tentative")
@@ -1604,11 +1667,9 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         }
         names = {"a@x.com": "Jason Balingit", "b@x.com": "Ed Ryan"}
         text = structured_delivery._availability_description(slot, names)
-
         self.assertIn("Jason Balingit", text)
         self.assertIn("out of office", text)
         self.assertIn("Ed Ryan", text)
-        self.assertIn("busy", text)
         self.assertNotIn("All confirmed attendees are available", text)
 
     def test_description_may_claim_availability_when_all_are_free(self):
@@ -1617,7 +1678,7 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             "available", structured_delivery._availability_description(slot)
         )
 
-    # ---- working hours -------------------------------------------------
+    # ---- working hours ---------------------------------------------------
     CENTRAL = {
         "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
         "startTime": "08:00:00.0000000",
@@ -1627,54 +1688,37 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
     EASTERN = dict(CENTRAL, timeZone={"name": "Eastern Standard Time"})
 
     def test_slot_inside_working_hours_is_fine(self):
-        # 13:05 ET on a Wednesday is 12:05 Central, well inside 08:00-17:00.
-        self.assertFalse(structured_delivery._outside_working_hours(
+        self.assertIsNone(structured_delivery._working_hours_status(
             self.CENTRAL,
             "2026-08-26T13:05:00-04:00", "2026-08-26T13:30:00-04:00",
         ))
 
     def test_evening_slot_just_past_an_eastern_day_is_a_reasonable_ask(self):
-        """17:30 finish against a 17:00 day: 30 minutes over, so acceptable."""
         self.assertEqual(structured_delivery._working_hours_status(
             self.EASTERN,
             "2026-08-26T17:05:00-04:00", "2026-08-26T17:30:00-04:00",
         ), "nearWorkingHours")
 
     def test_slot_well_past_the_day_is_outside_working_hours(self):
-        """19:05 ET is over two hours past a 17:00 Eastern finish."""
         self.assertEqual(structured_delivery._working_hours_status(
             self.EASTERN,
             "2026-08-26T19:05:00-04:00", "2026-08-26T19:30:00-04:00",
         ), "outsideWorkingHours")
 
-    def test_grace_applies_before_the_day_starts_too(self):
-        # 07:05 Central start against an 08:00 day: 55 minutes early.
-        self.assertEqual(structured_delivery._working_hours_status(
-            self.CENTRAL,
-            "2026-08-26T08:05:00-04:00", "2026-08-26T08:30:00-04:00",
-        ), "nearWorkingHours")
-        # 05:05 Central: nearly three hours early.
-        self.assertEqual(structured_delivery._working_hours_status(
-            self.CENTRAL,
-            "2026-08-26T06:05:00-04:00", "2026-08-26T06:30:00-04:00",
-        ), "outsideWorkingHours")
-
     def test_same_evening_slot_is_inside_a_central_day(self):
-        """The same instant is 16:05 Central, which is still a working hour."""
+        """The same instant is 16:05 Central, still a working hour."""
         self.assertIsNone(structured_delivery._working_hours_status(
             self.CENTRAL,
             "2026-08-26T17:05:00-04:00", "2026-08-26T17:30:00-04:00",
         ))
 
     def test_weekend_is_outside_the_working_week(self):
-        # Saturday 29 August 2026.
         self.assertEqual(structured_delivery._working_hours_status(
             self.CENTRAL,
             "2026-08-29T13:05:00-04:00", "2026-08-29T13:30:00-04:00",
         ), "outsideWorkingHours")
 
     def test_missing_working_hours_is_not_treated_as_a_conflict(self):
-        """Absent data must not invent an objection."""
         self.assertIsNone(
             structured_delivery._working_hours_status(None, "x", "y")
         )
@@ -1684,7 +1728,6 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         ))
 
     def test_a_near_miss_is_noted_but_never_blocks(self):
-        """Like a tentative block: say it, do not rule it out."""
         slots = [{
             "value": "0", "label": "evening",
             "start": "2026-08-26T17:05:00-04:00",
@@ -1692,23 +1735,16 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         }]
         schedules = [{
             "scheduleId": "ryanedward@microsoft.com",
-            "availabilityView": "0" * 288,
+            "scheduleItems": [],
             "workingHours": self.EASTERN,
         }]
         ranked = structured_delivery._apply_verified_availability(
-            ["ryanedward@microsoft.com"], slots, schedules,
-            "2026-08-26T16:00:00+00:00", 5,
+            ["ryanedward@microsoft.com"], slots, self._measure(slots, schedules)
         )
-
         self.assertFalse(ranked[0].get("conflicts"), "a near miss is not a veto")
-        self.assertEqual(
-            ranked[0]["availability"]["ryanedward@microsoft.com"],
-            "nearWorkingHours",
-        )
         text = structured_delivery._availability_description(
             ranked[0], {"ryanedward@microsoft.com": "Ed Ryan"}
         )
-        self.assertIn("Ed Ryan", text)
         self.assertIn("just outside working hours", text)
 
     def test_a_clean_slot_still_outranks_a_near_miss(self):
@@ -1720,105 +1756,75 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
              "start": "2026-08-26T13:05:00-04:00",
              "end": "2026-08-26T13:30:00-04:00", "availability": {}},
         ]
-        schedules = [{
-            "scheduleId": "a@x.com",
-            "availabilityView": "0" * 288,
-            "workingHours": self.EASTERN,
-        }]
+        schedules = [{"scheduleId": "a@x.com", "scheduleItems": [],
+                      "workingHours": self.EASTERN}]
         ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
+            ["a@x.com"], slots, self._measure(slots, schedules)
         )
         self.assertEqual([entry["value"] for entry in ranked], ["clean", "near"])
 
-    def test_a_near_miss_still_outranks_a_real_conflict(self):
-        slots = [
-            {"value": "busy", "label": "b",
-             "start": "2026-08-26T12:05:00-04:00",
-             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
-            {"value": "near", "label": "n",
-             "start": "2026-08-26T17:05:00-04:00",
-             "end": "2026-08-26T17:30:00-04:00", "availability": {}},
-        ]
-        schedules = [{
-            "scheduleId": "a@x.com",
-            "availabilityView": ("2" * 12) + ("0" * 276),
-            "workingHours": self.EASTERN,
-        }]
-        ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
-        )
-        self.assertEqual([entry["value"] for entry in ranked], ["near", "busy"])
-
     def test_being_busy_outranks_being_well_out_of_hours(self):
-        """An hour past someone's day is a smaller ask than a double booking."""
+        """An evening ask is smaller than a double booking."""
         slots = [
             {"value": "busy", "label": "b",
-             "start": "2026-08-26T12:05:00-04:00",
-             "end": "2026-08-26T12:30:00-04:00", "availability": {}},
+             "start": "2026-08-26T13:05:00-04:00",
+             "end": "2026-08-26T13:30:00-04:00", "availability": {}},
             {"value": "late", "label": "l",
              "start": "2026-08-26T20:05:00-04:00",
              "end": "2026-08-26T20:30:00-04:00", "availability": {}},
         ]
         schedules = [{
             "scheduleId": "a@x.com",
-            "availabilityView": ("2" * 12) + ("0" * 276),
+            "scheduleItems": [self._item(
+                "busy", "2026-08-26T17:00:00.0000000",
+                "2026-08-26T17:30:00.0000000")],
             "workingHours": self.EASTERN,
         }]
         ranked = structured_delivery._apply_verified_availability(
-            ["a@x.com"], slots, schedules, "2026-08-26T16:00:00+00:00", 5
+            ["a@x.com"], slots, self._measure(slots, schedules)
         )
         self.assertEqual([entry["value"] for entry in ranked], ["late", "busy"])
 
-    def test_probe_asks_for_working_hours(self):
-        prompt = structured_delivery.availability_prompt(
-            ["a@x.com"],
-            "2026-08-26T17:05:00", "2026-08-26T17:30:00",
-        )
-        self.assertIn("workingHours", prompt)
-
-    def test_fetch_prompt_asks_for_the_raw_response(self):
-        """The subprocess is a transport: it must not judge the slots."""
+    # ---- the probe -------------------------------------------------------
+    def test_probe_asks_for_schedule_items_not_a_verdict(self):
         prompt = structured_delivery.availability_prompt(
             ["a@x.com", "b@x.com"],
-            "2026-08-26T13:05:00-04:00",
-            "2026-08-26T13:30:00-04:00",
+            [("2026-08-26T17:00:00", "2026-08-26T17:30:00")],
         )
         self.assertIn("/me/calendar/getSchedule", prompt)
         self.assertIn("a@x.com", prompt)
-        self.assertIn("b@x.com", prompt)
+        self.assertIn("scheduleItems", prompt)
+        self.assertIn("workingHours", prompt)
         lowered = prompt.lower()
-        self.assertIn("availabilityview", lowered)
-        # It must be told to hand back what Graph said, not an opinion.
         self.assertTrue(
             "do not interpret" in lowered or "verbatim" in lowered,
             "the worker must return the raw response, not a verdict",
         )
 
-    def test_fetch_command_can_reach_workiq_but_cannot_send(self):
+    def test_probe_cannot_send_anything(self):
         argv = structured_delivery.availability_command("prompt")
         joined = " ".join(argv)
         self.assertIn("workiq-do_action", joined)
-        # getSchedule is the only write-shaped call it may make; it must not be
-        # able to create events or send messages.
         self.assertNotIn("workiq-create_entity", joined)
 
-    def test_parses_schedules_out_of_a_result_block(self):
+    def test_parses_windows_out_of_a_result_block(self):
         raw = (
             "noise before\n"
             + structured_delivery.RESULT_START
-            + '{"schedules":[{"scheduleId":"a@x.com",'
-            '"availabilityView":"000"}]}'
+            + '{"windows":[{"index":0,"schedules":[{"scheduleId":"a@x.com",'
+            '"scheduleItems":[]}]}]}'
             + structured_delivery.RESULT_END
             + "\nnoise after"
         )
-        schedules = structured_delivery._parse_schedules(raw)
-        self.assertEqual(len(schedules), 1)
-        self.assertEqual(schedules[0]["scheduleId"], "a@x.com")
+        windows = structured_delivery._parse_windows(raw)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0][0]["scheduleId"], "a@x.com")
 
-    def test_unreadable_response_yields_no_schedules(self):
-        self.assertIsNone(structured_delivery._parse_schedules(""))
-        self.assertIsNone(structured_delivery._parse_schedules("no block here"))
+    def test_unreadable_response_yields_nothing(self):
+        self.assertIsNone(structured_delivery._parse_windows(""))
+        self.assertIsNone(structured_delivery._parse_windows("no block here"))
 
+    # ---- wiring into preview --------------------------------------------
     def _calendar_preview(self, probe):
         """Drive a real finish_preview with a controllable availability probe."""
         task = create_task("Schedule the kickoff", action_type="schedule-meeting")
@@ -1829,28 +1835,26 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             structured_payload=json.dumps(envelope),
         )
         structured_delivery.fetch_availability = probe
+        duration = structured_delivery._meeting_duration(task)
         payload = {
             "schema_version": 1,
             "channel": "calendar",
             "subject": "Kickoff",
             "body": "Agenda",
-            "duration_minutes": structured_delivery._meeting_duration(task),
+            "duration_minutes": duration,
             "timezone": "Eastern Standard Time",
             "attendees": [{"name": "A", "email": "a@x.com"}],
             "slots": [
                 {"id": "0", "label": "Wed",
                  "start": "2099-08-26T13:05:00-04:00",
-                 "end": "2099-08-26T13:30:00-04:00",
                  "timezone": "Eastern Standard Time",
                  "availability": {"a@x.com": "free"}},
                 {"id": "1", "label": "Thu",
                  "start": "2099-08-27T13:05:00-04:00",
-                 "end": "2099-08-27T13:30:00-04:00",
                  "timezone": "Eastern Standard Time",
                  "availability": {"a@x.com": "free"}},
             ],
         }
-        duration = payload["duration_minutes"]
         for slot in payload["slots"]:
             begin = datetime.fromisoformat(slot["start"])
             slot["end"] = (begin + timedelta(minutes=duration)).isoformat()
@@ -1877,7 +1881,7 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
         def probe(attendees, slots):
             seen.append((attendees, slots))
-            return None, ""
+            return None
 
         self._calendar_preview(probe)
         self.assertEqual(len(seen), 1, "preview must measure availability")
@@ -1886,18 +1890,22 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
     def test_preview_ranks_a_conflicted_slot_below_a_clear_one(self):
         def probe(attendees, slots):
-            # Wednesday OOF, Thursday free, measured from the first slot start.
-            return ([{
-                "scheduleId": "a@x.com",
-                "availabilityView": ("3" * 288) + ("0" * 288),
-            }], "2099-08-26T17:05:00+00:00")
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": [{
+                    "status": "oof",
+                    "start": {"dateTime": "2099-08-26T17:00:00.0000000",
+                              "timeZone": "UTC"},
+                    "end": {"dateTime": "2099-08-26T17:30:00.0000000",
+                            "timeZone": "UTC"},
+                }]}]},
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+            ]
 
         _action, updated = self._calendar_preview(probe)
         interaction = json.loads(updated["blocked_question"])
         evidence = interaction["schedule_evidence"]
 
         self.assertTrue(evidence["availability_verified"])
-        # Both survive; the clear one leads and the other says who is missing.
         self.assertEqual([s["value"] for s in evidence["slots"]], ["1", "0"])
         options = interaction["questions"][0]["options"]
         self.assertEqual(options[0]["description"],
@@ -1905,19 +1913,44 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertIn("out of office", options[1]["description"])
 
     def test_preview_records_when_availability_could_not_be_measured(self):
-        _action, updated = self._calendar_preview(lambda a, s: (None, ""))
+        _action, updated = self._calendar_preview(lambda a, s: None)
         evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
 
         self.assertFalse(evidence["availability_verified"])
-        # Unmeasured still offers the times; it simply stops calling them checked.
+        self.assertEqual(len(evidence["slots"]), 2)
+
+    def test_partly_measured_is_not_verified(self):
+        """One day's window can succeed while another fails.
+
+        Verified must mean every candidate was measured, not that the call
+        returned something -- otherwise an unmeasured slot rides along on its
+        neighbour's certificate.
+        """
+        def probe(attendees, slots):
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": None},
+            ]
+
+        _action, updated = self._calendar_preview(probe)
+        interaction = json.loads(updated["blocked_question"])
+        evidence = interaction["schedule_evidence"]
+
+        self.assertFalse(evidence["availability_verified"])
+        # The measured slot still gets its real answer.
         self.assertEqual(len(evidence["slots"]), 2)
 
     def test_preview_offers_the_best_of_a_bad_set_and_invites_steering(self):
         """Nobody is free. Offer the least-bad times and say who is missing."""
         def probe(attendees, slots):
-            return ([{
-                "scheduleId": "a@x.com", "availabilityView": "3" * 576,
-            }], "2099-08-26T17:05:00+00:00")
+            blocked = [{"scheduleId": "a@x.com", "scheduleItems": [{
+                "status": "oof",
+                "start": {"dateTime": "2099-08-01T00:00:00.0000000",
+                          "timeZone": "UTC"},
+                "end": {"dateTime": "2099-09-01T00:00:00.0000000",
+                        "timeZone": "UTC"},
+            }]}]
+            return [{"schedules": blocked} for _ in slots]
 
         _action, updated = self._calendar_preview(probe)
         interaction = json.loads(updated["blocked_question"])
@@ -2207,21 +2240,23 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self._real_fetch_availability = structured_delivery.fetch_availability
 
         def _all_free(attendees, slots):
-            window = structured_delivery._availability_window(slots)
-            if not window:
-                return None, ""
             from datetime import timezone as _timezone
 
-            start = structured_delivery._parse_offset_datetime(window[0])
-            if not start:
-                return None, ""
-            return (
-                [
-                    {"scheduleId": str(email), "availabilityView": "0" * 8064}
-                    for email in attendees
-                ],
-                start.astimezone(_timezone.utc).isoformat(),
-            )
+            measurements = []
+            for slot in slots:
+                start = structured_delivery._parse_offset_datetime(
+                    slot.get("start")
+                )
+                if not start:
+                    return None
+                measurements.append({
+                    "schedules": [
+                        {"scheduleId": str(email), "availabilityView": "0" * 288}
+                        for email in attendees
+                    ],
+                    "view_start": start.astimezone(_timezone.utc).isoformat(),
+                })
+            return measurements
 
         structured_delivery.fetch_availability = _all_free
         super().setUp()

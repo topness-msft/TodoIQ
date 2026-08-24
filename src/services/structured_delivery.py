@@ -356,6 +356,24 @@ AVAILABILITY_CODES = {
     "4": "workingElsewhere",
 }
 AVAILABILITY_SEVERITY = ["free", "workingElsewhere", "tentative", "busy", "oof"]
+
+
+def _judged_bounds(slot_start: str, slot_end: str):
+    """The half-hour a candidate really occupies.
+
+    A 1:05-1:30 meeting is booked at 1:05 but it consumes the 1:00 half-hour:
+    calendars are blocked in half-hour units, so anything sitting in 1:00-1:05
+    collides with it in practice. Availability is judged over 1:00-1:30 while
+    the invite still goes out at 1:05.
+    """
+    start = _parse_offset_datetime(slot_start)
+    end = _parse_offset_datetime(slot_end)
+    if not start or not end:
+        return None, None
+    floored = start.replace(
+        minute=0 if start.minute < 30 else 30, second=0, microsecond=0
+    )
+    return floored, end
 # What actually stops someone attending. The standing rule treats a tentative
 # block as bookable, and working elsewhere still means working, so neither
 # counts against a slot. OOF weighs heavier than busy: a meeting can be moved,
@@ -456,31 +474,49 @@ def _outside_working_hours(working_hours, slot_start: str, slot_end: str) -> boo
 AVAILABILITY_TOOLS = "workiq-do_action"
 
 
-def availability_prompt(attendees: list, start: str, end: str) -> str:
-    """Ask Graph what the calendars say, and ask for the answer unchanged."""
+def availability_prompt(attendees: list, windows: list) -> str:
+    """Ask Graph what the calendars say, and ask for the answer unchanged.
+
+    scheduleItems rather than availabilityView: exact instants instead of
+    buckets, and a size that follows the number of meetings rather than the
+    length of the window. A wide window of availabilityView at five-minute
+    resolution ran to thousands of characters the worker could not echo back.
+    """
     schedules = _json([str(email).strip() for email in attendees])
+    calls = "\n".join(
+        f'{index}. actionUrl /me/calendar/getSchedule with body:\n'
+        f'   {{"schedules": {schedules},\n'
+        f'    "startTime": {{"dateTime": "{start}", "timeZone": "UTC"}},\n'
+        f'    "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}},\n'
+        f'    "availabilityViewInterval": 60}}'
+        for index, (start, end) in enumerate(windows)
+    )
     return f"""
-You are Riveter's availability probe. Make exactly one call and return its
-result. Do not interpret it, summarise it, or decide whether any time is
-suitable - that judgement is not yours to make.
+You are Riveter's availability probe. Make the calls listed below and return
+their results. Do not interpret them, summarise them, or decide whether any
+time is suitable - that judgement is not yours to make.
 
-Call workiq-do_action once with actionUrl /me/calendar/getSchedule and this
-exact body:
-{{"schedules": {schedules},
- "startTime": {{"dateTime": "{start}", "timeZone": "UTC"}},
- "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}},
- "availabilityViewInterval": {AVAILABILITY_INTERVAL_MINUTES}}}
+Call workiq-do_action once for each numbered window:
+{calls}
 
-Return exactly one result block containing the scheduleId, availabilityView
-and workingHours of every schedule in the response, verbatim:
+Return exactly one result block holding every window's result, keyed by the
+number above. For each schedule copy its scheduleId, its workingHours, and
+every entry of scheduleItems as status/start/end, verbatim. Ignore
+availabilityView entirely.
 {RESULT_START}
-{{"schedules":[{{"scheduleId":"...","availabilityView":"...",
+{{"windows":[{{"index":0,"schedules":[{{"scheduleId":"...",
+"scheduleItems":[{{"status":"busy",
+"start":{{"dateTime":"2026-08-26T17:00:00.0000000","timeZone":"UTC"}},
+"end":{{"dateTime":"2026-08-26T17:30:00.0000000","timeZone":"UTC"}}}}],
 "workingHours":{{"daysOfWeek":["monday"],"startTime":"08:00:00",
-"endTime":"17:00:00","timeZone":{{"name":"..."}}}}}}]}}
+"endTime":"17:00:00","timeZone":{{"name":"..."}}}}}}]}}]}}
 {RESULT_END}
 
-If the call fails, return {RESULT_START}{{"schedules":null}}{RESULT_END}.
-Never invent an availabilityView or a working-hours timezone.
+A schedule with no entries has an empty scheduleItems list - that is a real
+answer and must still appear. If a call fails, give that window
+"schedules":null. If none succeed, return
+{RESULT_START}{{"windows":null}}{RESULT_END}.
+Never invent a schedule item or a working-hours timezone.
 """.strip()
 
 
@@ -496,8 +532,8 @@ def availability_command(prompt: str) -> list[str]:
     ]
 
 
-def _parse_schedules(output: str) -> list | None:
-    """Pull the schedules array out of the probe's result block."""
+def _parse_windows(output: str) -> dict | None:
+    """Pull the per-window schedules out of the probe's result block."""
     text = output or ""
     start = text.find(RESULT_START)
     end = text.find(RESULT_END)
@@ -507,45 +543,81 @@ def _parse_schedules(output: str) -> list | None:
         parsed = json.loads(text[start + len(RESULT_START):end].strip())
     except (json.JSONDecodeError, TypeError):
         return None
-    schedules = parsed.get("schedules") if isinstance(parsed, dict) else None
-    return schedules if isinstance(schedules, list) and schedules else None
+    windows = parsed.get("windows") if isinstance(parsed, dict) else None
+    if not isinstance(windows, list):
+        return None
+    measured = {}
+    for entry in windows:
+        if not isinstance(entry, dict):
+            continue
+        schedules = entry.get("schedules")
+        if not isinstance(schedules, list) or not schedules:
+            continue
+        try:
+            measured[int(entry.get("index"))] = schedules
+        except (TypeError, ValueError):
+            continue
+    return measured or None
 
 
-def fetch_availability(attendees: list, slots: list) -> tuple[list | None, str]:
-    """Measure the attendees' calendars across every proposed slot.
+def fetch_availability(attendees: list, slots: list) -> list | None:
+    """Measure the attendees' calendars across the proposed slots.
 
-    Returns the raw schedules and the UTC instant the view starts from, so the
-    caller can do its own interval arithmetic. Returns (None, "") when the
-    measurement could not be taken - never a cheerful default.
+    One call covers everything: getSchedule takes many schedules, and
+    scheduleItems make the response scale with the number of meetings rather
+    than the length of the window, so a span of days costs little. That was not
+    true of availabilityView, where five days at five-minute resolution ran to
+    ~1,400 characters per attendee and the worker could not return it.
+
+    Returns one entry per slot holding the raw schedules, so the caller can do
+    its own overlap arithmetic. Returns None when nothing could be measured -
+    never a cheerful default.
     """
-    window = _availability_window(slots)
-    if not window or not attendees:
-        return None, ""
+    if not attendees or not slots:
+        return None
     from datetime import timezone
 
-    start_dt = _parse_offset_datetime(window[0])
-    end_dt = _parse_offset_datetime(window[1])
-    if not start_dt or not end_dt:
-        return None, ""
-    view_start = start_dt.astimezone(timezone.utc)
-    graph_start = view_start.strftime("%Y-%m-%dT%H:%M:%S")
-    graph_end = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    bounds = []
+    for slot in slots:
+        start, end = _judged_bounds(slot.get("start"), slot.get("end"))
+        if not start or not end:
+            return None
+        bounds.append((start.astimezone(timezone.utc), end.astimezone(timezone.utc)))
+
+    # One window per day. scheduleItems removed the resolution problem but not
+    # the span one: five days across five people is hundreds of meetings, and
+    # the worker cannot echo that back. A single day is a handful each, and
+    # three options on one day still cost one call.
+    groups: dict = {}
+    for index, (start, _end) in enumerate(bounds):
+        groups.setdefault(start.date(), []).append(index)
+
+    windows, window_for_slot = [], {}
+    for day in sorted(groups):
+        members = groups[day]
+        for index in members:
+            window_for_slot[index] = len(windows)
+        windows.append((
+            min(bounds[i][0] for i in members).strftime("%Y-%m-%dT%H:%M:%S"),
+            max(bounds[i][1] for i in members).strftime("%Y-%m-%dT%H:%M:%S"),
+        ))
 
     try:
         proc = _run(
-            availability_command(
-                availability_prompt(attendees, graph_start, graph_end)
-            ),
-            timeout=180,
+            availability_command(availability_prompt(attendees, windows)),
+            timeout=240,
         )
     except Exception as exc:  # noqa: BLE001 - a probe must never break preview
         logger.warning("Availability probe failed to run: %s", exc)
-        return None, ""
-    schedules = _parse_schedules(proc.stdout or "")
-    if not schedules:
+        return None
+    measured = _parse_windows(proc.stdout or "")
+    if not measured:
         logger.warning("Availability probe returned no readable schedules")
-        return None, ""
-    return schedules, view_start.isoformat()
+        return None
+    return [
+        {"schedules": measured.get(window_for_slot[index])}
+        for index in range(len(slots))
+    ]
 
 
 
@@ -579,73 +651,114 @@ def _availability_window(slots: list) -> tuple[str, str] | None:
     return min(starts).isoformat(), max(ends).isoformat()
 
 
-def _status_from_view(
-    view: str,
-    view_start: str,
-    interval_minutes: int,
-    slot_start: str,
-    slot_end: str,
-) -> str | None:
-    """Worst availability across a slot, or None if it was never measured.
+def _status_from_items(items, slot_start: str, slot_end: str) -> str | None:
+    """Worst availability across the half-hour a candidate occupies.
+
+    Graph's scheduleItems carry exact instants, so there are no buckets to
+    round against and nothing turns on the query's resolution. They are also
+    compact: a handful of meetings a day rather than one character per
+    interval, which is what made a wide window unreturnable before.
 
     Riveter does this arithmetic itself. The subprocess that fetches Graph's
     response is a transport; letting it decide whether a slot is free would
     reproduce the very problem this exists to fix.
     """
-    origin = _parse_offset_datetime(view_start)
-    start = _parse_offset_datetime(slot_start)
-    end = _parse_offset_datetime(slot_end)
-    if not origin or not start or not end or not view or interval_minutes <= 0:
+    if items is None:
         return None
-    if end <= start:
-        return None
-
-    first = int((start - origin).total_seconds() // 60 // interval_minutes)
-    last_seconds = (end - origin).total_seconds() / 60 / interval_minutes
-    last = int(last_seconds) - 1 if last_seconds.is_integer() else int(last_seconds)
-    if first < 0 or last < first or last >= len(view):
+    start, end = _judged_bounds(slot_start, slot_end)
+    if not start or not end or end <= start:
         return None
 
     worst = "free"
-    for index in range(first, last + 1):
-        status = AVAILABILITY_CODES.get(view[index])
-        if status is None:
-            return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip()
+        if status not in AVAILABILITY_SEVERITY:
+            continue
+        begins = _parse_graph_instant(item.get("start"))
+        finishes = _parse_graph_instant(item.get("end"))
+        if not begins or not finishes:
+            continue
+        # Touching at an edge is not an overlap: a meeting ending at 1:00 does
+        # not collide with the 1:00 half-hour.
+        if finishes <= start or begins >= end:
+            continue
         if AVAILABILITY_SEVERITY.index(status) > AVAILABILITY_SEVERITY.index(worst):
             worst = status
     return worst
 
 
+def _parse_graph_instant(value):
+    """Read a Graph {dateTime, timeZone} pair, which omits the offset."""
+    if isinstance(value, dict):
+        text = str(value.get("dateTime") or "").strip()
+        zone = str(value.get("timeZone") or "").strip()
+    else:
+        text = str(value or "").strip()
+        zone = ""
+    if not text:
+        return None
+    # Graph pads to seven fractional digits, which fromisoformat rejects.
+    if "." in text:
+        head, _, tail = text.partition(".")
+        text = head + "." + tail[:6]
+    parsed = None
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo:
+        return parsed
+    from datetime import timezone
+
+    if zone and zone.upper() != "UTC":
+        from dateutil import tz as _tz
+
+        named = _tz.gettz(zone)
+        if named is not None:
+            return parsed.replace(tzinfo=named)
+    return parsed.replace(tzinfo=timezone.utc)
+
+
 def _apply_verified_availability(
     attendees: list,
     slots: list,
-    schedules: list,
-    view_start: str,
-    interval_minutes: int,
+    measurements: list,
+    interval_minutes: int = AVAILABILITY_INTERVAL_MINUTES,
 ) -> list:
     """Replace claimed availability with measured availability, best first.
+
+    Each measurement covers its own slot's window, so a slot whose measurement
+    is missing simply keeps what the preview claimed rather than being judged
+    on someone else's data.
 
     Nothing is withdrawn. A time that suits three of five people is often the
     right meeting to hold, and withdrawing it leaves the user with no options
     and no way to say who matters. Slots are ranked so the cleanest lead, and
     each carries the conflicts that cost it its place.
     """
-    views = {}
-    hours = {}
-    for entry in schedules or []:
-        email = str(entry.get("scheduleId") or "").strip().lower()
-        if email:
-            views[email] = str(entry.get("availabilityView") or "")
-            hours[email] = entry.get("workingHours")
-
     ranked = []
     for position, slot in enumerate(slots or []):
+        measurement = (
+            measurements[position]
+            if measurements and position < len(measurements)
+            else None
+        ) or {}
+        views, hours = {}, {}
+        for entry in measurement.get("schedules") or []:
+            email = str(entry.get("scheduleId") or "").strip().lower()
+            if email:
+                views[email] = entry.get("scheduleItems")
+                hours[email] = entry.get("workingHours")
+
         measured, conflicts = {}, {}
         for email in attendees:
             key = str(email).strip().lower()
-            status = _status_from_view(
-                views.get(key, ""), view_start, interval_minutes,
-                slot.get("start"), slot.get("end"),
+            status = _status_from_items(
+                views.get(key), slot.get("start"), slot.get("end")
             )
             if status is None:
                 # Never measured: keep what the preview claimed rather than
@@ -1114,11 +1227,16 @@ def finish_preview(
             # claim. Riveter measures it before offering it: task 2478 proposed
             # a Wednesday its own evidence called free while the attendee was
             # out of office all day.
-            schedules, view_start = fetch_availability(attendees, evidence_slots)
-            availability_verified = bool(schedules)
-            if availability_verified:
+            schedules = fetch_availability(attendees, evidence_slots)
+            # A probe can come back partly empty: one day's window succeeds and
+            # another does not. Verified means every candidate was measured,
+            # not that the call returned something.
+            availability_verified = bool(schedules) and all(
+                (entry or {}).get("schedules") for entry in schedules
+            )
+            if schedules:
                 evidence_slots = _apply_verified_availability(
-                    attendees, evidence_slots, schedules, view_start,
+                    attendees, evidence_slots, schedules,
                     AVAILABILITY_INTERVAL_MINUTES,
                 )
             attendee_names = {
