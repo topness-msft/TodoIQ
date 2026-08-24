@@ -122,5 +122,48 @@ class TestStoppingTheIncumbent(unittest.TestCase):
         self.assertEqual(stopped, [1, 3])
 
 
+class TestScheduledTaskRegistration(unittest.TestCase):
+    """The logon task failed with 0x8007010B, "the directory name is invalid".
+
+    `New-ScheduledTaskAction -WorkingDirectory '"C:\\path"'` stores the quote
+    characters as part of the value, and Task Scheduler then cannot resolve the
+    directory. Execute and Arguments tolerate quoting - they are command lines,
+    and the paths contain spaces - but WorkingDirectory is a bare path.
+
+    The effect was that the tray never actually started at logon. Nothing said
+    so: the task showed "Ready", and the failure only appears in LastTaskResult.
+    So the machine would come up with no Riveter running, and it would get
+    started by hand from whichever checkout was to hand - which is the reported
+    problem of "going to the older code".
+    """
+
+    def _script(self, root="C:/Users/x/Riveter/app"):
+        import importlib.util
+
+        path = Path(__file__).resolve().parent.parent / "scripts" / "install_startup.py"
+        spec = importlib.util.spec_from_file_location("install_startup", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.scheduled_task_script("C:/py/pythonw.exe", root + "/scripts/todoness_tray.pyw", root)
+
+    def test_working_directory_is_not_double_quoted(self):
+        script = self._script()
+        self.assertNotIn("-WorkingDirectory '\"", script)
+
+    def test_working_directory_is_still_quoted_for_spaces(self):
+        # Single quotes for PowerShell, no embedded double quotes for the API.
+        script = self._script("C:/Users/x/My Apps/Riveter/app")
+        self.assertIn("-WorkingDirectory 'C:/Users/x/My Apps/Riveter/app'", script)
+
+    def test_the_executable_and_argument_stay_quoted(self):
+        # These are command lines; a path with a space must survive.
+        script = self._script()
+        self.assertIn("-Execute '\"C:/py/pythonw.exe\"'", script)
+        self.assertIn("todoness_tray.pyw\"'", script)
+
+    def test_the_task_name_is_registered(self):
+        self.assertIn("TodoNess", self._script())
+
+
 if __name__ == "__main__":
     unittest.main()

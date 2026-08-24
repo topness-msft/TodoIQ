@@ -56,14 +56,29 @@ def find_pythonw():
     return pythonw
 
 
-def register_scheduled_task(pythonw):
-    """Register TodoNess as a scheduled task that runs at logon."""
-    ps_script = f'''
-$action = New-ScheduledTaskAction -Execute '"{pythonw}"' -Argument '"{TRAY_SCRIPT}"' -WorkingDirectory '"{PROJECT_ROOT}"'
+def scheduled_task_script(pythonw, tray_script, project_root):
+    """PowerShell that registers the logon task.
+
+    WorkingDirectory must NOT carry embedded double quotes. Passing
+    '"C:\\path"' stores the quotes as part of the value and Task Scheduler then
+    fails the run with 0x8007010B, "the directory name is invalid" - which is
+    silent, because the task still shows as Ready and only LastTaskResult says
+    otherwise. The tray simply never came up at logon.
+
+    Execute and Arguments keep their quotes: those are command lines and these
+    paths contain spaces.
+    """
+    return f'''
+$action = New-ScheduledTaskAction -Execute '"{pythonw}"' -Argument '"{tray_script}"' -WorkingDirectory '{project_root}'
 $trigger = New-ScheduledTaskTrigger -AtLogon -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName "{TASK_NAME}" -Action $action -Trigger $trigger -Settings $settings -Force
 '''
+
+
+def register_scheduled_task(pythonw):
+    """Register TodoNess as a scheduled task that runs at logon."""
+    ps_script = scheduled_task_script(pythonw, TRAY_SCRIPT, PROJECT_ROOT)
     print(f"Registering scheduled task '{TASK_NAME}'...")
     result = subprocess.run(
         ["powershell", "-Command", ps_script],
