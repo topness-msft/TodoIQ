@@ -92,14 +92,30 @@ Determine the **query start date**:
 **Then**, read for activity. Prefer the originating thread; fall back to the person.
 
 **(a) Thread-scoped — use this when `source_url` is a `teams.microsoft.com` link.**
-The URL carries the conversation id, so the exact thread can be re-read:
 
-> "Read the Teams conversation at [source_url] and list every message posted
-> since [check_since], with sender, timestamp and text. If there are none, say
-> so explicitly."
+Read the conversation by id. Do **not** search for the URL as text: a live run
+on task 2057 did exactly that ("I searched for the exact Teams message URL and
+identifiers embedded in it"), found nothing, and had to record a failed check —
+the same mistake commit `3b5e16d` fixed for the Teams preview worker, which
+gave up claiming chat ids were "not exposed" while `/me/chats` returns them.
+A worker that is not shown an endpoint will not invent one.
 
-Record `source_scope: "thread"` for this task, and the conversation id from the
-URL.
+1. Take the conversation id out of the URL: it is the `19:...` segment of
+   `https://teams.microsoft.com/l/message/<conversation-id>/<message-id>`.
+   URL-decode it (`%3a` → `:`, `%40` → `@`). A 1:1 looks like
+   `19:<guid>_<guid>@unq.gbl.spaces`; a group looks like `19:<hex>@thread.v2`.
+2. Read that chat directly with workiq-fetch:
+   `/me/chats/{conversation_id}/messages?$top=50`
+   Then keep only messages whose `createdDateTime` is after `check_since`.
+3. If that id 404s or returns nothing readable, list `/me/chats?$select=id,topic,chatType,webUrl&$top=50`
+   and match on `webUrl`, or on the members via `/me/chats/{chat_id}/members`
+   for a 1:1. Only after both fail is the thread genuinely unreadable.
+4. If it is unreadable, fall back to the person-scoped query in (b) and record
+   `source_scope: "person"` — do NOT claim a thread read you did not do. Record
+   a failed check only if the person-scoped query also fails.
+
+Record `source_scope: "thread"` and the conversation id when you did read the
+thread.
 
 **(b) Person-scoped — everything else** (Outlook links, meeting tasks, manual
 tasks, or any task with no usable `source_url`):
