@@ -37,3 +37,7 @@ temp/
 /_wiq_*
 /demo.py
 /*.txt
+# ...but dependency manifests are source, not scratch output. requirements.txt
+# only escapes the rule above because it was tracked before it existed.
+!/requirements.txt
+!/requirements-dev.txt

@@ -1,0 +1,12 @@
+# Test toolchain. requirements.txt stays runtime-only (what the tray and the
+# server need to run); everything here is needed only to run the suite.
+#
+#     pip install -r requirements-dev.txt
+#     playwright install chromium
+#
+# pytest-timeout is not optional: without it a wedged Playwright call stalls
+# the whole e2e run with no indication of which test is stuck. tests/e2e/
+# conftest.py attaches a 90s per-test timeout to browser tests.
+pytest>=8,<10
+pytest-playwright>=0.7,<1
+pytest-timeout>=2.3,<3

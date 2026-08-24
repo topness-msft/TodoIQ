@@ -70,6 +70,8 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
 - Static UI files are lower data risk but require Playwright visual gates.
 
 ## Build / test tooling  (verified)
+- Test dependencies: `pip install -r requirements-dev.txt` then
+  `playwright install chromium`. `requirements.txt` stays runtime-only.
 - Unit tests: `python -m pytest -q` (pytest/unittest; `tests/test_*.py`).
 - E2E / visual tests: `python -m pytest -q -m e2e` (Playwright Chromium;
   `tests/e2e/`, screenshots under `temp/` or `test-runs/`).
@@ -80,6 +82,13 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
   2026-08-01.
 - E2E must run in a separate pytest invocation; `pytest.ini` deselects it by
   default because Playwright's sync API conflicts with Tornado test loops.
+- E2E tests share ONE session-scoped server and database. `tests/e2e/conftest.py`
+  clears the task tables before every test — without that, rows leaked by
+  failing tests accumulate past the 200-row cap in `list_tasks`
+  (`src/models.py:241`) and later tests silently stop seeing the tasks they
+  seed, failing as 30s selector timeouts in the full run while passing alone.
+- Browser tests carry a 90s per-test timeout (attached in the e2e conftest, not
+  `pytest.ini`, so unit tests are unaffected).
 
 ## Deploy
 - Environments:

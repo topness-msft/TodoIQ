@@ -20,9 +20,18 @@ from playwright.sync_api import Page, expect
 
 
 def _seed(page: Page, base_url: str) -> int:
+    # The Cowork card is gated on a parsed task (4aa3bad, "Keep Cowork
+    # interactions user-driven"): an unparsed task renders no card at all, so
+    # there is no intent line to edit. This test predates that gate and seeded
+    # an unparsed task, which is why all six cases sat on a 30s selector
+    # timeout. Every other e2e file already seeds parse_status="parsed".
     response = page.request.post(
         f"{base_url}/api/tasks",
-        data={"title": "Intent edit probe", "description": "d"},
+        data={
+            "title": "Intent edit probe",
+            "description": "d",
+            "parse_status": "parsed",
+        },
     )
     assert response.ok, response.text()
     task_id = response.json()["task"]["id"]
