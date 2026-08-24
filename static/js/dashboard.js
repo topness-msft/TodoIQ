@@ -2324,13 +2324,47 @@ function parseWaitingActivity(task) {
     try { return JSON.parse(task.waiting_activity); } catch (e) { return null; }
 }
 
+function waitingSignal(task) {
+    // The server derives this (src/models.py `_row_to_dict`), so the contract
+    // for what a check found - and whether it ran at all - lives in one place
+    // (src/services/waiting_activity.py) instead of being re-implemented here.
+    if (task && task.waiting_signal && task.waiting_signal.signal) {
+        return task.waiting_signal;
+    }
+    // A payload from before this field existed. Say "unchecked" rather than
+    // guessing a finding out of a shape we have not normalised.
+    return { signal: 'unchecked', activity: parseWaitingActivity(task) };
+}
+
+// How a waiting card is allowed to describe itself.
+//
+// `may_be_resolved` is an LLM's reading of a thread, not a confirmed outcome.
+// It used to render as a green tick - the same mark this product uses for a
+// completed task - so a glance at the list said "done" about something nobody
+// had verified. The label now asks a question and the icon is a magnifier;
+// the user confirms completion, the check only points.
+var WAITING_SIGNAL_ICONS = {
+    activity: '\uD83D\uDCAC',        // speech bubble
+    looks_done: '\uD83D\uDD0E',      // magnifier - deliberately NOT a tick
+    quiet: '\uD83D\uDCA4',           // sleeping face
+    check_failed: '\u26A0\uFE0F'     // warning
+};
+
+function waitingSignalLabel(signal, activity) {
+    var thread = activity && activity.source_scope === 'thread';
+    if (signal === 'activity') return thread ? 'New activity on this thread' : 'New activity';
+    if (signal === 'looks_done') return 'Looks done?';
+    if (signal === 'quiet') return thread ? 'No reply on this thread' : 'No activity';
+    if (signal === 'check_failed') return "Couldn't check";
+    return '';
+}
+
 function waitingActivityIcon(task) {
     if (task.status !== 'waiting' && task.status !== 'snoozed') return '';
     var activity = parseWaitingActivity(task);
-    if (!activity) return '';
 
     // OOO badge — shown for both waiting and snoozed tasks
-    if (activity.status === 'out_of_office') {
+    if (activity && activity.status === 'out_of_office') {
         var returnInfo = activity.return_date ? 'OOO until ' + formatOofDate(activity.return_date) : 'Out of office';
         return '<span class="ooo-badge" title="' + escapeHtml(returnInfo) + '">OOO</span>';
     }
@@ -2338,57 +2372,118 @@ function waitingActivityIcon(task) {
     // For snoozed tasks, only show OOO badge (not other waiting icons)
     if (task.status === 'snoozed') return '';
 
-    var icons = {
-        no_activity: '\uD83D\uDCA4',       // sleeping face
-        activity_detected: '\uD83D\uDCAC',  // speech bubble
-        may_be_resolved: '\u2705'           // checkmark
-    };
-    var tooltips = {
-        no_activity: 'No response \u2014 checked ' + timeAgo(activity.checked_at),
-        activity_detected: 'Activity detected \u2014 ' + truncate(activity.summary, 60),
-        may_be_resolved: 'May be resolved \u2014 ' + truncate(activity.summary, 60)
-    };
-    var icon = icons[activity.status] || '';
-    var tooltip = tooltips[activity.status] || '';
+    var sig = waitingSignal(task);
+    var icon = WAITING_SIGNAL_ICONS[sig.signal] || '';
     if (!icon) return '';
-    return '<span class="waiting-activity-icon activity-status-' + activity.status + '" title="' + escapeHtml(tooltip) + '">' + icon + '</span>';
+
+    var live = sig.activity || {};
+    var label = waitingSignalLabel(sig.signal, live);
+    var tooltip;
+    if (sig.signal === 'check_failed') {
+        // Never dress a failure up as a finding: this is the pair that used to
+        // be indistinguishable from "no activity".
+        tooltip = "Couldn't check \u2014 " + (live.error || 'the check did not complete');
+    } else if (sig.signal === 'quiet') {
+        tooltip = label + ' \u2014 checked ' + timeAgo(live.checked_at);
+    } else {
+        tooltip = label + ' \u2014 ' + truncate(live.summary || '', 60);
+    }
+    return '<span class="waiting-activity-icon activity-signal-' + sig.signal + '" title="'
+        + escapeHtml(tooltip) + '">' + icon + '</span>';
+}
+
+function renderWaitingEvidence(activity) {
+    // The summary is the claim; these are what let the user judge it. No
+    // evidence means no container, rather than an empty box implying we looked
+    // and found nothing quotable.
+    if (!activity || !activity.evidence || !activity.evidence.length) return '';
+    var items = activity.evidence.map(function(item) {
+        var meta = [];
+        if (item.where) meta.push(escapeHtml(item.where));
+        if (item.when) meta.push(timeAgo(item.when));
+        var metaHtml = meta.length
+            ? '<span class="waiting-evidence-meta">' + meta.join(' \u00b7 ') + '</span>'
+            : '';
+        var excerpt = escapeHtml(item.excerpt || '');
+        if (item.url) {
+            excerpt = '<a href="' + escapeAttr(item.url) + '" target="_blank" rel="noopener">'
+                + excerpt + '</a>';
+        }
+        return '<li class="waiting-evidence-item">' + excerpt + metaHtml + '</li>';
+    }).join('');
+    return '<ul class="waiting-evidence" data-testid="waiting-evidence">' + items + '</ul>';
 }
 
 function renderWaitingActivityCard(task) {
-    var activity = parseWaitingActivity(task);
-    if (!activity) {
+    var sig = waitingSignal(task);
+    var activity = sig.activity;
+    var checkBtn = '<button class="btn btn-sm" id="check-now-btn" onclick="requestWaitingCheckSingle('
+        + task.id + ')" style="margin-left:auto">Check Now</button>';
+
+    if (sig.signal === 'unchecked' || !activity) {
         if (task.status === 'waiting') {
             return '<div class="waiting-activity-card">'
                 + '<div class="detail-label">Activity Check</div>'
                 + '<div class="waiting-activity-body">'
-                + '<span class="waiting-activity-status">Not checked yet</span>'
-                + '<button class="btn btn-sm" id="check-now-btn" onclick="requestWaitingCheckSingle(' + task.id + ')" style="margin-left:auto">Check Now</button>'
+                + '<span class="waiting-activity-status" data-testid="waiting-signal">Not checked yet</span>'
+                + checkBtn
                 + '</div>'
                 + '</div>';
         }
         return '';
     }
-    var icons = { no_activity: '\uD83D\uDCA4', activity_detected: '\uD83D\uDCAC', may_be_resolved: '\u2705', out_of_office: '' };
-    var labels = { no_activity: 'No activity', activity_detected: 'Activity detected', may_be_resolved: 'May be resolved', out_of_office: 'Out of office' };
-    var icon = icons[activity.status] || '';
-    var label = labels[activity.status] || activity.status;
+
+    // Out of office keeps its existing presentation.
     if (activity.status === 'out_of_office') {
-        icon = '<span class="ooo-badge">OOO</span>';
-        if (activity.return_date) {
-            label += ' until ' + formatOofDate(activity.return_date);
+        var oooLabel = 'Out of office';
+        if (activity.return_date) oooLabel += ' until ' + formatOofDate(activity.return_date);
+        return '<div class="waiting-activity-card">'
+            + '<div class="detail-label">Activity Check</div>'
+            + '<div class="waiting-activity-body">'
+            + '<span class="waiting-activity-status activity-status-out_of_office" data-testid="waiting-signal">'
+            + '<span class="ooo-badge">OOO</span> ' + escapeHtml(oooLabel)
+            + '</span>' + checkBtn
+            + '</div>'
+            + '<div class="waiting-activity-summary">' + escapeHtml(activity.summary || '') + '</div>'
+            + '<div class="waiting-activity-checked">Checked ' + timeAgo(activity.checked_at) + '</div>'
+            + '</div>';
+    }
+
+    var icon = WAITING_SIGNAL_ICONS[sig.signal] || '';
+    var label = waitingSignalLabel(sig.signal, activity);
+    if (!label) return '';
+
+    var body;
+    var footer;
+    if (sig.signal === 'check_failed') {
+        // Report the failure, not the previous answer. A stale finding shown
+        // with a fresh timestamp is the exact claim this card must not make -
+        // so any earlier result is labelled as earlier, with its own date.
+        body = '<div class="waiting-activity-summary">'
+            + escapeHtml(activity.error || 'The check did not complete.')
+            + '</div>';
+        if (activity.previous && activity.previous.summary) {
+            body += '<div class="waiting-activity-previous">Earlier result ('
+                + timeAgo(activity.previous.checked_at) + '): '
+                + escapeHtml(activity.previous.summary) + '</div>';
         }
+        footer = '<div class="waiting-activity-checked">Last attempt ' + timeAgo(activity.checked_at) + '</div>';
+    } else {
+        body = '<div class="waiting-activity-summary">' + escapeHtml(activity.summary || '') + '</div>'
+            + renderWaitingEvidence(activity);
+        footer = '<div class="waiting-activity-checked">Checked ' + timeAgo(activity.checked_at) + '</div>';
     }
 
     return '<div class="waiting-activity-card">'
         + '<div class="detail-label">Activity Check</div>'
         + '<div class="waiting-activity-body">'
-        + '<span class="waiting-activity-status activity-status-' + activity.status + '">'
+        + '<span class="waiting-activity-status activity-signal-' + sig.signal + '" data-testid="waiting-signal">'
         + icon + ' ' + escapeHtml(label)
         + '</span>'
-        + '<button class="btn btn-sm" id="check-now-btn" onclick="requestWaitingCheckSingle(' + task.id + ')" style="margin-left:auto">Check Now</button>'
+        + checkBtn
         + '</div>'
-        + '<div class="waiting-activity-summary">' + escapeHtml(activity.summary) + '</div>'
-        + '<div class="waiting-activity-checked">Checked ' + timeAgo(activity.checked_at) + '</div>'
+        + body
+        + footer
         + '</div>';
 }
 

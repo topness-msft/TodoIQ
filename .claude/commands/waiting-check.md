@@ -16,21 +16,37 @@ import sqlite3, json
 conn = sqlite3.connect('data/claudetodo.db')
 conn.row_factory = sqlite3.Row
 rows = conn.execute(\"\"\"
-    SELECT id, title, description, key_people, source_type, source_id, created_at, status, waiting_activity, user_notes
+    SELECT id, title, description, key_people, source_type, source_id, source_url, created_at, status, waiting_activity, user_notes
     FROM tasks
     WHERE status = 'waiting'
        OR (status = 'snoozed'
            AND waiting_activity LIKE '%out_of_office%'
-           AND (json_extract(waiting_activity, '$.checked_at') IS NULL
-                OR json_extract(waiting_activity, '$.checked_at') < datetime('now', '-20 hours')))
+           AND (json_extract(waiting_activity, '\$.checked_at') IS NULL
+                OR json_extract(waiting_activity, '\$.checked_at') < datetime('now', '-20 hours')))
 \"\"\").fetchall()
 for r in rows:
-    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
+    print(json.dumps({'id': r['id'], 'title': r['title'], 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'source_url': r['source_url'] or '', 'created_at': r['created_at'], 'status': r['status'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
 conn.close()
 "
 ```
 
 If there are zero tasks, print "No waiting tasks to check." and stop.
+
+### Work out the window to read (`check_since`)
+
+Do **not** use `updated_at`. This command writes `updated_at` on every run
+(Step 4), so using it would mean "since the last time I looked" and would
+shrink the window each pass — and would step straight over anything that
+arrived while a check was failing.
+
+For each task, `check_since` is:
+
+1. The `checked_at` of the previous `waiting_activity`, **if** that check
+   succeeded (its `check_state` is absent or `"ok"`).
+2. Otherwise the previous `check_since` — a failed check must not advance the
+   cursor, or the unread period is skipped forever.
+3. Otherwise `created_at` (for `manual` tasks, 2 days before `created_at` —
+   manual tasks are often written up after the activity already happened).
 
 ## Step 2: Choose who to query and call WorkIQ
 
@@ -49,11 +65,30 @@ Determine the **query start date**:
 
 **Note:** WorkIQ sometimes misses OOO status with simple queries. The explicit mention of "presence", "Teams", and "Outlook" helps it check the right signals.
 
-**Then**, query for ALL recent communication with the person across every channel:
+**Then**, read for activity. Prefer the originating thread; fall back to the person.
 
-> "What are my most recent emails, Teams messages, and chats with [person] since [start date]? List all interactions found."
+**(a) Thread-scoped — use this when `source_url` is a `teams.microsoft.com` link.**
+The URL carries the conversation id, so the exact thread can be re-read:
 
-**IMPORTANT:** Always query all channels regardless of `source_type` — responses can come on any channel (e.g. a meeting action item resolved via email, an email task answered in Teams). Do NOT limit to the specific task topic. WorkIQ may miss relevant responses if the query is too narrow. You will classify relevance yourself in Step 3.
+> "Read the Teams conversation at [source_url] and list every message posted
+> since [check_since], with sender, timestamp and text. If there are none, say
+> so explicitly."
+
+Record `source_scope: "thread"` for this task, and the conversation id from the
+URL.
+
+**(b) Person-scoped — everything else** (Outlook links, meeting tasks, manual
+tasks, or any task with no usable `source_url`):
+
+> "What are my most recent emails, Teams messages, and chats with [person] since [check_since]? List all interactions found."
+
+Record `source_scope: "person"`.
+
+The distinction matters to the reader: "no reply on this thread" is a much
+stronger statement than "nothing from this person anywhere", and the card
+renders them differently. Do not claim the first when you did the second.
+
+**IMPORTANT:** For person-scoped reads, always query all channels regardless of `source_type` — responses can come on any channel (e.g. a meeting action item resolved via email, an email task answered in Teams). Do NOT limit to the specific task topic. WorkIQ may miss relevant responses if the query is too narrow. You will classify relevance yourself in Step 3.
 
 ### @WorkIQ inline questions
 
@@ -76,7 +111,43 @@ Review the WorkIQ results against the task's title and description. Classify usi
 
 When in doubt, prefer `activity_detected` over `no_activity` — any communication is worth surfacing. Prefer `activity_detected` over `may_be_resolved` unless the resolution is obvious.
 
-**WorkIQ errors:** If `ask_work_iq` fails or returns an error for a task, **skip that task entirely** — do NOT write a result for it. This preserves any previous check data. Only write results for tasks where WorkIQ returned a real response.
+`may_be_resolved` renders as **"Looks done?"** — a prompt for the user to
+confirm, not a completion. Nothing in Riveter completes a task off the back of
+it. Do not stretch to reach it; an over-eager "looks done" invites the user to
+drop something that is still open, which is the most expensive mistake this
+check can make.
+
+### Capture evidence for whatever you classify
+
+A summary on its own is an assertion. For any classification other than
+`no_activity`, record up to 3 `evidence` entries — the actual messages the
+judgement rests on:
+
+```json
+{"excerpt": "Sending the numbers over now", "when": "2026-08-21T09:00:00Z", "where": "Teams", "url": null}
+```
+
+Quote the source; do not paraphrase into the excerpt. `where` is the channel
+("Teams", "Email"). `url` is a deep link if WorkIQ returned one, otherwise
+null. The card renders these so the user can check the claim rather than take
+it on trust.
+
+**WorkIQ errors:** If `ask_work_iq` fails, times out, or returns nothing
+readable for a task, **record the failure** — do NOT skip the task and do NOT
+invent a classification.
+
+This is the point of the whole check. Previously a failure meant nothing was
+written, so the card kept showing the last successful result with its original
+timestamp: "I could not look" was displayed as "I looked and found this". Write
+instead:
+
+```json
+{"check_state": "failed", "error": "[what happened]", "previous": {...the prior activity, if any...}}
+```
+
+The dashboard renders that as **"Couldn't check"**, keeps any earlier finding
+clearly labelled as earlier, and leaves the cursor where it was so the next run
+re-reads the same window.
 
 ## Step 4: Write ALL results to SQLite
 
@@ -92,17 +163,43 @@ import sqlite3, json
 from datetime import datetime, timezone
 conn = sqlite3.connect('data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+# (task_id, classification_or_None, summary, return_date, orig_status,
+#  check_since, source_scope, conversation_id, evidence, error_or_None, previous_or_None)
 results = [
-    (TASK_ID, 'CLASSIFICATION', 'SUMMARY', RETURN_DATE_OR_NONE, ORIGINAL_TASK_STATUS),
+    (TASK_ID, 'CLASSIFICATION', 'SUMMARY', RETURN_DATE_OR_NONE, ORIGINAL_TASK_STATUS,
+     'CHECK_SINCE', 'SOURCE_SCOPE', CONVERSATION_ID_OR_NONE, EVIDENCE_LIST, None, None),
     ...
 ]
-for task_id, classification, summary, return_date, orig_status in results:
-    activity = {'status': classification, 'summary': summary, 'checked_at': now}
-    if return_date:
-        activity['return_date'] = return_date
+for (task_id, classification, summary, return_date, orig_status,
+     check_since, source_scope, conversation_id, evidence, error, previous) in results:
+    activity = {
+        'version': 2,
+        'producer': 'waiting-check',
+        'check_state': 'failed' if error else 'ok',
+        'checked_at': now,
+        'check_since': check_since,
+        'source_scope': source_scope,
+    }
+    if error:
+        # A failed check has no finding of its own. Keep the earlier one under
+        # 'previous' so the card can show it AS earlier, and leave check_since
+        # where it was so the next run re-reads the window nobody managed to read.
+        activity['error'] = error
+        if previous:
+            activity['previous'] = previous
+    else:
+        activity['status'] = classification
+        activity['summary'] = summary
+        if evidence:
+            activity['evidence'] = evidence
+        if conversation_id:
+            activity['conversation_id'] = conversation_id
+        if return_date:
+            activity['return_date'] = return_date
     val = json.dumps(activity)
-    if orig_status == 'snoozed' and classification != 'out_of_office':
-        # Auto-unsnooze: person is back, move to waiting
+    if orig_status == 'snoozed' and not error and classification != 'out_of_office':
+        # Auto-unsnooze: person is back, move to waiting. Never on a failed
+        # check - 'could not tell' is not evidence that they are back.
         conn.execute('UPDATE tasks SET waiting_activity = ?, status = ?, snoozed_until = NULL, updated_at = ? WHERE id = ?', (val, 'waiting', now, task_id))
         print('Task ' + str(task_id) + ': auto-unsnoozed (person no longer OOO)')
     else:
@@ -113,7 +210,15 @@ print('Updated ' + str(len(results)) + ' tasks')
 "
 ```
 
-Replace TASK_ID, CLASSIFICATION, SUMMARY, RETURN_DATE_OR_NONE, ORIGINAL_TASK_STATUS with actual values. Use `None` for return_date if unknown. Use the task's original `status` field from Step 1.
+Replace the placeholders with actual values. Use `None` for `return_date`,
+`conversation_id`, `error` and `previous` where they do not apply, and `[]` for
+`evidence`. Use the task's original `status` field from Step 1. For a failed
+check pass `None` for the classification and summary — the shape refuses to
+carry a finding alongside a failure.
+
+The shape written here is the v2 contract in `src/services/waiting_activity.py`;
+`src/models.py` normalises every row through it on read, so older rows still
+render. Keep the two in step.
 
 ### Write @WorkIQ answers back to `user_notes`
 

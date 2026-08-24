@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from .db import get_connection, init_db
 from .services import person_identity as _person_identity
+from .services import waiting_activity
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,20 @@ def _now() -> str:
 def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
-    return dict(row)
+    task = dict(row)
+    if "waiting_activity" in task:
+        # Derived, not stored. The raw column is left exactly as written: the
+        # dashboard's client-side search reads that text, and the slash
+        # commands run json_extract against it directly. This adds the
+        # normalised reading beside it, which is the only place the v2 contract
+        # can be applied - the commands write their JSON inline from bash and
+        # cannot import this module.
+        activity = waiting_activity.normalise(task["waiting_activity"])
+        task["waiting_signal"] = {
+            "signal": waiting_activity.signal_for(task.get("status"), activity),
+            "activity": activity,
+        }
+    return task
 
 
 def ensure_db():
@@ -242,7 +256,7 @@ def list_tasks(
             """,
             (*params, limit, offset),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 

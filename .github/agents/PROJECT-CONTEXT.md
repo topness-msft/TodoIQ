@@ -90,6 +90,24 @@ structured WorkIQ delivery plus Cowork-powered general action flows.
 - Browser tests carry a 90s per-test timeout (attached in the e2e conftest, not
   `pytest.ini`, so unit tests are unaffected).
 
+## `tasks.waiting_activity` contract
+One TEXT column, JSON, written by three commands with different vocabularies
+(`waiting-check`, `suggestion-check`, `todo-parse`). The v2 shape and the rules
+for reading it live in `src/services/waiting_activity.py`; `src/models.py`
+`_row_to_dict` normalises every row through it on read and attaches a derived
+`waiting_signal`, so legacy rows render without a migration. The raw column is
+never rewritten — client-side search and the commands' own `json_extract`
+queries still read it directly.
+
+The commands build their JSON inline in bash and cannot import the module, so
+`tests/test_waiting_activity.py::TestProducerReaderContract` is the only thing
+holding writer and reader together. Change one, change both.
+
+`check_state: failed` means the check did not run. It must never render as a
+finding: "could not check" and "checked, found nothing" are different answers.
+`may_be_resolved` is an inference and renders as "Looks done?" with a magnifier
+— never the completion tick, and nothing auto-completes a task from it.
+
 ## Deploy
 - Environments:
   - Dev/dogfood: `http://localhost:8768` from this worktree.
