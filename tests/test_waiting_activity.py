@@ -360,6 +360,58 @@ class TestProducerReaderContract(unittest.TestCase):
         self.assertEqual(got["return_date"], "2026-08-31")
 
 
+class TestSuggestionCheckContract(unittest.TestCase):
+    """/suggestion-check shares this column with its own vocabulary.
+
+    It was attributed by inference - "likely_resolved must mean the suggestion
+    checker" - which works only while the two vocabularies stay disjoint. An
+    inference is not evidence, so the command now states who it is, and the
+    inference stays only as a fallback for rows written before it did.
+
+    It also had the same honesty gap waiting-check had: on a WorkIQ error it
+    skipped the task entirely (suggestion-check.md:74), so the badge kept
+    showing the previous verdict at its previous timestamp.
+    """
+
+    def test_a_labelled_suggestion_result_round_trips(self):
+        written = json.dumps({
+            "version": 2, "producer": "suggestion-check", "check_state": "ok",
+            "checked_at": "2026-08-24T09:00:00Z",
+            "status": "likely_resolved",
+            "summary": "Aarti confirmed the PUID list was sent",
+        })
+        got = wa.normalise(written)
+        self.assertEqual(got["producer"], wa.PRODUCER_SUGGESTION_CHECK)
+        self.assertEqual(got["status"], "likely_resolved")
+
+    def test_a_failed_suggestion_check_round_trips_without_a_verdict(self):
+        written = json.dumps({
+            "version": 2, "producer": "suggestion-check", "check_state": "failed",
+            "checked_at": "2026-08-24T09:00:00Z",
+            "error": "WorkIQ returned no readable output",
+            "previous": {"status": "still_pending", "summary": "no reply yet",
+                         "checked_at": "2026-08-20T10:00:00Z"},
+        })
+        got = wa.normalise(written)
+        self.assertEqual(got["check_state"], wa.CHECK_FAILED)
+        self.assertIsNone(got["status"])
+        self.assertEqual(got["previous"]["status"], "still_pending")
+
+    def test_a_labelled_suggestion_row_never_drives_a_waiting_card(self):
+        # The two vocabularies must not leak across surfaces even when the
+        # producer is explicit.
+        for status in ("likely_resolved", "still_pending", "unclear"):
+            with self.subTest(status=status):
+                got = wa.normalise({"producer": "suggestion-check", "status": status})
+                self.assertEqual(wa.signal_for("waiting", got), wa.SIGNAL_NONE)
+
+    def test_an_explicit_producer_beats_the_vocabulary_guess(self):
+        # A waiting-check row that happens to carry an odd status is still a
+        # waiting-check row when it says so.
+        got = wa.normalise({"producer": "waiting-check", "status": "no_activity"})
+        self.assertEqual(got["producer"], wa.PRODUCER_WAITING_CHECK)
+
+
 class TestReadPathNormalisation(unittest.TestCase):
     """Legacy rows become v2-shaped on the way out, without a migration.
 

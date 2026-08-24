@@ -71,7 +71,23 @@ Review the WorkIQ results against the task's title and description. Classify usi
 
 When in doubt, prefer `unclear` over `likely_resolved` — only classify as resolved when the evidence is clear.
 
-**WorkIQ errors:** If `ask_work_iq` fails or returns an error for a task, **skip that task entirely** — do NOT write a result for it.
+**WorkIQ errors:** If `ask_work_iq` fails, times out, or returns nothing
+readable for a task, **record the failure** — do NOT skip the task and do NOT
+invent a classification.
+
+Skipping meant nothing was written, so the badge went on showing the previous
+verdict under its original timestamp: "could not look" was displayed as "looked,
+then, and found this". Write instead:
+
+```json
+{"version": 2, "producer": "suggestion-check", "check_state": "failed",
+ "error": "[what happened]", "previous": {...the prior activity, if any...}}
+```
+
+The dashboard renders that as **"Couldn't check"**, keeps any earlier verdict
+clearly labelled as earlier, and offers Re-check rather than
+"Dismiss — Already Done" — dismissing on a check that never ran would discard a
+live suggestion.
 
 ### 2d: Write this task's result to SQLite immediately
 
@@ -83,7 +99,23 @@ import sqlite3, json
 from datetime import datetime, timezone
 conn = sqlite3.connect('data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-activity = {'status': 'CLASSIFICATION', 'summary': 'SUMMARY', 'checked_at': now}
+# For a successful check pass CLASSIFICATION and SUMMARY; for a failed one pass
+# None for both and set ERROR. The shape refuses to carry a verdict alongside a
+# failure, which is the point.
+classification, summary, error, previous = 'CLASSIFICATION', 'SUMMARY', None, None
+activity = {
+    'version': 2,
+    'producer': 'suggestion-check',
+    'check_state': 'failed' if error else 'ok',
+    'checked_at': now,
+}
+if error:
+    activity['error'] = error
+    if previous:
+        activity['previous'] = previous
+else:
+    activity['status'] = classification
+    activity['summary'] = summary
 conn.execute('UPDATE tasks SET waiting_activity = ?, updated_at = ? WHERE id = ?', (json.dumps(activity), now, TASK_ID))
 conn.commit()
 conn.close()
@@ -91,7 +123,17 @@ print('Updated task #TASK_ID')
 "
 ```
 
-Replace TASK_ID, CLASSIFICATION, SUMMARY with actual values.
+Replace TASK_ID, CLASSIFICATION, SUMMARY (and ERROR/PREVIOUS on a failure) with
+actual values.
+
+`producer` is written explicitly rather than left to be guessed. This column is
+shared with `/waiting-check`, whose vocabulary is different, and a reader was
+inferring ownership from the status string — which works only while the two
+vocabularies stay disjoint. The shape is the v2 contract in
+`src/services/waiting_activity.py`; `src/models.py` normalises every row through
+it on read. Keep the two in step —
+`tests/test_waiting_activity.py::TestSuggestionCheckContract` is what holds them
+together, since this script cannot import the module.
 
 If the task had unanswered `@WorkIQ` questions, also write the answers back into `user_notes` in the same step:
 

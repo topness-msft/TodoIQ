@@ -2685,8 +2685,16 @@ function _suggestionCheckTooltip() {
 
 function suggestionCheckBadge(task) {
     if (task.status !== 'suggested') return '';
-    var activity = parseWaitingActivity(task);
+    var activity = waitingSignal(task).activity;
     if (!activity) return '';
+
+    // A badge states a finding. A check that did not run has none, so it shows
+    // nothing rather than leaving the previous verdict standing as current.
+    if (activity.check_state === 'check_failed' || activity.check_state === 'failed') {
+        return '<span class="suggestion-check-badge sc-unclear" title="'
+            + escapeHtml("Couldn't check \u2014 " + (activity.error || 'the check did not complete'))
+            + '">\u26A0\uFE0F</span>';
+    }
 
     var cfg = {
         likely_resolved: { icon: '\u2713', label: 'Done?', cls: 'resolved' },
@@ -2703,14 +2711,42 @@ function suggestionCheckBadge(task) {
 
 function renderSuggestionCheckCard(task) {
     if (task.status !== 'suggested') return '';
-    var activity = parseWaitingActivity(task);
+    var activity = waitingSignal(task).activity;
     if (!activity) {
         return '<div class="waiting-activity-card">'
             + '<div class="detail-label">Suggestion Check</div>'
             + '<div class="waiting-activity-body">'
-            + '<span class="waiting-activity-status">Not checked yet</span>'
+            + '<span class="waiting-activity-status" data-testid="suggestion-signal">Not checked yet</span>'
             + '<button class="btn btn-sm" onclick="requestSuggestionCheck()" style="margin-left:auto">Check Now</button>'
             + '</div>'
+            + '</div>';
+    }
+
+    // Same rule as the waiting card: a run that did not happen reports itself,
+    // and any earlier verdict is shown AS earlier. Reading the raw JSON here
+    // used to send a statusless row through cfg[undefined] and print the
+    // literal word "undefined" beside a stale timestamp.
+    if (activity.check_state === 'check_failed' || activity.check_state === 'failed') {
+        var prior = '';
+        if (activity.previous && activity.previous.summary) {
+            prior = '<div class="waiting-activity-previous">Earlier result ('
+                + timeAgo(activity.previous.checked_at) + '): '
+                + escapeHtml(activity.previous.summary) + '</div>';
+        }
+        return '<div class="waiting-activity-card">'
+            + '<div class="detail-label">Suggestion Check</div>'
+            + '<div class="waiting-activity-body">'
+            + '<span class="waiting-activity-status activity-signal-check_failed" '
+            + 'data-testid="suggestion-signal">\u26A0\uFE0F '
+            + escapeHtml("Couldn't check") + '</span>'
+            // Deliberately NOT "Dismiss - Already Done": nobody established
+            // that, and dismissing here would discard a live suggestion.
+            + '<button class="btn btn-sm" onclick="requestSuggestionCheck()" style="margin-left:auto">Re-check</button>'
+            + '</div>'
+            + '<div class="waiting-activity-summary">'
+            + escapeHtml(activity.error || 'The check did not complete.') + '</div>'
+            + prior
+            + '<div class="waiting-activity-checked">Last attempt ' + timeAgo(activity.checked_at) + '</div>'
             + '</div>';
     }
 
@@ -2719,7 +2755,7 @@ function renderSuggestionCheckCard(task) {
         still_pending:   { icon: '\u23F3', label: 'Still pending' },
         unclear:         { icon: '?', label: 'Unclear' }
     };
-    var c = cfg[activity.status] || { icon: '', label: activity.status };
+    var c = cfg[activity.status] || { icon: '', label: activity.status || 'Unclear' };
 
     var dismissBtn = '';
     if (activity.status === 'likely_resolved') {
@@ -2731,7 +2767,7 @@ function renderSuggestionCheckCard(task) {
     return '<div class="waiting-activity-card">'
         + '<div class="detail-label">Suggestion Check</div>'
         + '<div class="waiting-activity-body">'
-        + '<span class="waiting-activity-status sc-' + (activity.status === 'likely_resolved' ? 'resolved' : activity.status === 'still_pending' ? 'pending' : 'unclear') + '">'
+        + '<span class="waiting-activity-status sc-' + (activity.status === 'likely_resolved' ? 'resolved' : activity.status === 'still_pending' ? 'pending' : 'unclear') + '" data-testid="suggestion-signal">'
         + c.icon + ' ' + escapeHtml(c.label)
         + '</span>'
         + dismissBtn
