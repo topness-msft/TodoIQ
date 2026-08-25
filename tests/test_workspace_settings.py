@@ -7,6 +7,28 @@ import pytest
 
 
 class TestWorkspaceSettings:
+    def test_absent_settings_file_is_reported_not_assumed(
+        self, tmp_path, monkeypatch
+    ):
+        """Losing settings.json degraded behaviour with no signal anywhere.
+
+        The file was left behind in a checkout migration. Meeting preferences
+        and the Cowork transport flag silently reverted to defaults, and the
+        only symptom was meeting times on the hour days later. A missing file
+        is a fact worth stating.
+        """
+        import src.services.workspace_settings as ws
+
+        monkeypatch.setattr(ws, "SETTINGS_PATH", tmp_path / "missing.json")
+        warning = ws.missing_settings_warning()
+        assert warning is not None
+        assert "missing.json" in warning
+
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"cowork_api_transport": True}), encoding="utf-8")
+        monkeypatch.setattr(ws, "SETTINGS_PATH", path)
+        assert ws.missing_settings_warning() is None
+
     def test_missing_file_is_disabled(self, tmp_path, monkeypatch):
         import src.services.workspace_settings as ws
 

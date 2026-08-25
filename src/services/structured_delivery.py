@@ -233,14 +233,38 @@ def preview_prompt(task: dict, payload: dict) -> str:
     from src.services.cowork_runner import meeting_preferences
 
     preferences = meeting_preferences() or {}
-    default_minutes = int(preferences.get("default_minutes") or 25)
-    start_offset = int(preferences.get("start_offset_minutes") or 0)
+    configured_minutes = preferences.get("default_minutes")
+    default_minutes = int(configured_minutes or 25)
+    # `or 0` treated a configured on-the-hour rule as no rule at all, and --
+    # worse -- treated a MISSING settings file as a choice of :00. When
+    # settings.json was lost in a checkout migration the prompt went on
+    # asserting "Start suggestions at :00 or :30" as though Phil had picked
+    # it, so his real :05 rule looked forgotten. An unset preference is
+    # stated as nothing.
+    configured_offset = preferences.get("start_offset_minutes")
+    standing_notes = str(preferences.get("notes") or "").strip()
+    duration_rule = (
+        f"The user's standing meeting duration is {default_minutes} minutes. "
+        if configured_minutes
+        else f"Default to {default_minutes} minutes. "
+    )
+    offset_rule = (
+        f"Start suggestions at :{int(configured_offset):02d} or "
+        f":{(int(configured_offset) + 30) % 60:02d}. "
+        if configured_offset is not None
+        else ""
+    )
     standing_rule = (
-        f"The user's standing meeting duration is {default_minutes} minutes. Use "
-        f"{default_minutes} minutes unless the task explicitly states another "
-        f"duration. Start suggestions at :{start_offset:02d} or "
-        f":{(start_offset + 30) % 60:02d}. Suggest 1-3 future mutual-free slots, "
-        "treating tentative calendar blocks as available."
+        duration_rule
+        + f"Use {default_minutes} minutes unless the task explicitly states "
+        "another duration. "
+        + offset_rule
+        + "Suggest 1-3 future mutual-free slots, treating tentative calendar "
+        "blocks as available."
+        # Free-text standing instructions. cowork_runner has always rendered
+        # these; this path read only duration and offset, so anything Phil
+        # wrote here never reached the worker that now books most meetings.
+        + (f" {standing_notes}" if standing_notes else "")
         if channel == "calendar"
         else ""
     )
@@ -304,13 +328,21 @@ def preview_prompt(task: dict, payload: dict) -> str:
         if steer
         else ""
     )
+    # Teams messages and emails drafted here are the same artefacts Cowork
+    # drafts, so they get the same standing voice. Without this the voice
+    # settings were honoured or ignored depending on which engine routed the
+    # task -- and routing keeps moving work onto this one.
+    from src.services.cowork_runner import voice_layer
+
+    voice = voice_layer(channel) if channel in {"teams", "email"} else ""
+    voice_rule = f"\n\n{voice}" if voice else ""
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
 
 Resolve every delivery identifier now. Do not defer recipient, message, chat,
 team, channel, thread, attendee, timezone, or slot resolution until execution.
-{standing_rule}{steer_rule}{content_rule}
+{standing_rule}{steer_rule}{content_rule}{voice_rule}
 
 Task snapshot:
 {_json(_task_snapshot(task))}

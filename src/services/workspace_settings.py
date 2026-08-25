@@ -58,6 +58,25 @@ def _read_settings() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def missing_settings_warning() -> str | None:
+    """Say when the settings file is absent, rather than quietly defaulting.
+
+    Every reader here falls back to a default when the document is missing,
+    which is the right behaviour but a silent one. The file was lost in a
+    checkout migration and nothing said so: meeting preferences reverted to
+    unset and the Cowork transport flag reverted to off, and the first
+    symptom was meeting times coming back on the hour days later. A missing
+    file is a fact, so state it.
+    """
+    if SETTINGS_PATH.exists():
+        return None
+    return (
+        f"No settings file at {SETTINGS_PATH}. Meeting preferences and the "
+        "Cowork API transport are running on defaults, not on anything you "
+        "configured."
+    )
+
+
 def api_transport_enabled() -> bool:
     """Is the Cowork run transport allowed to use the runtime HTTP API?
 

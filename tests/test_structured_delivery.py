@@ -1993,6 +1993,104 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertEqual(by_value["0"]["a@x.com"], "free")
         self.assertEqual(by_value["1"]["a@x.com"], "unknown")
 
+    def test_workiq_drafts_get_the_same_voice_as_cowork_drafts(self):
+        """The voice settings are read by one engine and ignored by the other.
+
+        cowork_voice names a skill per channel and cowork_runner renders it
+        into every draft it writes. structured_delivery never called it, so a
+        Teams message or email drafted by WorkIQ came out with no voice
+        guidance at all -- and routing keeps moving work onto that path.
+        """
+        from src.services import cowork_runner
+
+        task = create_task("Reply to Sally", action_type="respond-email")
+        original = cowork_runner.voice_skill
+        try:
+            cowork_runner.voice_skill = lambda channel: (
+                "work-email-voice" if channel == "email" else "work-teams-voice"
+            )
+            for channel, skill in (
+                ("email", "work-email-voice"),
+                ("teams", "work-teams-voice"),
+            ):
+                payload = structured_delivery.initial_payload(task, channel)
+                prompt = structured_delivery.preview_prompt(task, payload)
+                self.assertIn(skill, prompt, f"{channel} draft has no voice")
+        finally:
+            cowork_runner.voice_skill = original
+
+    def test_a_calendar_preview_carries_the_standing_meeting_notes(self):
+        """meeting_preferences.notes is validated, capped, and then dropped.
+
+        cowork_runner renders it; the structured path read only duration and
+        offset, so a standing instruction written into notes never reached
+        the worker that now books most meetings.
+        """
+        from src.services import cowork_runner
+
+        task = create_task("Schedule a review", action_type="schedule-meeting")
+        original = cowork_runner.meeting_preferences
+        try:
+            cowork_runner.meeting_preferences = lambda: {
+                "default_minutes": 25,
+                "start_offset_minutes": 5,
+                "notes": "never book me before 9am",
+            }
+            payload = structured_delivery.initial_payload(task, "calendar")
+            prompt = structured_delivery.preview_prompt(task, payload)
+            self.assertIn("never book me before 9am", prompt)
+        finally:
+            cowork_runner.meeting_preferences = original
+
+    def test_an_unset_offset_is_not_stated_as_a_rule(self):
+        """A missing settings file must not become an invented preference.
+
+        settings.json was lost in a checkout migration. meeting_preferences()
+        returned nothing, the offset fell back to 0, and the prompt asserted
+        "Start suggestions at :00 or :30" as though Phil had chosen it -- so
+        the times came back on the hour and the real :05 rule looked
+        forgotten. Saying nothing is the honest fallback; the worker can pick
+        sensible times without being handed a rule nobody set.
+        """
+        from src.services import cowork_runner
+
+        task = create_task("Schedule a review", action_type="schedule-meeting")
+        original = cowork_runner.meeting_preferences
+        try:
+            cowork_runner.meeting_preferences = lambda: None
+            payload = structured_delivery.initial_payload(task, "calendar")
+            prompt = structured_delivery.preview_prompt(task, payload)
+            self.assertNotIn("Start suggestions at", prompt)
+            # And it must not claim a standing duration Phil never set.
+            self.assertNotIn("standing meeting duration", prompt)
+            self.assertIn("25 minutes", prompt)
+
+            cowork_runner.meeting_preferences = lambda: {
+                "default_minutes": 25, "start_offset_minutes": 5,
+            }
+            prompt = structured_delivery.preview_prompt(task, payload)
+            self.assertIn("Start suggestions at :05 or :35", prompt)
+            self.assertIn("standing meeting duration is 25", prompt)
+        finally:
+            cowork_runner.meeting_preferences = original
+
+    def test_an_offset_of_zero_is_a_choice_not_an_absence(self):
+        """`or 0` made a configured on-the-hour rule indistinguishable
+        from no rule at all."""
+        from src.services import cowork_runner
+
+        task = create_task("Schedule a review", action_type="schedule-meeting")
+        original = cowork_runner.meeting_preferences
+        try:
+            cowork_runner.meeting_preferences = lambda: {
+                "start_offset_minutes": 0,
+            }
+            payload = structured_delivery.initial_payload(task, "calendar")
+            prompt = structured_delivery.preview_prompt(task, payload)
+            self.assertIn("Start suggestions at :00 or :30", prompt)
+        finally:
+            cowork_runner.meeting_preferences = original
+
     def test_calendar_preview_gets_a_longer_budget_than_a_message(self):
         """Two calendar previews died at exactly 301s on the 300s default.
 

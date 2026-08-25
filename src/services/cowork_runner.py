@@ -463,6 +463,17 @@ _VOICE_NEUTRAL = (
 )
 
 
+def voice_layer(channel: str) -> str:
+    """The standing voice guidance for a channel, for any engine that drafts.
+
+    cowork_runner has always applied this to its own drafts. structured
+    delivery drafts the same Teams messages and emails and had none of it, so
+    the voice settings were honoured or ignored depending on which engine
+    happened to route the task. One source of truth, both callers.
+    """
+    return _voice_for(channel)
+
+
 def _voice_for(channel: str) -> str:
     """The [VOICE] layer for a bound channel, or the neutral register."""
     key = (channel or "").strip().lower()

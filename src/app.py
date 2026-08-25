@@ -32,7 +32,10 @@ from .models import (
 )
 from .services.claude_runner import run_copilot
 from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
-from .services.workspace_settings import get_workspace_settings
+from .services.workspace_settings import (
+    get_workspace_settings,
+    missing_settings_warning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +241,14 @@ def start_server(port=8766):
     stranded = recover_stuck_previews()
     if stranded:
         logger.info(f"Startup recovery: failed {stranded} interrupted Cowork preview(s)")
+
+    # Every settings reader falls back to a default when the document is
+    # absent, which is correct but silent. Say it once at startup so a lost
+    # settings.json is diagnosable instead of showing up days later as
+    # meeting times on the hour.
+    settings_warning = missing_settings_warning()
+    if settings_warning:
+        logger.warning(settings_warning)
 
     app = make_app()
     app.listen(port, address="127.0.0.1")
