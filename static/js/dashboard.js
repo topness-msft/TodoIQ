@@ -5204,6 +5204,27 @@ function cwInteractionFields(taskId, interaction) {
     var availabilityChecked = !(evidence
         && evidence.availability_verified === false);
     var coverage = evidence && evidence.availability_coverage;
+    if (evidence && !coverage && Array.isArray(evidence.slots)) {
+        // Evidence stored before coverage existed still carries the slots it
+        // was derived from, so read it off those rather than defaulting to
+        // the worst case and telling the user nothing was checked.
+        var measuredSlots = 0;
+        evidence.slots.forEach(function(slot) {
+            var values = [];
+            var map = (slot && slot.availability) || {};
+            for (var email in map) {
+                if (Object.prototype.hasOwnProperty.call(map, email)) {
+                    values.push(String(map[email]).trim().toLowerCase());
+                }
+            }
+            if (values.length && values.every(function(status) {
+                return status !== 'unknown';
+            })) measuredSlots += 1;
+        });
+        coverage = !evidence.slots.length ? 'none'
+            : measuredSlots === evidence.slots.length ? 'full'
+            : measuredSlots ? 'partial' : 'none';
+    }
     var partlyChecked = !availabilityChecked && coverage === 'partial';
     var evidenceNote = evidence && evidence.query_backed === true
         ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note"'

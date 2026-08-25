@@ -661,6 +661,85 @@ def test_partly_checked_times_do_not_claim_nothing_was_read(page: Page, base_url
     expect(page.get_by_test_id("cw-answer-submit")).to_be_visible()
 
 
+def test_coverage_is_read_off_slots_when_the_key_predates_it(page: Page, base_url):
+    """Choosers stored before availability_coverage existed still carry slots.
+
+    Action 286 was parked on a live chooser written by the older code. Reading
+    the worst case from a missing key would tell the user nothing had been
+    checked when two of its slots had been measured free.
+    """
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule a short call with Ganesh"},
+    )
+    task_id = created.json()["task"]["id"]
+
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Ganesh K', email: 'ganesh@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                structured_payload: '{"channel":"calendar"}',
+                delivery_channel: 'calendar',
+                interaction_request: {
+                    invocation_id: 'structured-calendar-286',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'copilot-ask',
+                        query_backed: true,
+                        availability_verified: false,
+                        duration_minutes: 25,
+                        attendees: ['ganesh@microsoft.com'],
+                        slots: [
+                            {value: '0', label: 'Wed 4:05 PM',
+                             availability: {'ganesh@microsoft.com': 'free'}},
+                            {value: '1', label: 'Wed 5:35 PM',
+                             availability: {'ganesh@microsoft.com': 'free'}},
+                            {value: '2', label: 'Fri 12:05 PM',
+                             availability: {'ganesh@microsoft.com': 'unknown'}}
+                        ]
+                    },
+                    questions: [{
+                        id: '0',
+                        header: 'Select & create meeting',
+                        question: 'Pick one.',
+                        options: [
+                            {value: '0', label: 'Wed 4:05 PM', description: 'x'},
+                            {value: '1', label: 'Wed 5:35 PM', description: 'x'},
+                            {value: '2', label: 'Fri 12:05 PM', description: 'x'}
+                        ]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"structured-calendar-286"}',
+                conversation_id: 't:u:ganesh'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    note = page.get_by_test_id("cw-query-backed-note")
+    expect(note).to_be_visible()
+    assert "could not be read" not in note.inner_text(), note.inner_text()
+    expect(note).to_contain_text("Only some of these times could be checked")
+
+
 def test_unverified_evidence_suppresses_the_availability_grid(page: Page, base_url):
     """A stored slot can still claim "free" after the probe returned nothing.
 
