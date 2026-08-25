@@ -5199,13 +5199,20 @@ function cwInteractionFields(taskId, interaction) {
     // "checked the exact calendars" directly above the run's own sentence
     // saying it could not read them. An explicit false demotes the claim;
     // absent stays as it was, since older Cowork evidence never set it.
+    // Coverage then separates "none measured" from "not all measured" --
+    // task 2610 measured two of three slots and was told none were read.
     var availabilityChecked = !(evidence
         && evidence.availability_verified === false);
+    var coverage = evidence && evidence.availability_coverage;
+    var partlyChecked = !availabilityChecked && coverage === 'partial';
     var evidenceNote = evidence && evidence.query_backed === true
         ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note"'
-            + (availabilityChecked ? '' : ' data-unverified="1"') + '>'
+            + (availabilityChecked ? '' : ' data-unverified="1"')
+            + (partlyChecked ? ' data-partial="1"' : '') + '>'
             + '<b>' + (availabilityChecked
-                ? 'Query-backed suggestions' : 'Times not checked') + '</b>'
+                ? 'Query-backed suggestions'
+                : partlyChecked ? 'Some times checked' : 'Times not checked')
+            + '</b>'
             + '<span>' + (availabilityChecked
             ? (structured
             ? 'WorkIQ checked the exact calendars. Pick a time, then press '
@@ -5214,6 +5221,12 @@ function cwInteractionFields(taskId, interaction) {
                 + '-minute meeting. There is no second confirmation.'
             : 'Cowork derived these after checking the exact calendars. '
                 + 'Review the time before booking.')
+            : partlyChecked
+            ? 'Only some of these times could be checked; the rest are '
+                + 'unchecked and may clash. Each one says which it is. You '
+                + 'can still book the '
+                + escapeHtml(String(evidence.duration_minutes || 25))
+                + '-minute meeting. There is no second confirmation.'
             : (structured
             ? 'The attendees&rsquo; calendars could not be read, so these '
                 + 'times are unchecked and may clash. You can still book the '

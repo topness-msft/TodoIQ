@@ -2036,6 +2036,54 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             structured_delivery._preview_timeout("calendar"),
         )
 
+    def test_coverage_distinguishes_partly_measured_from_not_measured(self):
+        """"Not all measured" and "none measured" are different facts.
+
+        availability_verified is one boolean over a set of slots that can each
+        have a different measurement state. Task 2610 measured two slots free
+        and failed to measure a third, and the card announced that the
+        calendars "could not be read" -- overstating the failure exactly as
+        claiming "free" overstated the success.
+        """
+        def partial(attendees, slots):
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": None},
+            ]
+
+        _action, updated = self._calendar_preview(partial)
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["availability_coverage"], "partial")
+
+        _action, updated = self._calendar_preview(lambda a, s: None)
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["availability_coverage"], "none")
+
+        def full(attendees, slots):
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+            ]
+
+        _action, updated = self._calendar_preview(full)
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["availability_coverage"], "full")
+
+    def test_a_partly_measured_preview_does_not_claim_nothing_was_read(self):
+        """The question text must match which slots were actually measured."""
+        def partial(attendees, slots):
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": None},
+            ]
+
+        _action, updated = self._calendar_preview(partial)
+        question = json.loads(
+            updated["blocked_question"]
+        )["questions"][0]["question"]
+        self.assertNotIn("could not read the attendees' calendars", question)
+        self.assertIn("some", question.lower())
+
     def test_partly_measured_is_not_verified(self):
         """One day's window can succeed while another fails.
 

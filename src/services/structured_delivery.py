@@ -867,6 +867,30 @@ def _availability_phrase(status) -> str:
     return lowered
 
 
+def _availability_coverage(slots: list) -> str:
+    """How much of what is being offered was actually measured.
+
+    `availability_verified` is a single boolean over a set of slots that can
+    each have a different measurement state, so "not all measured" and "none
+    measured" collapse into the same value. Task 2610 measured two slots free,
+    failed to measure a third, and told the user the calendars "could not be
+    read" -- overstating the failure exactly as reporting "free" on an
+    unmeasured slot overstated the success.
+    """
+    if not slots:
+        return "none"
+    measured = 0
+    for slot in slots:
+        values = list((slot.get("availability") or {}).values())
+        if values and all(
+            str(value).strip().lower() != "unknown" for value in values
+        ):
+            measured += 1
+    if measured == len(slots):
+        return "full"
+    return "partial" if measured else "none"
+
+
 def _availability_description(slot: dict, names: dict | None = None) -> str:
     """Say who cannot make it, by name, so the choice is an informed one."""
     lookup = names or {}
@@ -1343,6 +1367,7 @@ def finish_preview(
                 slot_record for slot_record in evidence_slots
                 if slot_record.get("conflicts")
             ]
+            coverage = _availability_coverage(evidence_slots)
             interaction = {
                 "invocation_id": f"structured-calendar-{action_id}",
                 "questions": [{
@@ -1353,11 +1378,16 @@ def finish_preview(
                         # invite steering, rather than hide the conflict or
                         # offer nothing at all. And when the calendars could
                         # not be read at all, say that rather than implying
-                        # these times were checked.
+                        # these times were checked -- or, when only some were
+                        # read, implying none of them were.
                         "I could not read the attendees' calendars, so these "
                         "times are unchecked - they may clash. Choose one, or "
                         "ask me to try again. There is no second confirmation."
-                        if not availability_verified
+                        if coverage == "none"
+                        else "I could only check some of these times; the rest "
+                        "are unchecked and may clash. Each one says which it "
+                        "is. There is no second confirmation."
+                        if coverage == "partial"
                         else "No time suits everyone. Times are ordered by who "
                         "can attend, and each says who cannot. Choose the best "
                         "one, or say whose availability matters most and I "
@@ -1387,6 +1417,9 @@ def finish_preview(
                     # certifier refuses a selection when this is False rather
                     # than booking on an unchecked guess.
                     "availability_verified": availability_verified,
+                    # Which of the offered slots were actually measured, so
+                    # the card can distinguish "none" from "not all".
+                    "availability_coverage": coverage,
                     "duration_minutes": duration,
                     "start_offset_minutes": None,
                     "slots": evidence_slots,
