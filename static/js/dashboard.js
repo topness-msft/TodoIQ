@@ -5187,16 +5187,34 @@ function cwInteractionFields(taskId, interaction) {
         : 'e.g. find something later in the day';
     var evidence = interaction && interaction.schedule_evidence;
     var structured = cwIsStructured(action);
+    // query_backed only says a query ran, not that it came back with
+    // anything. Task 2558 ran one, got nothing, and the banner still read
+    // "checked the exact calendars" directly above the run's own sentence
+    // saying it could not read them. An explicit false demotes the claim;
+    // absent stays as it was, since older Cowork evidence never set it.
+    var availabilityChecked = !(evidence
+        && evidence.availability_verified === false);
     var evidenceNote = evidence && evidence.query_backed === true
-        ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note">'
-            + '<b>Query-backed suggestions</b>'
-            + '<span>' + (structured
+        ? '<div class="cw-query-backed-note" data-testid="cw-query-backed-note"'
+            + (availabilityChecked ? '' : ' data-unverified="1"') + '>'
+            + '<b>' + (availabilityChecked
+                ? 'Query-backed suggestions' : 'Times not checked') + '</b>'
+            + '<span>' + (availabilityChecked
+            ? (structured
             ? 'WorkIQ checked the exact calendars. Pick a time, then press '
                 + 'Select &amp; create meeting to book the '
                 + escapeHtml(String(evidence.duration_minutes || 25))
                 + '-minute meeting. There is no second confirmation.'
             : 'Cowork derived these after checking the exact calendars. '
                 + 'Review the time before booking.')
+            : (structured
+            ? 'The attendees&rsquo; calendars could not be read, so these '
+                + 'times are unchecked and may clash. You can still book the '
+                + escapeHtml(String(evidence.duration_minutes || 25))
+                + '-minute meeting, or ask for another look. There is no '
+                + 'second confirmation.'
+            : 'The calendars could not be read, so these times are '
+                + 'unchecked and may clash. Check before booking.'))
         + '</span></div>'
         : '';
     return evidenceNote + (interaction.questions || []).map(function(question) {
@@ -5331,6 +5349,11 @@ function cwInteractionFields(taskId, interaction) {
             var attendees = cwSelectedAttendees(taskId);
             var options = question.options || [];
             if (attendees.length < 2 || options.length < 1) return '';
+            // The grid reads as measurement. Evidence that says it measured
+            // nothing must not produce one, whatever the slots still claim --
+            // action 270 was stored with "free" for both attendees beside
+            // availability_verified: false, and rendered all green.
+            if (evidence && evidence.availability_verified === false) return '';
             var expected = attendees.map(function(person) { return person.email; }).sort();
             var evidenceByValue = {};
             var evidenceSlots = evidence && Array.isArray(evidence.slots)

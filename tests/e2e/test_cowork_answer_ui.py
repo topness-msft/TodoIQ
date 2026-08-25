@@ -440,6 +440,183 @@ def test_multi_select_buffer_restores_choices_not_redirect(page: Page, base_url)
     expect(page.get_by_test_id("cw-answer-redirect")).to_have_value("")
 
 
+def test_unverified_times_do_not_claim_the_calendars_were_checked(
+    page: Page, base_url
+):
+    """The banner must not certify a check that did not happen.
+
+    Task 2558 showed "WorkIQ checked the exact calendars" directly above its
+    own sentence saying it could not read them, with every attendee green and
+    marked Free. The banner keyed on query_backed, which only says a query
+    ran -- not that it came back with anything.
+    """
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Coordinate the Pega meeting"},
+    )
+    task_id = created.json()["task"]["id"]
+
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                {name: 'Greg Howard', email: 'greg.howard@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                structured_payload: '{"channel":"calendar"}',
+                delivery_channel: 'calendar',
+                interaction_request: {
+                    invocation_id: 'structured-calendar-1',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'copilot-ask',
+                        query_backed: true,
+                        availability_verified: false,
+                        duration_minutes: 25,
+                        attendees: [
+                            'greg.howard@microsoft.com',
+                            'rima.reyes@microsoft.com'
+                        ],
+                        slots: [{
+                            value: '0',
+                            label: 'Wed Aug 26, 12:00 PM-12:25 PM ET',
+                            availability: {
+                                'rima.reyes@microsoft.com': 'unknown',
+                                'greg.howard@microsoft.com': 'unknown'
+                            }
+                        }]
+                    },
+                    questions: [{
+                        id: '0',
+                        header: 'Select & create meeting',
+                        question: 'I could not read the attendees\\u2019 '
+                            + 'calendars, so these times are unchecked.',
+                        options: [{
+                            value: '0',
+                            label: 'Wed Aug 26, 12:00 PM-12:25 PM ET',
+                            description: 'Availability not checked - this '
+                                + 'time may clash.'
+                        }]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"structured-calendar-1"}',
+                conversation_id: 't:u:pega'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    blocked = page.get_by_test_id("cw-blocked")
+    expect(blocked).to_be_visible()
+    # The choice must still be offered -- measurement is best-effort, not a
+    # gate. What must not survive is the claim that it succeeded.
+    expect(page.get_by_test_id("cw-answer-submit")).to_be_visible()
+    assert "exact calendars" not in blocked.inner_text()
+    # And no attendee may be shown as Free on availability nobody measured.
+    for cell in page.get_by_test_id("cw-avail-cell").all():
+        assert cell.get_attribute("data-status") != "free"
+
+
+def test_unverified_evidence_suppresses_the_availability_grid(page: Page, base_url):
+    """A stored slot can still claim "free" after the probe returned nothing.
+
+    Action 270 was written that way -- both attendees "free" beside
+    availability_verified: false -- so the grid rendered all green. The grid
+    reads as measurement, so evidence that measured nothing must not make one.
+    """
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Coordinate the Pega meeting"},
+    )
+    task_id = created.json()["task"]["id"]
+
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima.reyes@microsoft.com'},
+                {name: 'Greg Howard', email: 'greg.howard@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                structured_payload: '{"channel":"calendar"}',
+                delivery_channel: 'calendar',
+                interaction_request: {
+                    invocation_id: 'structured-calendar-270',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'copilot-ask',
+                        query_backed: true,
+                        availability_verified: false,
+                        duration_minutes: 25,
+                        attendees: [
+                            'greg.howard@microsoft.com',
+                            'rima.reyes@microsoft.com'
+                        ],
+                        slots: [{
+                            value: '0',
+                            label: 'Wed Aug 26, 12:00 PM-12:25 PM ET',
+                            availability: {
+                                'rima.reyes@microsoft.com': 'free',
+                                'greg.howard@microsoft.com': 'free'
+                            }
+                        }]
+                    },
+                    questions: [{
+                        id: '0',
+                        header: 'Select & create meeting',
+                        question: 'These times are unchecked.',
+                        options: [{
+                            value: '0',
+                            label: 'Wed Aug 26, 12:00 PM-12:25 PM ET',
+                            description: 'All confirmed attendees are available.'
+                        }]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"structured-calendar-270"}',
+                conversation_id: 't:u:pega'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    expect(page.get_by_test_id("cw-blocked")).to_be_visible()
+    expect(page.get_by_test_id("cw-avail-matrix")).to_have_count(0)
+    expect(page.get_by_test_id("cw-avail-cell")).to_have_count(0)
+    # The time is still choosable -- only the false certainty is gone.
+    expect(page.get_by_test_id("cw-answer-submit")).to_be_visible()
+
+
 def test_multi_attendee_times_render_as_availability_matrix(page: Page, base_url):
     page.set_viewport_size({"width": 1280, "height": 900})
     created = page.request.post(
@@ -696,6 +873,10 @@ def test_single_verified_time_stays_structured_and_hides_metadata(page: Page, ba
 
 def test_invalid_availability_matrix_falls_back_to_time_pills(page: Page, base_url):
     page.goto(base_url + "/")
+    # The dashboard defines `tasks` when its script runs, so evaluating
+    # straight after goto is a race -- it surfaced once as an undefined task
+    # when an added test shifted the timing.
+    page.wait_for_function("typeof tasks !== 'undefined'")
     page.evaluate(
         """() => {
             clearInterval(parsePollerInterval);

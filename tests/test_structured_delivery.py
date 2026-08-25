@@ -1947,6 +1947,52 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             interaction["schedule_evidence"]["duration_minutes"],
         ))
 
+    def test_unmeasured_availability_is_never_reported_as_free(self):
+        """A claim the probe could not confirm must not be dressed as measurement.
+
+        Task 2558 asked for a Pega meeting, the probe returned nothing, and
+        the card still showed both attendees in green marked "free" --
+        beside its own sentence saying the calendars could not be read. The
+        worker's claim is precisely the thing that was never checked, so it
+        is precisely what must not survive into evidence the UI renders as
+        fact.
+        """
+        _action, updated = self._calendar_preview(lambda a, s: None)
+        interaction = json.loads(updated["blocked_question"])
+        evidence = interaction["schedule_evidence"]
+
+        self.assertFalse(evidence["availability_verified"])
+        for slot in evidence["slots"]:
+            self.assertEqual(
+                sorted({str(v) for v in slot["availability"].values()}),
+                ["unknown"],
+                "unmeasured availability must read unknown, never free",
+            )
+
+    def test_unmeasured_slots_do_not_claim_everyone_is_available(self):
+        """The option text is read as the answer, so it must not assert one."""
+        _action, updated = self._calendar_preview(lambda a, s: None)
+        interaction = json.loads(updated["blocked_question"])
+
+        for option in interaction["questions"][0]["options"]:
+            self.assertNotIn("are available", option["description"])
+            self.assertIn("not checked", option["description"].lower())
+
+    def test_only_the_unmeasured_slot_loses_its_claim(self):
+        """Partial measurement must not punish the slot that was measured."""
+        def probe(attendees, slots):
+            return [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": None},
+            ]
+
+        _action, updated = self._calendar_preview(probe)
+        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
+        by_value = {s["value"]: s["availability"] for s in evidence["slots"]}
+
+        self.assertEqual(by_value["0"]["a@x.com"], "free")
+        self.assertEqual(by_value["1"]["a@x.com"], "unknown")
+
     def test_partly_measured_is_not_verified(self):
         """One day's window can succeed while another fails.
 

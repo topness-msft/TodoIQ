@@ -406,6 +406,7 @@ AVAILABILITY_PHRASES = {
     "workingElsewhere": "working elsewhere",
     "outsideWorkingHours": "outside working hours",
     "nearWorkingHours": "just outside working hours",
+    "unknown": "not checked",
 }
 AVAILABILITY_INTERVAL_MINUTES = 5
 _WEEKDAY_NAMES = [
@@ -769,9 +770,12 @@ def _apply_verified_availability(
 ) -> list:
     """Replace claimed availability with measured availability, best first.
 
-    Each measurement covers its own slot's window, so a slot whose measurement
-    is missing simply keeps what the preview claimed rather than being judged
-    on someone else's data.
+    Each measurement covers its own slot's window. A slot whose measurement is
+    missing reads `unknown` rather than keeping what the preview claimed: the
+    claim is exactly the thing that was never checked, and everything
+    downstream -- the option text, the availability grid, the certifier --
+    reads this map as measurement. Task 2558 showed both attendees green and
+    "free" beside its own sentence saying the calendars could not be read.
 
     Nothing is withdrawn. A time that suits three of five people is often the
     right meeting to hold, and withdrawing it leaves the user with no options
@@ -799,9 +803,10 @@ def _apply_verified_availability(
                 views.get(key), slot.get("start"), slot.get("end")
             )
             if status is None:
-                # Never measured: keep what the preview claimed rather than
-                # inventing a verdict in either direction.
-                measured[key] = str(slot.get("availability", {}).get(key, "unknown"))
+                # Never measured. "unknown" is the verdict-free answer; the
+                # preview's own claim is not, because every reader downstream
+                # treats this map as measurement.
+                measured[key] = "unknown"
                 continue
             measured[key] = status
             if status in CONFLICT_WEIGHTS:
@@ -857,8 +862,14 @@ def _availability_description(slot: dict, names: dict | None = None) -> str:
     """Say who cannot make it, by name, so the choice is an informed one."""
     lookup = names or {}
     conflicts = slot.get("conflicts") or {}
+    availability = slot.get("availability") or {}
+    statuses = {str(status).strip().lower() for status in availability.values()}
+    if availability and statuses == {"unknown"}:
+        # Nothing was measured, so the description must not answer the
+        # question it was asked. Saying "available" here is the claim the
+        # probe failed to check.
+        return "Availability not checked - this time may clash."
     if not conflicts:
-        availability = slot.get("availability") or {}
         soft = sorted(
             email for email, status in availability.items()
             if str(status).strip().lower() not in {"free", ""}
@@ -1275,6 +1286,15 @@ def finish_preview(
             if schedules:
                 evidence_slots = _apply_verified_availability(
                     attendees, evidence_slots, schedules,
+                    AVAILABILITY_INTERVAL_MINUTES,
+                )
+            else:
+                # The probe returned nothing at all. Skipping the applier here
+                # let the worker's unverified claim pass straight through and
+                # be rendered as measurement (task 2558). Run it with no
+                # measurements so every attendee reads unknown.
+                evidence_slots = _apply_verified_availability(
+                    attendees, evidence_slots, [],
                     AVAILABILITY_INTERVAL_MINUTES,
                 )
             attendee_names = {

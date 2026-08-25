@@ -268,6 +268,13 @@ class TestOuterPanelSeparator:
         assert maximum_value <= 600
 
         page.set_viewport_size({"width": 900, "height": 900})
+        # The clamp runs from a resize handler, so measuring straight after
+        # set_viewport_size races it -- this asserted 600 <= 491 once under
+        # full-suite load while passing in isolation.
+        page.wait_for_function(
+            "() => document.querySelector('.left-panel')"
+            ".getBoundingClientRect().width <= 491"
+        )
         reclamped = panel.bounding_box()
         assert reclamped and reclamped["width"] <= 491
         right_panel = page.locator(".right-panel").bounding_box()
