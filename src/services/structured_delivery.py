@@ -19,6 +19,7 @@ from src.services.calendar_time import (
     named_timezone_matches,
 )
 from src.services.runtime_mode import external_integrations_enabled
+from src.services import source_locator
 
 
 logger = logging.getLogger(__name__)
@@ -50,13 +51,23 @@ def channel_for_task(task: dict) -> str | None:
     # source says where it came from. Either is enough to know the channel.
     if action_type == "teams-message":
         return "teams"
-    if action_type in {"follow-up", "awaiting-response"} and source_type in {
-        "teams",
-        "chat",
-        "teams_chat",
-        "teams-channel",
-    }:
-        return "teams"
+    if action_type in {"follow-up", "awaiting-response"}:
+        if source_type in {"teams", "chat", "teams_chat", "teams-channel"}:
+            return "teams"
+        # ...and a pasted Teams link is the same statement in a third form.
+        # Task 2521 was a follow-up whose source_url resolved to a real
+        # one-to-one conversation, yet source_type was "manual" - as it is for
+        # anything typed by hand - so it fell through to Cowork, whose
+        # direct-action path is off by default. Pressing Send returned 409 and
+        # the message could not be delivered at all. source_type records where
+        # the task came FROM; a resolved conversation says where it is GOING,
+        # which is what routing is actually asking.
+        located = source_locator.from_source_url(task.get("source_url"))
+        if located and located["kind"] in (
+            source_locator.KIND_TEAMS_CHAT,
+            source_locator.KIND_TEAMS_CHANNEL,
+        ):
+            return "teams"
     return None
 
 

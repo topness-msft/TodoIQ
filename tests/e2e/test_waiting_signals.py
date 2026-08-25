@@ -366,6 +366,92 @@ class TestARunThatFailedIsNotSilent:
             _delete(page, base_url, task_id)
 
 
+class TestRoutingAgreesWithTheServer:
+    """A pasted Teams link routes to WorkIQ on both sides.
+
+    Task 2521 was a follow-up whose source_url resolved to a real one-to-one
+    conversation, but source_type was "manual" - as it is for anything typed by
+    hand - so it fell through to Cowork, whose direct-action path is off by
+    default. Pressing Send returned 409 "Direct actions require the Cowork API
+    transport." and the message could not be delivered at all.
+
+    The server now routes on the resolved conversation. If the client did not,
+    the card would name one engine and send through the other, which this
+    codebase has shipped before.
+    """
+
+    CHAT_LOCATOR = {
+        "locator": {
+            "version": 1, "kind": "teams_chat",
+            "conversation_id": "19:aaa_bbb@unq.gbl.spaces",
+            "message_id": None, "team_id": None, "channel_id": None,
+            "internet_message_id": None, "event_id": None,
+            "source": "derived_from_url",
+        },
+        "thread_readable": True,
+    }
+
+    def _engine(self, page: Page, task_id: int, patch: dict) -> str:
+        return page.evaluate(
+            f"""() => {{
+                const t = tasks.find(x => x.id === {task_id});
+                Object.assign(t, {json.dumps(patch)});
+                return cwTaskUsesWorkIQ(t) ? 'workiq' : 'cowork';
+            }}"""
+        )
+
+    def test_a_manual_task_with_a_teams_link_uses_workiq(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Routing probe")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            assert self._engine(page, task_id, {
+                "action_type": "follow-up", "source_type": "manual",
+                "source_locator_resolved": self.CHAT_LOCATOR,
+            }) == "workiq"
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_a_manual_task_with_no_link_still_uses_cowork(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Routing probe 2")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            assert self._engine(page, task_id, {
+                "action_type": "follow-up", "source_type": "manual",
+                "source_locator_resolved": {"locator": None, "thread_readable": False},
+            }) == "cowork"
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_an_email_locator_does_not_route_to_teams(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Routing probe 3")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            assert self._engine(page, task_id, {
+                "action_type": "follow-up", "source_type": "manual",
+                "source_locator_resolved": {
+                    "locator": {"kind": "email", "message_id": "AAMk="},
+                    "thread_readable": True,
+                },
+            }) == "cowork"
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_an_unrelated_action_type_is_unaffected(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Routing probe 4")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            assert self._engine(page, task_id, {
+                "action_type": "review-document", "source_type": "manual",
+                "source_locator_resolved": self.CHAT_LOCATOR,
+            }) == "cowork"
+        finally:
+            _delete(page, base_url, task_id)
+
+
 class TestTheListRowAgrees:
     """The row icon and the card must not tell different stories."""
 

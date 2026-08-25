@@ -2124,6 +2124,90 @@ class TestTeamsMessageRouting(StructuredDeliveryTestBase):
                 f"teams-message must route to teams from source {source!r}",
             )
 
+    def test_a_resolved_teams_conversation_routes_to_teams(self):
+        """The same failure, arriving through a different door.
+
+        Production 2026-08-25 (task 2521): a follow-up whose source_url is a
+        Teams chat link, so the destination resolved to a real one-to-one
+        conversation - and it still went to Cowork, because routing asked
+        source_type, which is "manual" for anything the user typed themselves.
+        Cowork's direct-action path is off by default, so pressing Send
+        returned 409 "Direct actions require the Cowork API transport." and the
+        message could not be sent at all.
+
+        source_type records where the task CAME FROM. A pasted Teams link says
+        where it is GOING, which is the question routing is actually asking.
+        """
+        task = {
+            "action_type": "follow-up",
+            "source_type": "manual",
+            # The exact shape Teams produces for a 1:1 chat link, taken from
+            # task 2521. An invented "/l/chat/<id>/<msg>" does NOT parse - the
+            # trailing /conversations segment is part of the format.
+            "source_url": (
+                "https://teams.microsoft.com/l/chat/"
+                "19:aaa_bbb@unq.gbl.spaces/conversations"
+                "?context=%7B%22contextType%22%3A%22chat%22%7D"
+            ),
+        }
+        self.assertEqual(structured_delivery.channel_for_task(task), "teams")
+
+    def test_a_group_thread_link_routes_to_teams(self):
+        task = {
+            "action_type": "awaiting-response",
+            "source_type": "manual",
+            "source_url": (
+                "https://teams.microsoft.com/l/message/"
+                "19:ccc@thread.v2/1756000000001"
+            ),
+        }
+        self.assertEqual(structured_delivery.channel_for_task(task), "teams")
+
+    def test_a_non_teams_link_does_not_route_to_teams(self):
+        # An Outlook link is a mail thread, not a Teams destination. Routing it
+        # to Teams would send the message somewhere it was never drafted for.
+        task = {
+            "action_type": "follow-up",
+            "source_type": "manual",
+            "source_url": "https://outlook.office365.com/owa/?ItemID=AAMk123",
+        }
+        self.assertIsNone(structured_delivery.channel_for_task(task))
+
+    def test_a_link_does_not_override_an_explicit_action_type(self):
+        # respond-email means email even when a Teams link is attached; the
+        # action type is what the user asked for.
+        task = {
+            "action_type": "respond-email",
+            "source_type": "manual",
+            "source_url": (
+                "https://teams.microsoft.com/l/chat/"
+                "19:aaa_bbb@unq.gbl.spaces/conversations"
+            ),
+        }
+        self.assertEqual(structured_delivery.channel_for_task(task), "email")
+
+    def test_an_unrelated_action_type_is_not_dragged_into_teams(self):
+        # Only the two types that already route on source do so on a link.
+        task = {
+            "action_type": "review-document",
+            "source_type": "manual",
+            "source_url": (
+                "https://teams.microsoft.com/l/chat/"
+                "19:aaa_bbb@unq.gbl.spaces/conversations"
+            ),
+        }
+        self.assertIsNone(structured_delivery.channel_for_task(task))
+
+    def test_a_malformed_url_is_not_a_destination(self):
+        for url in (None, "", "   ", "not a url", "https://example.com/x"):
+            with self.subTest(url=url):
+                task = {
+                    "action_type": "follow-up",
+                    "source_type": "manual",
+                    "source_url": url,
+                }
+                self.assertIsNone(structured_delivery.channel_for_task(task))
+
     def test_existing_teams_routing_still_works(self):
         self.assertEqual(
             structured_delivery.channel_for_task(

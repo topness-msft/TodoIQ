@@ -3504,13 +3504,20 @@ function cwIsStructured(a) {
 
 function cwTaskUsesWorkIQ(task) {
     if (!task) return false;
-    return task.action_type === 'schedule-meeting'
+    if (task.action_type === 'schedule-meeting'
         || task.action_type === 'respond-email'
-        || task.action_type === 'teams-message'
-        || ((task.action_type === 'follow-up'
-                || task.action_type === 'awaiting-response')
-            && ['chat', 'teams', 'teams_chat', 'teams-channel']
-                .indexOf(task.source_type) >= 0);
+        || task.action_type === 'teams-message') return true;
+    if (task.action_type !== 'follow-up'
+        && task.action_type !== 'awaiting-response') return false;
+    if (['chat', 'teams', 'teams_chat', 'teams-channel']
+            .indexOf(task.source_type) >= 0) return true;
+    // A pasted Teams link is the same statement as a Teams source. The server
+    // routes on it (structured_delivery.channel_for_task), so this must too:
+    // when the two disagree the card names one engine and sends through the
+    // other. `source_locator_resolved` is derived server-side, so both sides
+    // read the same resolution rather than each parsing the URL their own way.
+    var loc = task.source_locator_resolved && task.source_locator_resolved.locator;
+    return !!(loc && (loc.kind === 'teams_chat' || loc.kind === 'teams_channel'));
 }
 
 // Which engine is behind this work. The card header already named the
