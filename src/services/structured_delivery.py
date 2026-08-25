@@ -1049,8 +1049,23 @@ Never retry a write.
 """.strip()
 
 
-def _run(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    # encoding/errors are load-bearing, not cosmetic. `text=True` alone decodes
+PREVIEW_TIMEOUT_SECONDS = 300
+# A calendar preview asks WorkIQ to find candidate times across several
+# attendees' calendars, which is a slower question than drafting a message.
+# Task 2558 lost two runs (actions 262 and 267) at exactly 301s on the shared
+# default, and a run killed on its budget leaves nothing to show for the
+# minutes it spent.
+CALENDAR_PREVIEW_TIMEOUT_SECONDS = 420
+
+
+def _preview_timeout(channel: str | None) -> int:
+    """How long a preview of this kind is allowed to take."""
+    if str(channel or "").strip().lower() == "calendar":
+        return CALENDAR_PREVIEW_TIMEOUT_SECONDS
+    return PREVIEW_TIMEOUT_SECONDS
+
+
+def _run(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:    # encoding/errors are load-bearing, not cosmetic. `text=True` alone decodes
     # with the locale codec, which on Windows is cp1252; the CLI emits UTF-8, so
     # the reader thread died on the first non-cp1252 byte and subprocess.run
     # returned returncode 0 with stdout=None. Every structured channel then
@@ -1477,7 +1492,10 @@ def _preview_worker(task: dict, action: dict) -> None:
     payload = json.loads(action["structured_payload"])
     correlation_id = payload["correlation_id"]
     try:
-        result = _run(preview_command(preview_prompt(task, payload)))
+        result = _run(
+            preview_command(preview_prompt(task, payload)),
+            timeout=_preview_timeout(payload.get("channel")),
+        )
         finish_preview(
             action["id"],
             stdout=result.stdout,

@@ -1993,6 +1993,49 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertEqual(by_value["0"]["a@x.com"], "free")
         self.assertEqual(by_value["1"]["a@x.com"], "unknown")
 
+    def test_calendar_preview_gets_a_longer_budget_than_a_message(self):
+        """Two calendar previews died at exactly 301s on the 300s default.
+
+        Asking WorkIQ to find candidate times across several attendees'
+        calendars is a slower question than drafting a message, and a run
+        killed on the budget leaves nothing to show for the minutes it spent
+        -- task 2558 burned two of them before anyone looked.
+        """
+        self.assertGreater(
+            structured_delivery._preview_timeout("calendar"),
+            structured_delivery._preview_timeout("teams"),
+        )
+        self.assertGreaterEqual(
+            structured_delivery._preview_timeout("calendar"), 420
+        )
+
+    def test_preview_worker_applies_the_calendar_budget(self):
+        """The budget only matters if the worker actually passes it."""
+        task = create_task("Schedule a review", action_type="schedule-meeting")
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        seen = {}
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            seen["timeout"] = timeout
+            raise RuntimeError("stop before the real subprocess")
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(
+            seen.get("timeout"),
+            structured_delivery._preview_timeout("calendar"),
+        )
+
     def test_partly_measured_is_not_verified(self):
         """One day's window can succeed while another fails.
 

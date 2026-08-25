@@ -96,6 +96,10 @@ class TestPersonPicklist:
             card = wrapper.locator(
                 "xpath=ancestor::*[contains(@class,'detail-card')][1]"
             )
+            # The chip is asserted visible above but the card never was, and
+            # bounding_box on an unsettled element returns None -- this failed
+            # as "assert None is not None" under full-suite load.
+            expect(card).to_be_visible()
             chip_box = chip.bounding_box()
             card_box = card.bounding_box()
 
