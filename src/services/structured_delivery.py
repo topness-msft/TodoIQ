@@ -271,8 +271,7 @@ def preview_prompt(task: dict, payload: dict) -> str:
             "recipient you are addressing. Either way it must match who will "
             "really receive it, because the user approves that list."
         )
-    if channel == "teams":
-        # Calendar and email each carry channel guidance; Teams carried an
+    if channel == "teams":        # Calendar and email each carry channel guidance; Teams carried an
         # empty string. Given only "resolve every delivery identifier" and a
         # schema with a chat_id field, a worker reported that chat ids were
         # "not exposed by the available read-only WorkIQ metadata" and gave up
@@ -295,13 +294,23 @@ def preview_prompt(task: dict, payload: dict) -> str:
             "- If nothing matches, return ok=false naming the conversation you "
             "looked for. Never report a chat id you did not read back."
         )
+    # What the user said when they turned down the last attempt. The chooser
+    # has always offered a "Need a different option?" box; nothing rendered it
+    # into the next prompt, so a steer was collected and then dropped.
+    steer = str(payload.get("steer") or "").strip()
+    steer_rule = (
+        f"\nThe user turned down the previous suggestions and asked: {steer}\n"
+        "Honour that ask in what you propose now."
+        if steer
+        else ""
+    )
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
 
 Resolve every delivery identifier now. Do not defer recipient, message, chat,
 team, channel, thread, attendee, timezone, or slot resolution until execution.
-{standing_rule}{content_rule}
+{standing_rule}{steer_rule}{content_rule}
 
 Task snapshot:
 {_json(_task_snapshot(task))}

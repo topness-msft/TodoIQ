@@ -4878,6 +4878,13 @@ function renderCoworkCard(task) {
         return cwShell('is-running', '', task,
             cwModeSwitch(task.id, a, true)
             + cwIntentBlock(task, false)
+            // What the user asked for when they turned down the last set. A
+            // bare spinner here reads as though the steer was dropped.
+            + (a.redirect_text
+                ? '<div class="cw-intent" data-testid="cw-running-correction">'
+                    + '<span class="i-label">Correction:</span> '
+                    + escapeHtml(a.redirect_text) + '</div>'
+                : '')
             + cwTimeline(a, prog)
             + '<div class="cw-progress"><span class="cw-spinner"></span>'
             + '<span class="cw-progress-text">'

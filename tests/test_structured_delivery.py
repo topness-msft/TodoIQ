@@ -2908,6 +2908,153 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         latest = get_latest_task_action(task["id"])
         self.assertEqual(json.loads(latest["structured_payload"]), payload)
 
+    def _structured_calendar_chooser(self, steer=None):
+        """A structured calendar action parked on a slot chooser."""
+        task = create_task(
+            "Coordinate the Pega meeting",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        envelope["subject"] = "Pega sync"
+        envelope["attendees"] = [
+            {"name": "Rima Reyes", "email": "rima@microsoft.com"}
+        ]
+        envelope["duration_minutes"] = 25
+        if steer:
+            envelope["steer"] = steer
+        interaction = {
+            "invocation_id": "structured-calendar-test",
+            "questions": [{
+                "id": "0",
+                "header": "Select & create meeting",
+                "question": "Choose one.",
+                "multi_select": False,
+                "options": [
+                    {"value": "0", "label": "Wed 12:00 PM",
+                     "description": "Availability not checked."},
+                ],
+            }],
+            "schedule_evidence": {
+                "valid": True,
+                "source": "copilot-ask",
+                "query_backed": True,
+                "availability_verified": False,
+                "duration_minutes": 25,
+                "attendees": ["rima@microsoft.com"],
+                "slots": [{
+                    "value": "0",
+                    "label": "Wed 12:00 PM",
+                    "start": "2099-08-26T12:00:00-04:00",
+                    "end": "2099-08-26T12:25:00-04:00",
+                    "timezone": "Eastern Standard Time",
+                    "availability": {"rima@microsoft.com": "unknown"},
+                }],
+            },
+        }
+        action = create_task_action(
+            task["id"],
+            action_type="schedule-meeting",
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+            state="previewing",
+            blocked_question=json.dumps(interaction),
+            had_interaction=1,
+        )
+        return task, interaction, action
+
+    def test_a_steer_starts_a_fresh_preview_instead_of_refusing(self):
+        """The card invites steering; this path had nowhere to put it.
+
+        The chooser renders a "Need a different option?" box, but a structured
+        calendar answer was matched against the offered slots and anything
+        else was refused with "Select exactly one verified meeting time." Phil
+        typed "start at 5 minute after" and could not submit it. Free text is
+        a steer, not a bad slot id.
+        """
+        from src.handlers import cowork as handler
+
+        task, interaction, _action = self._structured_calendar_chooser()
+        started = []
+        original = handler.STRUCTURED_PREVIEW_FN
+        handler.STRUCTURED_PREVIEW_FN = (
+            lambda t, a: started.append((t, a))
+        )
+        try:
+            response = self._post(
+                f"/api/tasks/{task['id']}/cowork/answer",
+                {
+                    "invocation_id": interaction["invocation_id"],
+                    "answers": {"0": "start at 5 minutes after the hour"},
+                },
+            )
+        finally:
+            handler.STRUCTURED_PREVIEW_FN = original
+
+        self.assertEqual(response.code, 202, response.body)
+        self.assertEqual(len(started), 1, "a steer must start a new preview")
+        fresh = started[0][1]
+        self.assertEqual(fresh["state"], "previewing")
+        payload = json.loads(fresh["structured_payload"])
+        self.assertEqual(
+            payload.get("steer"), "start at 5 minutes after the hour"
+        )
+        # The card must say what is being re-checked, so the wait does not
+        # look like the steer was dropped.
+        self.assertIn(
+            "5 minutes after the hour", fresh.get("redirect_text") or ""
+        )
+
+    def test_a_steer_replaces_rather_than_accumulates(self):
+        """Two steers at once are contradictory, not cumulative.
+
+        "later in the day" then "actually Thursday" cannot both be honoured;
+        the live prompt carries the latest ask, and the earlier one stays
+        readable in the action chain.
+        """
+        from src.handlers import cowork as handler
+
+        task, interaction, _action = self._structured_calendar_chooser(
+            steer="find something later in the day"
+        )
+        started = []
+        original = handler.STRUCTURED_PREVIEW_FN
+        handler.STRUCTURED_PREVIEW_FN = lambda t, a: started.append((t, a))
+        try:
+            self._post(
+                f"/api/tasks/{task['id']}/cowork/answer",
+                {
+                    "invocation_id": interaction["invocation_id"],
+                    "answers": {"0": "actually make it Thursday"},
+                },
+            )
+        finally:
+            handler.STRUCTURED_PREVIEW_FN = original
+
+        payload = json.loads(started[0][1]["structured_payload"])
+        self.assertEqual(payload.get("steer"), "actually make it Thursday")
+        self.assertNotIn("later in the day", payload.get("steer") or "")
+
+    def test_preview_prompt_carries_the_steer(self):
+        """A steer nobody renders is a steer nobody honours."""
+        task = create_task(
+            "Schedule a review",
+            action_type="schedule-meeting",
+            key_people=json.dumps(
+                [{"name": "Rima Reyes", "email": "rima@microsoft.com"}]
+            ),
+        )
+        payload = structured_delivery.initial_payload(task, "calendar")
+        self.assertNotIn(
+            "5 minutes after",
+            structured_delivery.preview_prompt(task, payload),
+        )
+        payload["steer"] = "start at 5 minutes after the hour"
+        prompt = structured_delivery.preview_prompt(task, payload)
+        self.assertIn("start at 5 minutes after the hour", prompt)
+
     def test_windows_timezone_slot_selection_still_creates_the_exact_meeting(self):
         """Production returns Windows zone names, not IANA ones.
 

@@ -440,6 +440,52 @@ def test_multi_select_buffer_restores_choices_not_redirect(page: Page, base_url)
     expect(page.get_by_test_id("cw-answer-redirect")).to_have_value("")
 
 
+def test_a_steered_rerun_shows_what_was_asked_for(page: Page, base_url):
+    """A bare spinner reads as though the steer was dropped.
+
+    When a rejected chooser starts a fresh preview, the running card has to
+    say what it is re-checking -- otherwise the user has typed a correction
+    and been given back an anonymous progress bar.
+    """
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Coordinate the Pega meeting"},
+    )
+    task_id = created.json()["task"]["id"]
+
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: false,
+                structured_payload: '{"channel":"calendar"}',
+                delivery_channel: 'calendar',
+                redirect_text: 'start at 5 minutes after the hour',
+                conversation_id: 't:u:pega'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    correction = page.get_by_test_id("cw-running-correction")
+    expect(correction).to_be_visible()
+    expect(correction).to_contain_text("start at 5 minutes after the hour")
+
+
 def test_unverified_times_do_not_claim_the_calendars_were_checked(
     page: Page, base_url
 ):

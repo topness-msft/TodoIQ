@@ -2092,11 +2092,67 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 if isinstance(slot, dict)
                 and str(slot.get("value") or "").strip() in selected_values
             ]
-            if len(selected_slots) != 1:
+            if len(selected_slots) > 1:
                 restore_claimed_blocked_question(
                     action["id"], previous_question, answer_record
                 )
                 return self._fail(400, "Select exactly one verified meeting time.")
+            if not selected_slots:
+                # Nothing matched an offered slot, and empty answers were
+                # already refused above -- so this is the user steering. The
+                # card has always offered "Need a different option?"; this
+                # path used to answer it with "Select exactly one verified
+                # meeting time," which is not a thing they can do when none
+                # of the times work.
+                steer = " ".join(
+                    value for value in sorted(selected_values) if value
+                ).strip()
+                try:
+                    payload = json.loads(action["structured_payload"])
+                except (json.JSONDecodeError, TypeError):
+                    payload = None
+                if not isinstance(payload, dict):
+                    return self._fail(
+                        409, "The structured meeting preview is invalid."
+                    )
+                fresh_payload = structured_initial_payload(task, "calendar")
+                # The latest ask replaces the previous one. Carrying both
+                # would hand the worker two contradictory instructions; the
+                # earlier steer stays readable on its own action row.
+                fresh_payload["steer"] = steer
+                fresh = create_task_action(
+                    tid,
+                    action_type=task.get("action_type") or "general",
+                    intent=task.get("coaching_text"),
+                    notes_snapshot=task.get("user_notes"),
+                    delivery_channel="calendar",
+                    structured_payload=json.dumps(
+                        fresh_payload, separators=(",", ":"), sort_keys=True
+                    ),
+                    interaction_mode="interaction",
+                    # Say what is being re-checked. A bare spinner here reads
+                    # as though the steer was dropped, so the running card
+                    # renders this back as "Correction: ...".
+                    redirect_text=steer,
+                )
+                try:
+                    preview = STRUCTURED_PREVIEW_FN or start_structured_preview
+                    preview(task, fresh)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("could not start steered WorkIQ preview")
+                    update_task_action(
+                        fresh["id"],
+                        frozenset({"state", "error"}),
+                        state="failed",
+                        error=f"Could not start WorkIQ preview: {exc}",
+                    )
+                    return self._fail(
+                        500, f"Could not start WorkIQ preview: {exc}"
+                    )
+                self.set_status(202)
+                return self.write(
+                    json.dumps({"action": _enrich(_clean(fresh))})
+                )
             selected_slot = selected_slots[0]
             try:
                 preview_payload = json.loads(action["structured_payload"])
