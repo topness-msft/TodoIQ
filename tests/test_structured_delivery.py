@@ -1803,6 +1803,25 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             "the worker must return the raw response, not a verdict",
         )
 
+    def test_probe_omits_the_unused_availability_view(self):
+        prompt = structured_delivery.availability_prompt(
+            ["a@x.com"],
+            [("2026-08-26T17:00:00", "2026-08-26T17:30:00")],
+        )
+        self.assertNotIn("availabilityViewInterval", prompt)
+        self.assertIn("scheduleItems", prompt)
+
+    def test_prompt_numbers_every_window_in_one_probe(self):
+        prompt = structured_delivery.availability_prompt(
+            ["a@x.com"],
+            [
+                ("2026-08-26T17:00:00", "2026-08-26T17:30:00"),
+                ("2026-08-27T18:00:00", "2026-08-27T18:30:00"),
+            ],
+        )
+        self.assertIn("0. actionUrl", prompt)
+        self.assertIn("1. actionUrl", prompt)
+
     def test_probe_cannot_send_anything(self):
         argv = structured_delivery.availability_command("prompt")
         joined = " ".join(argv)
@@ -1822,9 +1841,325 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertEqual(len(windows), 1)
         self.assertEqual(windows[0][0]["scheduleId"], "a@x.com")
 
+    def test_parses_distinct_numbered_windows(self):
+        raw = (
+            structured_delivery.RESULT_START
+            + '{"windows":['
+            '{"index":0,"schedules":[{"scheduleId":"a@x.com","scheduleItems":[]}]},'
+            '{"index":1,"schedules":[{"scheduleId":"b@x.com","scheduleItems":[]}]}'
+            "]}"
+            + structured_delivery.RESULT_END
+        )
+        windows = structured_delivery._parse_windows(raw)
+        self.assertEqual(windows[0][0]["scheduleId"], "a@x.com")
+        self.assertEqual(windows[1][0]["scheduleId"], "b@x.com")
+
     def test_unreadable_response_yields_nothing(self):
         self.assertIsNone(structured_delivery._parse_windows(""))
         self.assertIsNone(structured_delivery._parse_windows("no block here"))
+
+    @staticmethod
+    def _probe_stdout(entries):
+        return (
+            structured_delivery.RESULT_START
+            + json.dumps({"windows": entries})
+            + structured_delivery.RESULT_END
+        )
+
+    @staticmethod
+    def _two_day_slots():
+        return [
+            {
+                "value": "0",
+                "start": "2099-08-26T13:05:00-04:00",
+                "end": "2099-08-26T13:30:00-04:00",
+            },
+            {
+                "value": "1",
+                "start": "2099-08-27T14:05:00-04:00",
+                "end": "2099-08-27T14:30:00-04:00",
+            },
+        ]
+
+    def test_small_multi_day_probe_uses_one_subprocess_and_maps_indices(self):
+        """Day two must receive window index 1, never index 0 again."""
+        calls = []
+        stdout = self._probe_stdout([
+            {
+                "index": 0,
+                "schedules": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "marker": "day-one",
+                    }
+                    for email in ("a@x.com", "b@x.com", "c@x.com")
+                ],
+            },
+            {
+                "index": 1,
+                "schedules": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "marker": "day-two",
+                    }
+                    for email in ("a@x.com", "b@x.com", "c@x.com")
+                ],
+            },
+        ])
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append((argv, timeout))
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com", "c@x.com"],
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("1. actionUrl", " ".join(calls[0][0]))
+        self.assertEqual(
+            measured[0]["schedules"][0]["marker"], "day-one"
+        )
+        self.assertEqual(
+            measured[1]["schedules"][0]["marker"], "day-two"
+        )
+
+    def test_batch_retry_preserves_first_attempt_success_and_fills_gap(self):
+        """Retrying the whole batch must not discard a window already measured."""
+        outputs = [
+            self._probe_stdout([{
+                "index": 0,
+                "schedules": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "marker": "first",
+                    }
+                    for email in ("a@x.com", "b@x.com", "c@x.com")
+                ],
+            }]),
+            self._probe_stdout([{
+                "index": 1,
+                "schedules": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "marker": "second",
+                    }
+                    for email in ("a@x.com", "b@x.com", "c@x.com")
+                ],
+            }]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com", "c@x.com"],
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(measured[0]["schedules"][0]["marker"], "first")
+        self.assertEqual(measured[1]["schedules"][0]["marker"], "second")
+
+    def test_batch_retry_merges_attendees_within_the_same_window(self):
+        """A nonempty window is not complete until every attendee is present."""
+        outputs = [
+            self._probe_stdout([{
+                "index": 0,
+                "schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}],
+            }]),
+            self._probe_stdout([{
+                "index": 0,
+                "schedules": [{"scheduleId": "b@x.com", "scheduleItems": []}],
+            }]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com"],
+                [self._two_day_slots()[0]],
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            {
+                entry["scheduleId"]
+                for entry in measured[0]["schedules"]
+            },
+            {"a@x.com", "b@x.com"},
+        )
+
+    def test_batch_stops_after_two_unreadable_attempts(self):
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com", "c@x.com"],
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertIsNone(measured)
+        self.assertEqual(len(calls), 2)
+
+    def test_batch_retries_real_timeout_then_returns_none(self):
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com"],
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertIsNone(measured)
+        self.assertEqual(len(calls), 2)
+
+    def test_batch_keeps_partial_coverage_after_retry_exhausts(self):
+        first = self._probe_stdout([{
+            "index": 0,
+            "schedules": [
+                {"scheduleId": email, "scheduleItems": []}
+                for email in ("a@x.com", "b@x.com")
+            ],
+        }])
+        outputs = [first, first]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                ["a@x.com", "b@x.com"],
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertIsNotNone(measured[0]["schedules"])
+        self.assertIsNone(measured[1]["schedules"])
+
+    def test_twelve_attendee_days_use_per_day_fallback(self):
+        """Task 2478's 6 attendees x 2 days is the fallback boundary."""
+        self.assertEqual(
+            structured_delivery.BATCH_THRESHOLD_ATTENDEE_DAYS, 12
+        )
+        calls = []
+        original = structured_delivery._run
+        attendees = [f"person-{index}@x.com" for index in range(6)]
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            joined = " ".join(argv)
+            marker = "day-one" if "2099-08-26" in joined else "day-two"
+            stdout = self._probe_stdout([{
+                "index": 0,
+                "schedules": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "marker": marker,
+                    }
+                    for email in attendees
+                ],
+            }])
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(
+                attendees,
+                self._two_day_slots(),
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(measured), 2)
+        self.assertEqual(measured[0]["schedules"][0]["marker"], "day-one")
+        self.assertEqual(measured[1]["schedules"][0]["marker"], "day-two")
+
+    def test_same_day_slots_share_one_measured_window(self):
+        slots = [
+            {
+                "start": "2099-08-26T13:05:00-04:00",
+                "end": "2099-08-26T13:30:00-04:00",
+            },
+            {
+                "start": "2099-08-26T15:05:00-04:00",
+                "end": "2099-08-26T15:30:00-04:00",
+            },
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            stdout = self._probe_stdout([{
+                "index": 0,
+                "schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}],
+            }])
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        structured_delivery._run = fake_run
+        try:
+            measured = self._real_fetch_availability(["a@x.com"], slots)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(measured[0], measured[1])
 
     # ---- wiring into preview --------------------------------------------
     def _calendar_preview(self, probe):

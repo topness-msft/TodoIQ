@@ -532,6 +532,12 @@ def _outside_working_hours(working_hours, slot_start: str, slot_end: str) -> boo
 # nothing. Riveter mints it; the model never chooses to call it and never sees
 # a tool that could create an event or send a message.
 AVAILABILITY_TOOLS = "workiq-do_action"
+# At ten schedule items per person/day, twelve attendee-days is roughly 120
+# items. Task 2478's six attendees across two candidate days sits exactly at
+# this boundary and already timed out at 420 seconds, so values AT the boundary
+# keep the existing per-day response cap. Smaller sets batch all numbered
+# windows into one agent process.
+BATCH_THRESHOLD_ATTENDEE_DAYS = 12
 
 
 def availability_prompt(attendees: list, windows: list) -> str:
@@ -547,8 +553,7 @@ def availability_prompt(attendees: list, windows: list) -> str:
         f'{index}. actionUrl /me/calendar/getSchedule with body:\n'
         f'   {{"schedules": {schedules},\n'
         f'    "startTime": {{"dateTime": "{start}", "timeZone": "UTC"}},\n'
-        f'    "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}},\n'
-        f'    "availabilityViewInterval": 60}}'
+        f'    "endTime": {{"dateTime": "{end}", "timeZone": "UTC"}}}}'
         for index, (start, end) in enumerate(windows)
     )
     return f"""
@@ -623,11 +628,11 @@ def _parse_windows(output: str) -> dict | None:
 def fetch_availability(attendees: list, slots: list) -> list | None:
     """Measure the attendees' calendars across the proposed slots.
 
-    One call covers everything: getSchedule takes many schedules, and
-    scheduleItems make the response scale with the number of meetings rather
-    than the length of the window, so a span of days costs little. That was not
-    true of availabilityView, where five days at five-minute resolution ran to
-    ~1,400 characters per attendee and the worker could not return it.
+    Normal sets use one agent process carrying every numbered day window.
+    getSchedule still receives one narrow call per day; batching removes the
+    repeated agent startup and session initialization around those calls.
+    Larger sets retain the per-day parallel response cap because six attendees
+    across two days already timed out in production (task 2478).
 
     Returns one entry per slot holding the raw schedules, so the caller can do
     its own overlap arithmetic. Returns None when nothing could be measured -
@@ -663,16 +668,33 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
             max(bounds[i][1] for i in members).strftime("%Y-%m-%dT%H:%M:%S"),
         ))
 
-    def _measure_window(window):
+    def _measure_batch(batch_windows):
+        """Measure numbered windows in one process, preserving partial success."""
+        expected = set(range(len(batch_windows)))
+        expected_attendees = {
+            str(email).strip().lower() for email in attendees if str(email).strip()
+        }
+        measured: dict[int, list] = {}
+
+        def _window_complete(index):
+            returned = {
+                str(entry.get("scheduleId") or "").strip().lower()
+                for entry in measured.get(index, [])
+                if isinstance(entry, dict)
+            }
+            return expected_attendees.issubset(returned)
+
         # One retry: a window can come back unreadable for reasons that have
         # nothing to do with its size -- a 30-minute window has failed where a
-        # five-hour one succeeded. A second ask is cheap next to reporting a
-        # whole preview unverified.
+        # five-hour one succeeded. Retry the whole batch, but only back-fill
+        # missing schedules: replacing the dict would discard a first-attempt
+        # success, while treating any nonempty list as complete would lose
+        # attendees returned only on the second attempt.
         for attempt in (1, 2):
             try:
                 proc = _run(
                     availability_command(
-                        availability_prompt(attendees, [window])
+                        availability_prompt(attendees, batch_windows)
                     ),
                     timeout=200,
                 )
@@ -682,18 +704,41 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
                     attempt, exc,
                 )
                 continue
-            parsed = (_parse_windows(proc.stdout or "") or {}).get(0)
-            if parsed:
-                return parsed
+            parsed = _parse_windows(proc.stdout or "") or {}
+            for index, schedules in parsed.items():
+                if index not in expected:
+                    continue
+                by_attendee = {
+                    str(entry.get("scheduleId") or "").strip().lower(): entry
+                    for entry in measured.get(index, [])
+                    if isinstance(entry, dict) and entry.get("scheduleId")
+                }
+                for entry in schedules:
+                    if not isinstance(entry, dict):
+                        continue
+                    email = str(entry.get("scheduleId") or "").strip().lower()
+                    if email and email not in by_attendee:
+                        by_attendee[email] = entry
+                measured[index] = list(by_attendee.values())
+            if all(_window_complete(index) for index in expected):
+                return measured
             logger.warning(
-                "Availability window unreadable (attempt %s of 2)", attempt
+                "Availability batch incomplete (attempt %s of 2; %s/%s windows complete)",
+                attempt,
+                sum(_window_complete(index) for index in expected),
+                len(expected),
             )
-        return None
+        return measured
 
-    if len(windows) == 1:
-        results = [_measure_window(windows[0])]
+    attendee_days = len(attendees) * len(windows)
+    if attendee_days < BATCH_THRESHOLD_ATTENDEE_DAYS:
+        batch = _measure_batch(windows)
+        results = [batch.get(index) for index in range(len(windows))]
     else:
         from concurrent.futures import ThreadPoolExecutor
+
+        def _measure_window(window):
+            return _measure_batch([window]).get(0)
 
         with ThreadPoolExecutor(max_workers=min(len(windows), 4)) as pool:
             results = list(pool.map(_measure_window, windows))
