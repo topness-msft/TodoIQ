@@ -683,15 +683,45 @@ def _scheduler_request(
 
 
 def _find_times_prompt(body: dict) -> str:
+    schedules = [
+        str(
+            (attendee.get("emailAddress") or {}).get("address") or ""
+        ).strip()
+        for attendee in body.get("attendees") or []
+        if isinstance(attendee, dict)
+    ]
+    search_start = (
+        body["timeConstraint"]["timeSlots"][0]["start"]
+    )
+    day = str(search_start["dateTime"]).split("T", 1)[0]
+    timezone_name = str(search_start["timeZone"])
+    timezone_body = {
+        "schedules": schedules,
+        "startTime": {
+            "dateTime": f"{day}T00:00:00",
+            "timeZone": timezone_name,
+        },
+        "endTime": {
+            "dateTime": f"{day}T01:00:00",
+            "timeZone": timezone_name,
+        },
+    }
     return f"""
-You are Riveter's scheduler probe. Make exactly this read-only action call:
+You are Riveter's scheduler probe. First make exactly this read-only action call:
 actionUrl: /me/findMeetingTimes
 jsonBody: {_json(body)}
 
-Do not call any other action and do not interpret or rewrite the response.
-Copy the response data object verbatim into exactly one result block:
+If and only if meetingTimeSuggestions is nonempty, make this second read-only
+call to collect each attendee's working-hours timezone:
+actionUrl: /me/calendar/getSchedule
+jsonBody: {_json(timezone_body)}
+
+Do not call any other action and do not interpret or rewrite either response.
+From getSchedule copy each scheduleId to workingHours.timeZone.name mapping.
+Omit any schedule without that value. Return exactly one result block:
 {RESULT_START}
-{{"result":{{"emptySuggestionsReason":"","meetingTimeSuggestions":[]}}}}
+{{"result":{{"emptySuggestionsReason":"","meetingTimeSuggestions":[]}},
+"attendeeTimezones":{{"person@example.com":"Eastern Standard Time"}}}}
 {RESULT_END}
 """.strip()
 
@@ -714,7 +744,11 @@ def _parse_find_times(output: str) -> dict | None:
     # silently downgrading every such response to the slower fallback.
     if result is None and isinstance(parsed.get("meetingTimeSuggestions"), list):
         result = parsed
-    return result if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        return None
+    copied = dict(result)
+    copied["_attendeeTimezones"] = parsed.get("attendeeTimezones") or {}
+    return copied
 
 
 def _scheduler_command(body: dict) -> list[str]:
@@ -743,6 +777,104 @@ def _graph_status(value) -> str | None:
     if text == "workingelsewhere":
         return "workingElsewhere"
     return text if text in AVAILABILITY_SEVERITY else None
+
+
+def _validated_attendee_timezones(
+    value: dict | None,
+    attendees: set[str],
+) -> dict[str, str]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Scheduler timezone evidence is invalid")
+    normalized = {}
+    for raw_email, raw_zone in value.items():
+        email = str(raw_email or "").strip().lower()
+        timezone_name = str(raw_zone or "").strip()
+        if email not in attendees:
+            raise ValueError("Scheduler timezone evidence is invalid")
+        if tz.gettz(timezone_name) is None:
+            # Some Exchange tenants return "Customized Time Zone" without
+            # the custom rule definition. Timezone labels are optional display
+            # metadata; never invalidate measured availability because this
+            # one label cannot be resolved.
+            continue
+        normalized[email] = timezone_name
+    return normalized
+
+
+def _attendee_timezone_labels(
+    attendee_timezones: dict[str, str],
+    slots: list[dict],
+) -> dict[str, str]:
+    """Describe each attendee's offset from the organizer across offered slots."""
+    instants = []
+    for slot in slots or []:
+        try:
+            parsed = datetime.fromisoformat(
+                str(slot.get("start") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        organizer_zone = tz.gettz(str(slot.get("timezone") or "").strip())
+        if (
+            parsed.tzinfo is None
+            or parsed.utcoffset() is None
+            or organizer_zone is None
+        ):
+            continue
+        instant = parsed.astimezone(timezone.utc)
+        organizer_offset = instant.astimezone(organizer_zone).utcoffset()
+        if organizer_offset is not None:
+            instants.append((instant, organizer_offset))
+    if not instants:
+        return {}
+
+    def _format(hours):
+        if hours == 0:
+            return "same TZ"
+        absolute = abs(hours)
+        number = str(int(absolute)) if absolute.is_integer() else str(absolute)
+        return f"{'+' if hours > 0 else '-'}{number}h"
+
+    labels = {}
+    for email, timezone_name in attendee_timezones.items():
+        zone = tz.gettz(timezone_name)
+        if zone is None:
+            continue
+        differences = set()
+        for instant, organizer_offset in instants:
+            attendee_offset = instant.astimezone(zone).utcoffset()
+            if attendee_offset is None:
+                continue
+            differences.add(
+                (attendee_offset - organizer_offset).total_seconds() / 3600
+            )
+        if differences:
+            labels[email] = "/".join(
+                _format(hours) for hours in sorted(differences)
+            )
+    return labels
+
+
+def _timezones_from_measurements(measurements: list | None) -> dict[str, str]:
+    """Extract measured working-hours zones from getSchedule responses."""
+    timezones = {}
+    for measurement in measurements or []:
+        for schedule in (measurement or {}).get("schedules") or []:
+            if not isinstance(schedule, dict):
+                continue
+            email = str(schedule.get("scheduleId") or "").strip().lower()
+            timezone_name = str(
+                (
+                    ((schedule.get("workingHours") or {}).get("timeZone") or {})
+                    .get("name")
+                )
+                or ""
+            ).strip()
+            if email and tz.gettz(timezone_name) is not None:
+                timezones[email] = timezone_name
+    return timezones
 
 
 def _slot_label(start: datetime, end: datetime) -> str:
@@ -850,6 +982,9 @@ def _find_meeting_slots(task: dict, payload: dict) -> tuple[list[dict], dict]:
             for person in payload.get("attendees") or []
             if isinstance(person, dict) and person.get("email")
         }
+        attendee_timezones = _validated_attendee_timezones(
+            result.get("_attendeeTimezones"), attendees
+        )
         slots = _slots_from_find_times(
             result, attendees, duration, offset, timezone_name
         )
@@ -867,6 +1002,10 @@ def _find_meeting_slots(task: dict, payload: dict) -> tuple[list[dict], dict]:
                 "graph_suggestion_count": len(slots),
                 "graph_minimum_attendee_percentage": percentage,
                 "start_offset_minutes": offset,
+                "attendee_timezones": attendee_timezones,
+                "attendee_timezone_labels": _attendee_timezone_labels(
+                    attendee_timezones, slots
+                ),
             }
         if result.get("meetingTimeSuggestions"):
             # Graph answered, but the response was incomplete or unsafe (for
@@ -1788,6 +1927,7 @@ def finish_preview(
                     "timezone": timezone_name,
                     "availability": normalized_availability,
                 })
+            attendee_timezones = {}
             if _graph_evidence is not None:
                 if (
                     not isinstance(_graph_evidence, dict)
@@ -1797,6 +1937,9 @@ def finish_preview(
                 ):
                     raise ValueError("Structured scheduler evidence is invalid")
                 availability_verified = True
+                attendee_timezones = dict(
+                    _graph_evidence.get("attendee_timezones") or {}
+                )
                 # Graph already measured these exact free blocks. Calling
                 # getSchedule here would spend another agent run and could
                 # overwrite stronger evidence with an infrastructure failure.
@@ -1814,6 +1957,7 @@ def finish_preview(
                 # proposed a Wednesday its own evidence called free while the
                 # attendee was out of office all day.
                 schedules = fetch_availability(attendees, evidence_slots)
+                attendee_timezones = _timezones_from_measurements(schedules)
                 availability_verified = bool(schedules) and all(
                     (entry or {}).get("schedules") for entry in schedules
                 )
@@ -1925,6 +2069,15 @@ def finish_preview(
                     } if _graph_evidence is not None else {}),
                 },
             }
+            if attendee_timezones:
+                interaction["schedule_evidence"]["attendee_timezones"] = (
+                    attendee_timezones
+                )
+                interaction["schedule_evidence"]["attendee_timezone_labels"] = (
+                    _attendee_timezone_labels(
+                        attendee_timezones, evidence_slots
+                    )
+                )
             fields.update({
                 "state": "previewing",
                 "blocked_question": _json(interaction),

@@ -3318,6 +3318,35 @@ textarea.cw-draft {
 }
 .cw-refine-box:focus { outline: 2px solid #0f6cbd; outline-offset: -1px; }
 .cw-refine-actions { display: flex; gap: 14px; padding-top: 8px; }
+.cw-meeting-preview {
+    display: grid; gap: 10px; margin: 10px 0; padding: 12px;
+    border: 1px solid var(--border-primary); border-radius: 8px;
+    background: var(--bg-primary); color: var(--text-primary);
+}
+.cw-meeting-preview-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.cw-meeting-preview-head b { font-size: 13px; }
+.cw-meeting-preview-head span {
+    color: var(--text-secondary); font-size: 11px; margin-right: auto;
+}
+.cw-meeting-edit-btn { padding: 4px 9px; }
+.cw-meeting-field { display: grid; gap: 4px; font-size: 11px; color: var(--text-secondary); }
+.cw-meeting-field strong { font-size: 13px; color: var(--text-primary); }
+.cw-meeting-body {
+    color: var(--text-primary); font-size: 12px; line-height: 1.5;
+    white-space: normal;
+}
+.cw-meeting-subject-input, .cw-meeting-body-input {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--border-primary);
+    border-radius: 5px; padding: 8px 9px; background: var(--bg-primary);
+    color: var(--text-primary); font: inherit; font-size: 12px;
+}
+.cw-meeting-body-input { line-height: 1.5; resize: vertical; min-height: 110px; }
+.cw-meeting-subject-input:focus, .cw-meeting-body-input:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px;
+}
+.cw-meeting-edit-actions { display: flex; gap: 8px; }
 .cw-blocked-question {
     margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-primary);
     background: var(--bg-primary); color: var(--text-primary);
@@ -3379,6 +3408,10 @@ textarea.cw-draft {
 .cw-avail-head-pill:hover { background: var(--accent-bg); border-color: transparent; }
 .cw-avail-head-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cw-avail-head-avatar { width: 22px; height: 22px; font-size: 9px; }
+.cw-avail-head-tz {
+    margin-top: 3px; color: var(--text-secondary); font-size: 9px;
+    font-weight: 700; line-height: 1; letter-spacing: .03em;
+}
 .cw-meeting-attendees { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
 .cw-meeting-attendee-pill { cursor: default; }
 .cw-meeting-attendee-pill:hover { background: var(--accent-bg); border-color: transparent; }

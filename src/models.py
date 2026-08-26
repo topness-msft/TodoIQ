@@ -605,7 +605,13 @@ _COWORK_REVISION_FIELDS = frozenset({
 
 # Only the draft the user typed is editable. Everything Cowork produced, and
 # the state machine itself, is off limits from the API.
-ACTION_EDITABLE_FIELDS = frozenset({"draft_edited"})
+ACTION_EDITABLE_FIELDS = frozenset({
+    "draft_edited",
+    # Pseudo-fields handled inside CoworkHandler.put. They are stored inside
+    # structured_payload, never as task_actions columns.
+    "calendar_subject",
+    "calendar_body",
+})
 
 _ACTION_RESULT_FIELDS = frozenset({
     "state", "finding", "draft", "terminal_status", "tool_trace", "error",
@@ -985,6 +991,36 @@ def update_task_action(
             f"UPDATE task_actions SET {sets}, "
             f"updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE {where}",
             params,
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def update_calendar_payload_if_question_open(
+    action_id: int,
+    expected_question: str,
+    structured_payload: str,
+) -> dict | None:
+    """Atomically edit invite content only while the same chooser is open."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE task_actions
+            SET structured_payload = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id = ?
+              AND state = 'previewing'
+              AND blocked_question = ?
+            """,
+            (structured_payload, action_id, expected_question),
         )
         conn.commit()
         if cursor.rowcount == 0:

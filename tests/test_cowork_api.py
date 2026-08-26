@@ -3672,6 +3672,91 @@ class TestEditDraft(CoworkAPITestBase):
         _, data = self.get_preview(tid)
         self.assertIn("sending the deck today", data["action"]["draft"])
 
+    def _calendar_action(self, tid, *, state="previewing", blocked=True):
+        from src.models import create_task_action, update_task_action
+
+        payload = {
+            "channel": "calendar",
+            "subject": "Original subject",
+            "body": "Original agenda",
+            "attendees": [{"name": "Rima", "email": "rima@x.com"}],
+            "duration_minutes": 25,
+            "slots": [],
+        }
+        action = create_task_action(
+            tid,
+            action_type="schedule-meeting",
+            delivery_channel="calendar",
+            structured_payload=json.dumps(payload),
+            blocked_question=(
+                json.dumps({"invocation_id": "calendar-edit"})
+                if blocked else None
+            ),
+            had_interaction=1 if blocked else 0,
+        )
+        if state != "previewing":
+            action = update_task_action(
+                action["id"],
+                frozenset({"state"}),
+                state=state,
+            )
+        return action
+
+    def test_calendar_subject_and_body_update_structured_payload_atomically(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        action = self._calendar_action(tid)
+        response = self._put(tid, {
+            "calendar_subject": "Edited subject",
+            "calendar_body": "Edited agenda\n- Decision one",
+        })
+
+        self.assertEqual(response.code, 200, response.body)
+        payload = json.loads(json.loads(response.body)["action"]["structured_payload"])
+        self.assertEqual(payload["subject"], "Edited subject")
+        self.assertEqual(payload["body"], "Edited agenda\n- Decision one")
+        self.assertEqual(payload["attendees"][0]["email"], "rima@x.com")
+        self.assertEqual(payload["slots"], [])
+        # Pseudo-fields are JSON payload fields, never task_actions columns.
+        self.assertNotIn("calendar_subject", json.loads(response.body)["action"])
+        self.assertEqual(action["state"], "previewing")
+
+    def test_calendar_edit_requires_visible_blocked_chooser(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        self._calendar_action(tid, blocked=False)
+        response = self._put(tid, {"calendar_subject": "Should fail"})
+        self.assertEqual(response.code, 409)
+
+    def test_calendar_edit_is_locked_after_slot_selection(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        self._calendar_action(tid, state="ready", blocked=False)
+        response = self._put(tid, {"calendar_subject": "Too late"})
+        self.assertEqual(response.code, 409)
+
+    def test_calendar_subject_cannot_be_blank(self):
+        tid = self.make_task(action_type="schedule-meeting")
+        self._calendar_action(tid)
+        response = self._put(tid, {"calendar_subject": "   "})
+        self.assertEqual(response.code, 400)
+
+    def test_calendar_edit_fields_cannot_mutate_email_payload(self):
+        tid = self.make_task(action_type="respond-email")
+        from src.models import create_task_action
+
+        create_task_action(
+            tid,
+            action_type="respond-email",
+            delivery_channel="email",
+            structured_payload=json.dumps({
+                "channel": "email",
+                "subject": "Email",
+                "body": "Body",
+            }),
+            blocked_question=json.dumps({"invocation_id": "email"}),
+            had_interaction=1,
+        )
+        response = self._put(tid, {"calendar_subject": "Wrong channel"})
+        self.assertEqual(response.code, 409)
+
     def test_404_when_no_action(self):
         tid = self.make_task()
         self.assertEqual(self._put(tid, {"draft_edited": "x"}).code, 404)

@@ -1542,7 +1542,7 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         }
 
     @staticmethod
-    def _scheduler_stdout(suggestions, reason=""):
+    def _scheduler_stdout(suggestions, reason="", timezones=None):
         return (
             structured_delivery.RESULT_START
             + json.dumps({
@@ -1550,6 +1550,7 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
                     "emptySuggestionsReason": reason,
                     "meetingTimeSuggestions": suggestions,
                 },
+                "attendeeTimezones": timezones or {},
             })
             + structured_delivery.RESULT_END
         )
@@ -1670,6 +1671,9 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         self.assertEqual(len(calls), 1)
         joined = " ".join(calls[0][0])
         self.assertIn("/me/findMeetingTimes", joined)
+        self.assertIn("/me/calendar/getSchedule", joined)
+        self.assertIn("attendeeTimezones", joined)
+        self.assertIn("If and only if meetingTimeSuggestions is nonempty", joined)
         self.assertIn('"meetingDuration":"PT30M"', joined.replace(" ", ""))
         self.assertIn('"minimumAttendeePercentage":100', joined.replace(" ", ""))
         self.assertEqual(calls[0][1], structured_delivery.SCHEDULER_TIMEOUT_SECONDS)
@@ -1798,6 +1802,135 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         parsed = structured_delivery._parse_find_times(flat)
         self.assertEqual(len(parsed["meetingTimeSuggestions"]), 1)
 
+    def test_timezone_labels_are_relative_to_organizer(self):
+        slots = [{
+            "start": "2026-07-15T13:05:00-04:00",
+            "end": "2026-07-15T13:30:00-04:00",
+            "timezone": "America/New_York",
+        }]
+        labels = structured_delivery._attendee_timezone_labels(
+            {
+                "east@x.com": "Eastern Standard Time",
+                "west@x.com": "Pacific Standard Time",
+            },
+            slots,
+        )
+        self.assertEqual(labels["east@x.com"], "same TZ")
+        self.assertEqual(labels["west@x.com"], "-3h")
+
+        winter = [dict(
+            slots[0],
+            start="2026-12-15T13:05:00-05:00",
+            end="2026-12-15T13:30:00-05:00",
+        )]
+        labels = structured_delivery._attendee_timezone_labels(
+            {"east@x.com": "Eastern Standard Time"},
+            winter,
+        )
+        self.assertEqual(labels["east@x.com"], "same TZ")
+
+    def test_timezone_label_shows_range_across_dst_mismatch(self):
+        slots = [
+            {
+                "start": "2026-10-20T13:05:00-04:00",
+                "timezone": "America/New_York",
+            },
+            {
+                "start": "2026-10-28T13:05:00-04:00",
+                "timezone": "America/New_York",
+            },
+        ]
+        labels = structured_delivery._attendee_timezone_labels(
+            {"london@x.com": "GMT Standard Time"},
+            slots,
+        )
+        self.assertEqual(labels["london@x.com"], "+4h/+5h")
+
+    def test_scheduler_timezone_map_is_validated_and_stored_in_evidence(self):
+        task = self._task()
+        payload = self._payload(task)
+        output = self._scheduler_stdout(
+            [self._suggestion()],
+            timezones={
+                "person-0@x.com": "Eastern Standard Time",
+                "person-1@x.com": "Pacific Standard Time",
+            },
+        )
+        original = structured_delivery._run
+        structured_delivery._run = lambda argv, timeout=300: subprocess.CompletedProcess(
+            argv, 0, stdout=output, stderr=""
+        )
+        try:
+            slots, evidence = structured_delivery._find_meeting_slots(
+                task, payload
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(
+            evidence["attendee_timezones"]["person-1@x.com"],
+            "Pacific Standard Time",
+        )
+        self.assertEqual(
+            evidence["attendee_timezone_labels"]["person-1@x.com"],
+            "-3h",
+        )
+        self.assertTrue(slots)
+
+    def test_unknown_timezone_attendee_is_rejected(self):
+        task = self._task()
+        payload = self._payload(task)
+        output = self._scheduler_stdout(
+            [self._suggestion()],
+            timezones={"injected@x.com": "Pacific Standard Time"},
+        )
+        original = structured_delivery._run
+        structured_delivery._run = lambda argv, timeout=300: subprocess.CompletedProcess(
+            argv, 0, stdout=output, stderr=""
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "timezone"):
+                structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+
+    def test_unresolvable_optional_timezone_is_omitted_not_fatal(self):
+        task = self._task()
+        payload = self._payload(task)
+        output = self._scheduler_stdout(
+            [self._suggestion()],
+            timezones={"person-0@x.com": "Customized Time Zone"},
+        )
+        original = structured_delivery._run
+        structured_delivery._run = lambda argv, timeout=300: subprocess.CompletedProcess(
+            argv, 0, stdout=output, stderr=""
+        )
+        try:
+            slots, evidence = structured_delivery._find_meeting_slots(
+                task, payload
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertTrue(slots)
+        self.assertEqual(evidence["attendee_timezones"], {})
+        self.assertEqual(evidence["attendee_timezone_labels"], {})
+
+    def test_fallback_measurements_expose_working_hours_timezones(self):
+        measured = [{
+            "schedules": [{
+                "scheduleId": "a@x.com",
+                "scheduleItems": [],
+                "workingHours": {
+                    "timeZone": {"name": "Eastern Standard Time"},
+                },
+            }],
+        }]
+        self.assertEqual(
+            structured_delivery._timezones_from_measurements(measured),
+            {"a@x.com": "Eastern Standard Time"},
+        )
+
     def test_no_mutual_time_is_distinct_from_infrastructure_failure(self):
         task = self._task()
         payload = self._payload(task)
@@ -1903,7 +2036,13 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         )
         outputs = [
             self._phase_one_stdout(envelope, self._payload(task)),
-            self._scheduler_stdout([self._suggestion()]),
+            self._scheduler_stdout(
+                [self._suggestion()],
+                timezones={
+                    "person-0@x.com": "Eastern Standard Time",
+                    "person-1@x.com": "Pacific Standard Time",
+                },
+            ),
         ]
         calls = []
         original = structured_delivery._run
@@ -1934,6 +2073,10 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
         self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
         self.assertTrue(evidence["availability_verified"])
+        self.assertEqual(
+            evidence["attendee_timezone_labels"]["person-1@x.com"],
+            "-3h",
+        )
 
     def test_working_elsewhere_survives_scheduler_into_chooser(self):
         task = self._task()
@@ -3607,6 +3750,14 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             headers={"Content-Type": "application/json", **(headers or {})},
         )
 
+    def _put(self, path, body=None):
+        return self.fetch(
+            path,
+            method="PUT",
+            body=json.dumps(body or {}),
+            headers={"Content-Type": "application/json"},
+        )
+
     def test_three_structured_modes_bypass_cowork_preview(self):
         from src.handlers import cowork as handler
 
@@ -4270,6 +4421,15 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         # selection fails with "Select exactly one verified meeting time."
         self.assertIn("value", slots[0])
 
+        edited = self._put(
+            f"/api/tasks/{task['id']}/cowork",
+            {
+                "calendar_subject": "Edited Project Whale kickoff",
+                "calendar_body": "Edited agenda\n- Decide the launch owner.",
+            },
+        )
+        self.assertEqual(edited.code, 200, edited.body)
+
         original_execute = handler.STRUCTURED_EXECUTE_FN
         original_now = handler.NOW_FN
         handler.STRUCTURED_EXECUTE_FN = (
@@ -4295,6 +4455,10 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(event["end"], end.isoformat())
         self.assertEqual(event["duration_minutes"], duration)
         self.assertEqual(event["time_zone"], "Eastern Standard Time")
+        self.assertEqual(event["subject"], "Edited Project Whale kickoff")
+        self.assertEqual(
+            event["body"], "Edited agenda\n- Decide the launch owner."
+        )
         # The card must report what was booked. It previously carried the
         # preview draft, so a finished meeting still listed all the times that
         # had merely been offered.

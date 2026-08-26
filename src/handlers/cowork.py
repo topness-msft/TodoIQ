@@ -34,6 +34,7 @@ from ..models import (
     mark_task_action_seen,
     restore_claimed_blocked_question,
     set_blocked_question_if_missing,
+    update_calendar_payload_if_question_open,
     update_task_action,
 )
 from ..services.cowork_runner import (
@@ -1534,6 +1535,57 @@ class CoworkHandler(tornado.web.RequestHandler):
             key: value for key, value in body.items()
             if key in ACTION_EDITABLE_FIELDS
         }
+        calendar_keys = {"calendar_subject", "calendar_body"} & set(updates)
+        if calendar_keys:
+            if (
+                action.get("state") != "previewing"
+                or not (action.get("blocked_question") or None)
+            ):
+                return self._fail(
+                    409,
+                    "The meeting invite can only be edited while its time "
+                    "chooser is open.",
+                )
+            if "draft_edited" in updates:
+                return self._fail(
+                    400,
+                    "Calendar subject/body edits cannot be mixed with a draft edit.",
+                )
+            try:
+                payload = json.loads(action.get("structured_payload") or "")
+            except (json.JSONDecodeError, TypeError):
+                return self._fail(409, "The structured action payload is invalid.")
+            if payload.get("channel") != "calendar":
+                return self._fail(
+                    409, "Calendar edit fields require a calendar preview."
+                )
+            subject = str(
+                updates.pop("calendar_subject", payload.get("subject") or "")
+            ).strip()
+            agenda = str(
+                updates.pop("calendar_body", payload.get("body") or "")
+            ).strip()
+            if not subject:
+                return self._fail(400, "The meeting subject cannot be blank.")
+            if not agenda:
+                return self._fail(400, "The meeting agenda cannot be blank.")
+            payload["subject"] = subject
+            payload["body"] = agenda
+            structured_payload = json.dumps(
+                payload, separators=(",", ":"), sort_keys=True
+            )
+            updated = update_calendar_payload_if_question_open(
+                action["id"],
+                action["blocked_question"],
+                structured_payload,
+            )
+            if updated is None:
+                return self._fail(
+                    409,
+                    "The meeting chooser changed before the invite was saved.",
+                )
+            self.write(json.dumps({"action": _enrich(_clean(updated))}))
+            return
         if action.get("structured_payload") and "draft_edited" in updates:
             edited = str(updates["draft_edited"] or "").strip()
             try:
@@ -2076,6 +2128,18 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             action["id"], previous_question, answer_record
         ):
             return self._fail(409, "That Cowork question was already answered")
+        # A calendar edit may have committed immediately before this claim.
+        # Re-read after the atomic claim so event creation uses the exact
+        # subject/body that won the race. Edits that arrive after the claim
+        # fail their blocked_question compare-and-set.
+        if structured_calendar:
+            claimed_action = get_latest_task_action(tid)
+            if not claimed_action or claimed_action.get("id") != action.get("id"):
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
+                return self._fail(409, "That Cowork question is no longer current")
+            action = _enrich(claimed_action)
 
         if structured_calendar:
             selected_values = {

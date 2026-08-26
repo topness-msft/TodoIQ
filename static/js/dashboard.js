@@ -3400,6 +3400,8 @@ var CW_ACTION_NOTE = {
 var _cwActions = {};
 var _cwLoading = {};
 var _cwEditing = {};
+var _cwMeetingEditing = {};
+var _cwMeetingSaving = {};
 var _cwRedo = {};
 var _cwRepairingSubject = {};
 // Selection for the next run. Once a run starts, the persisted action row is
@@ -3416,6 +3418,7 @@ var _cwRefine = {};
 // only the instruction reached Cowork. Buffering on every keystroke means a
 // re-render restores the edit instead of destroying it.
 var _cwDraftBuf = {};
+var _cwMeetingBuf = {};
 var _cwInstrBuf = {};
 var _cwAnswerBuf = {};
 var _cwAnswerSending = {};
@@ -3423,6 +3426,10 @@ var _cwExecuteSending = {};
 var _cwExecuteApprovals = {};
 
 function cwBufferDraft(taskId, value) { _cwDraftBuf[taskId] = value; }
+function cwBufferMeeting(taskId, field, value) {
+    if (!_cwMeetingBuf[taskId]) _cwMeetingBuf[taskId] = {};
+    _cwMeetingBuf[taskId][field] = value;
+}
 function cwBufferInstr(taskId, value) { _cwInstrBuf[taskId] = value; }
 function cwBufferAnswer(taskId, questionId, value) {
     if (!_cwAnswerBuf[taskId]) _cwAnswerBuf[taskId] = {};
@@ -3431,8 +3438,138 @@ function cwBufferAnswer(taskId, questionId, value) {
 
 function cwClearBuffers(taskId) {
     delete _cwDraftBuf[taskId];
+    delete _cwMeetingBuf[taskId];
     delete _cwInstrBuf[taskId];
     delete _cwAnswerBuf[taskId];
+}
+
+function cwCalendarPayload(action) {
+    if (!action || !action.structured_payload) return null;
+    try {
+        var payload = JSON.parse(action.structured_payload);
+        return payload && payload.channel === 'calendar' ? payload : null;
+    } catch (_err) {
+        return null;
+    }
+}
+
+function cwMeetingPreview(taskId, action) {
+    var payload = cwCalendarPayload(action);
+    if (!payload) return '';
+    var storedSubject = String(payload.subject || '').trim();
+    var storedBody = String(payload.body || '').trim();
+    if (!storedSubject && !storedBody) return '';
+    var editing = Boolean(_cwMeetingEditing[taskId]);
+    var buffered = _cwMeetingBuf[taskId] || {};
+    var subject = buffered.subject !== undefined
+        ? buffered.subject : storedSubject;
+    var body = buffered.body !== undefined ? buffered.body : storedBody;
+    if (editing) {
+        return '<section class="cw-meeting-preview is-editing" '
+            + 'data-testid="cw-meeting-preview">'
+            + '<div class="cw-meeting-preview-head"><b>Meeting invite</b>'
+            + '<span>Edit the exact content that will be sent.</span></div>'
+            + '<label class="cw-meeting-field">Subject'
+            + '<input class="cw-meeting-subject-input" '
+            + 'data-testid="cw-meeting-subject-input" value="'
+            + escapeAttr(subject) + '" oninput="cwBufferMeeting(' + taskId
+            + ',\'subject\',this.value)"></label>'
+            + '<label class="cw-meeting-field">Agenda'
+            + '<textarea class="cw-meeting-body-input" rows="6" '
+            + 'data-testid="cw-meeting-body-input" '
+            + 'oninput="cwBufferMeeting(' + taskId + ',\'body\',this.value)">'
+            + escapeHtml(body) + '</textarea></label>'
+            + '<div class="cw-meeting-edit-actions">'
+            + '<button class="cw-btn cw-btn-go" type="button" '
+            + 'data-testid="cw-meeting-save-btn" onclick="cwSaveMeeting('
+            + taskId + ')">Save invite</button>'
+            + '<button class="cw-btn cw-btn-ghost" type="button" '
+            + 'onclick="cwToggleMeetingEdit(' + taskId + ',false)">Cancel</button>'
+            + '</div></section>';
+    }
+    return '<section class="cw-meeting-preview" data-testid="cw-meeting-preview">'
+        + '<div class="cw-meeting-preview-head"><b>Meeting invite</b>'
+        + '<button class="cw-btn cw-btn-ghost cw-meeting-edit-btn" type="button" '
+        + 'data-testid="cw-meeting-edit-btn" onclick="cwToggleMeetingEdit('
+        + taskId + ',true)">Edit</button></div>'
+        + '<div class="cw-meeting-field"><span>Subject</span>'
+        + '<strong data-testid="cw-meeting-subject">'
+        + escapeHtml(storedSubject) + '</strong></div>'
+        + '<div class="cw-meeting-field"><span>Agenda</span>'
+        + '<div class="cw-meeting-body" data-testid="cw-meeting-body">'
+        + escapeHtml(storedBody).replace(/\n/g, '<br>') + '</div></div>'
+        + '</section>';
+}
+
+function cwToggleMeetingEdit(taskId, on) {
+    var payload = cwCalendarPayload(_cwActions[taskId]);
+    if (on && payload) {
+        _cwMeetingEditing[taskId] = true;
+        _cwMeetingBuf[taskId] = {
+            subject: String(payload.subject || ''),
+            body: String(payload.body || '')
+        };
+    } else {
+        delete _cwMeetingEditing[taskId];
+        delete _cwMeetingBuf[taskId];
+    }
+    cwRerender(taskId);
+    if (on) {
+        var input = document.querySelector(
+            '[data-testid="cw-meeting-subject-input"]'
+        );
+        if (input) input.focus();
+    }
+}
+
+function cwSaveMeeting(taskId) {
+    if (_cwMeetingSaving[taskId]) return;
+    var buffered = _cwMeetingBuf[taskId] || {};
+    var subjectInput = document.querySelector(
+        '[data-testid="cw-meeting-subject-input"]'
+    );
+    var bodyInput = document.querySelector(
+        '[data-testid="cw-meeting-body-input"]'
+    );
+    var subject = String(
+        subjectInput ? subjectInput.value : buffered.subject || ''
+    ).trim();
+    var body = String(
+        bodyInput ? bodyInput.value : buffered.body || ''
+    ).trim();
+    if (!subject || !body) return;
+    _cwMeetingSaving[taskId] = true;
+    fetch('/api/tasks/' + taskId + '/cowork', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            calendar_subject: subject,
+            calendar_body: body
+        })
+    })
+    .then(function(res) {
+        return res.json().then(function(data) {
+            return {ok: res.ok, data: data};
+        });
+    })
+    .then(function(result) {
+        delete _cwMeetingSaving[taskId];
+        if (!result.ok || !result.data.action) {
+            var action = _cwActions[taskId];
+            if (action) action.error = result.data.error || 'Could not save invite.';
+            return cwRerender(taskId);
+        }
+        delete _cwMeetingEditing[taskId];
+        delete _cwMeetingBuf[taskId];
+        _cwActions[taskId] = result.data.action;
+        cwRerender(taskId);
+    })
+    .catch(function(err) {
+        delete _cwMeetingSaving[taskId];
+        var action = _cwActions[taskId];
+        if (action) action.error = 'Could not save invite: ' + err;
+        cwRerender(taskId);
+    });
 }
 var _cwPollers = {};
 var _cwHandoffPollers = {};
@@ -4769,6 +4906,8 @@ function renderCoworkCard(task) {
             var question = cwInteractionFields(task.id, interaction);
             var answerButton = '<button class="cw-btn cw-btn-go" '
                 + 'data-testid="cw-answer-submit" '
+                + ((_cwMeetingEditing[task.id] || _cwMeetingSaving[task.id])
+                    ? 'disabled ' : '')
                 + 'onclick="cwSendAnswer(' + task.id + ')">'
                 + (structured && a.delivery_channel === 'calendar'
                     ? 'Select &amp; create meeting' : 'Answer and continue')
@@ -4776,6 +4915,8 @@ function renderCoworkCard(task) {
             return cwShell('is-running', 'needs you', task,
                 cwModeSwitch(task.id, a, true)
                 + cwIntentBlock(task, false)
+                + (structured && a.delivery_channel === 'calendar'
+                    ? cwMeetingPreview(task.id, a) : '')
                 + '<div class="cw-blocked" data-testid="cw-blocked" '
                 + 'data-cw-invocation="'
                 + escapeAttr(interaction ? interaction.invocation_id : '') + '">'
@@ -5431,8 +5572,15 @@ function cwInteractionFields(taskId, interaction) {
                 rows.push({option: options[i], statuses: values});
             }
             var selected = value.split('\n');
+            var timezoneLabels = evidence
+                && evidence.attendee_timezone_labels
+                && typeof evidence.attendee_timezone_labels === 'object'
+                ? evidence.attendee_timezone_labels : {};
             var header = '<div class="cw-avail-corner" aria-hidden="true"></div>'
                 + attendees.map(function(person) {
+                    var timezoneLabel = String(
+                        timezoneLabels[person.email] || ''
+                    ).trim();
                     return '<div class="cw-avail-head" role="columnheader" '
                         + 'data-testid="cw-avail-col-header"><span class="person-pill '
                         + 'cw-avail-head-pill" data-testid="cw-avail-head-pill" title="'
@@ -5441,7 +5589,13 @@ function cwInteractionFields(taskId, interaction) {
                         + 'data-testid="cw-avail-head-avatar" title="' + escapeAttr(person.name)
                         + '">' + escapeHtml(cwPersonInitials(person.name))
                         + '</span><span class="cw-avail-head-name">'
-                        + escapeHtml(person.name) + '</span></span></div>';
+                        + escapeHtml(person.name) + '</span></span>'
+                        + (timezoneLabel
+                            ? '<span class="cw-avail-head-tz" '
+                                + 'data-testid="cw-avail-head-tz">'
+                                + escapeHtml(timezoneLabel) + '</span>'
+                            : '')
+                        + '</div>';
                 }).join('');
             var body = rows.map(function(row) {
                 var pressed = selected.indexOf(row.option.value) !== -1 ? 'true' : 'false';

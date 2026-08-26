@@ -763,6 +763,204 @@ def test_busy_attendee_stays_visible_in_availability_grid(page: Page, base_url):
     )
 
 
+def test_calendar_chooser_shows_and_edits_subject_and_agenda(page: Page, base_url):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Coordinate the Pega meeting"},
+    )
+    task_id = created.json()["task"]["id"]
+    submitted = {}
+
+    def save_route(route):
+        submitted.update(json.loads(route.request.post_data))
+        payload = {
+            "channel": "calendar",
+            "subject": submitted["calendar_subject"],
+            "body": submitted["calendar_body"],
+            "attendees": [],
+            "slots": [],
+        }
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "action": {
+                    "task_id": task_id,
+                    "state": "previewing",
+                    "waiting_on_user": True,
+                    "delivery_channel": "calendar",
+                    "structured_payload": json.dumps(payload),
+                    "interaction_request": {
+                        "invocation_id": "calendar-edit",
+                        "questions": [{
+                            "id": "0",
+                            "header": "Select & create meeting",
+                            "question": "Choose one.",
+                            "options": [{"value": "0", "label": "Friday"}],
+                        }],
+                    },
+                    "blocked_question": '{"invocation_id":"calendar-edit"}',
+                },
+            }),
+        )
+
+    page.route(f"**/api/tasks/{task_id}/cowork", save_route)
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                delivery_channel: 'calendar',
+                structured_payload: JSON.stringify({
+                    channel: 'calendar',
+                    subject: 'Pega context, FinOps, and roadmap sync',
+                    body: 'Align on Pega context.\\n- Decide the Lighthouse role.',
+                    attendees: [],
+                    slots: []
+                }),
+                interaction_request: {
+                    invocation_id: 'calendar-edit',
+                    questions: [{
+                        id: '0',
+                        header: 'Select & create meeting',
+                        question: 'Choose one.',
+                        options: [{value: '0', label: 'Friday'}]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"calendar-edit"}'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    expect(page.get_by_test_id("cw-meeting-subject")).to_contain_text(
+        "Pega context, FinOps, and roadmap sync"
+    )
+    expect(page.get_by_test_id("cw-meeting-body")).to_contain_text(
+        "Decide the Lighthouse role"
+    )
+    page.get_by_test_id("cw-meeting-edit-btn").click()
+    expect(page.get_by_test_id("cw-answer-submit")).to_be_disabled()
+    page.get_by_test_id("cw-meeting-subject-input").fill("Edited Pega sync")
+    page.get_by_test_id("cw-meeting-body-input").fill(
+        "Edited agenda\n- Decide the owner."
+    )
+    page.get_by_test_id("cw-meeting-save-btn").click()
+    page.wait_for_function(
+        "taskId => _cwActions[taskId]"
+        " && JSON.parse(_cwActions[taskId].structured_payload).subject"
+        " === 'Edited Pega sync'",
+        arg=task_id,
+    )
+
+    assert submitted == {
+        "calendar_subject": "Edited Pega sync",
+        "calendar_body": "Edited agenda\n- Decide the owner.",
+    }
+    expect(page.get_by_test_id("cw-meeting-subject")).to_contain_text(
+        "Edited Pega sync"
+    )
+    expect(page.get_by_test_id("cw-meeting-body")).to_contain_text(
+        "Decide the owner"
+    )
+    panel = page.get_by_test_id("cw-meeting-preview")
+    box = panel.bounding_box()
+    assert box and box["width"] >= 350
+    os.makedirs("temp", exist_ok=True)
+    panel.screenshot(path="temp/structured-calendar-edit-subject.png")
+
+
+def test_availability_header_shows_attendee_timezone_labels(page: Page, base_url):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Schedule the timezone review"},
+    )
+    task_id = created.json()["task"]["id"]
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                {name: 'Alex Wilber', email: 'alex@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                structured_payload: JSON.stringify({
+                    channel: 'calendar', subject: 'Review', body: 'Agenda'
+                }),
+                delivery_channel: 'calendar',
+                interaction_request: {
+                    invocation_id: 'timezone-labels',
+                    schedule_evidence: {
+                        valid: true,
+                        query_backed: true,
+                        availability_verified: true,
+                        attendees: ['rima@microsoft.com', 'alex@microsoft.com'],
+                        attendee_timezone_labels: {
+                            'rima@microsoft.com': 'same TZ',
+                            'alex@microsoft.com': '-3h'
+                        },
+                        slots: [{
+                            value: '0',
+                            availability: {
+                                'rima@microsoft.com': 'free',
+                                'alex@microsoft.com': 'free'
+                            }
+                        }]
+                    },
+                    questions: [{
+                        id: '0',
+                        question: 'Which time?',
+                        options: [{value: '0', label: 'Friday 1:05 PM'}]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"timezone-labels"}'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    labels = page.get_by_test_id("cw-avail-head-tz")
+    expect(labels).to_have_count(2)
+    expect(labels.nth(0)).to_have_text("same TZ")
+    expect(labels.nth(1)).to_have_text("-3h")
+    avatar = page.get_by_test_id("cw-avail-head-avatar").nth(0).bounding_box()
+    label = labels.nth(0).bounding_box()
+    assert avatar and label and label["y"] >= avatar["y"] + avatar["height"]
+    os.makedirs("temp", exist_ok=True)
+    page.get_by_test_id("cw-avail-matrix").screenshot(
+        path="temp/structured-calendar-tz-avatar.png"
+    )
+
+
 def test_coverage_is_read_off_slots_when_the_key_predates_it(page: Page, base_url):
     """Choosers stored before availability_coverage existed still carry slots.
 
