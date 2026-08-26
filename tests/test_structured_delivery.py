@@ -1673,6 +1673,9 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         self.assertIn('"meetingDuration":"PT30M"', joined.replace(" ", ""))
         self.assertIn('"minimumAttendeePercentage":100', joined.replace(" ", ""))
         self.assertEqual(calls[0][1], structured_delivery.SCHEDULER_TIMEOUT_SECONDS)
+        self.assertGreaterEqual(
+            structured_delivery.SCHEDULER_TIMEOUT_SECONDS, 180
+        )
         self.assertEqual(slots[0]["start"], "2099-08-31T13:05:00-04:00")
         self.assertEqual(slots[0]["end"], "2099-08-31T13:30:00-04:00")
         self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
@@ -2072,6 +2075,41 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         self.assertEqual(latest["state"], "previewing")
         evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
         self.assertEqual(evidence["source"], "copilot-ask")
+
+    def test_scheduler_fallback_fills_missing_provisional_attendee_as_unknown(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        payload = self._payload(task)
+        del payload["slots"][0]["availability"]["person-2@x.com"]
+        phase_one = self._phase_one_stdout(envelope, payload)
+        outputs = [phase_one, "scheduler returned no result marker"]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing", latest.get("error"))
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(
+            evidence["slots"][0]["availability"]["person-2@x.com"],
+            "unknown",
+        )
 
 
 class TestAvailabilityVerification(StructuredDeliveryTestBase):

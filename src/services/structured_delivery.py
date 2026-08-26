@@ -551,7 +551,10 @@ AVAILABILITY_TOOLS = "workiq-do_action"
 # keep the existing per-day response cap. Smaller sets batch all numbered
 # windows into one agent process.
 BATCH_THRESHOLD_ATTENDEE_DAYS = 12
-SCHEDULER_TIMEOUT_SECONDS = 90
+# Direct Graph returns in seconds, but the Copilot CLI/MCP startup around the
+# call exceeded 90 seconds on task 2478. Keep this below the old 420-second
+# preview ceiling while giving the exact, single-action probe room to start.
+SCHEDULER_TIMEOUT_SECONDS = 180
 GRAPH_SCHEDULE_SOURCE = "FindMeetingTimes+structured"
 
 
@@ -1737,7 +1740,13 @@ def finish_preview(
                         str(email).strip().lower() for email in availability
                     } != set(attendees)
                     or any(
-                        _graph_status(status) is None
+                        (
+                            _graph_status(status) is None
+                            and not (
+                                _graph_evidence is None
+                                and str(status).strip().lower() == "unknown"
+                            )
+                        )
                         for status in availability.values()
                     )
                 ):
@@ -1755,7 +1764,15 @@ def finish_preview(
                 ):
                     raise ValueError("Calendar slot has invalid date or timezone data")
                 normalized_availability = {
-                    str(email).strip().lower(): _graph_status(status)
+                    str(email).strip().lower(): (
+                        _graph_status(status)
+                        or (
+                            "unknown"
+                            if _graph_evidence is None
+                            and str(status).strip().lower() == "unknown"
+                            else None
+                        )
+                    )
                     for email, status in availability.items()
                 }
                 options.append({
@@ -2023,6 +2040,7 @@ def _preview_worker(task: dict, action: dict) -> None:
         )
         preview_stdout = result.stdout
         graph_evidence = None
+        phase_one_payload = None
         if payload["channel"] == "calendar" and result.returncode == 0:
             try:
                 phase_one = parse_result_marker(
@@ -2064,6 +2082,37 @@ def _preview_worker(task: dict, action: dict) -> None:
                     "Structured scheduler unavailable; using getSchedule fallback: %s",
                     exc,
                 )
+                if isinstance(phase_one_payload, dict):
+                    expected = {
+                        str(person.get("email") or "").strip().lower()
+                        for person in _key_people(task)
+                        if str(person.get("email") or "").strip()
+                    }
+                    for slot in phase_one_payload.get("slots") or []:
+                        if not isinstance(slot, dict):
+                            continue
+                        existing = {
+                            str(email).strip().lower(): (
+                                _graph_status(status) or "unknown"
+                            )
+                            for email, status in (
+                                slot.get("availability") or {}
+                            ).items()
+                        }
+                        slot["availability"] = {
+                            email: existing.get(email, "unknown")
+                            for email in expected
+                        }
+                    preview_stdout = (
+                        RESULT_START
+                        + _json({
+                            "correlation_id": correlation_id,
+                            "phase": "preview",
+                            "ok": True,
+                            "payload": phase_one_payload,
+                        })
+                        + RESULT_END
+                    )
         finish_preview(
             action["id"],
             stdout=preview_stdout,
