@@ -5341,7 +5341,11 @@ function cwInteractionFields(taskId, interaction) {
         function cwNormalizeAvailability(parsed) {
             if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return null;
             var statuses = {};
-            var allowed = ['free', 'tentative'];
+            // A conflict is comparison data, not invalid data. Task 2558 had
+            // one all-free option and one where Remi was busy; rejecting
+            // `busy` suppressed the entire side-by-side grid even though CSS
+            // already had a deliberate red state for it.
+            var allowed = ['free', 'tentative', 'busy'];
             for (var key in parsed) {
                 if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
                 var email = String(key).trim().toLowerCase();

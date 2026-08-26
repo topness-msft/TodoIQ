@@ -1211,6 +1211,31 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             schedule_duration_minutes(task),
         ))
 
+    def test_structured_scheduler_source_is_certified_not_self_reported(self):
+        from src.services.cowork_runner import (
+            CERTIFIED_SCHEDULE_SOURCES,
+            SELF_REPORTED_SCHEDULE_SOURCES,
+            schedule_attendees,
+            schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        source = "FindMeetingTimes+structured"
+        interaction["schedule_evidence"]["source"] = source
+        interaction["schedule_evidence"]["availability_verified"] = True
+
+        self.assertIn(source, CERTIFIED_SCHEDULE_SOURCES)
+        self.assertNotIn(source, SELF_REPORTED_SCHEDULE_SOURCES)
+        self.assertIs(
+            schedule_interaction_is_certified(
+                interaction,
+                schedule_attendees(task),
+                schedule_duration_minutes(task),
+            ),
+            True,
+        )
+
     def test_certifier_still_accepts_cowork_scheduler_evidence(self):
         """Cowork really does call FindMeetingTimes; those rows stay valid."""
         from src.services.cowork_runner import (
@@ -1463,6 +1488,590 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
         )
         self.assertIn("recipients", prompt.lower())
         self.assertIn("torecipients", prompt.lower().replace(" ", ""))
+
+
+class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
+    def _task(self, count=3):
+        people = [
+            {
+                "name": f"Person {index}",
+                "email": f"person-{index}@x.com",
+            }
+            for index in range(count)
+        ]
+        return create_task(
+            "Schedule a 25-minute review in the week of August 31",
+            action_type="schedule-meeting",
+            key_people=json.dumps(people),
+        )
+
+    def _payload(self, task, count=3):
+        people = [
+            {
+                "name": f"Person {index}",
+                "email": f"person-{index}@x.com",
+            }
+            for index in range(count)
+        ]
+        return {
+            "schema_version": 1,
+            "channel": "calendar",
+            "subject": "Review",
+            "body": "Agree the plan.",
+            "duration_minutes": 25,
+            "attendees": people,
+            "timezone": "Eastern Standard Time",
+            # Phase 1 keeps provisional slots only for infrastructure fallback.
+            "slots": [{
+                "id": "fallback",
+                "label": "Fallback",
+                "start": "2099-08-31T13:05:00-04:00",
+                "end": "2099-08-31T13:30:00-04:00",
+                "timezone": "Eastern Standard Time",
+                "availability": {
+                    person["email"]: "free" for person in people
+                },
+            }],
+            "scheduling_constraints": {
+                "search_window": {
+                    "start": "2099-08-31T09:00:00",
+                    "end": "2099-09-04T17:00:00",
+                    "timezone": "Eastern Standard Time",
+                },
+            },
+        }
+
+    @staticmethod
+    def _scheduler_stdout(suggestions, reason=""):
+        return (
+            structured_delivery.RESULT_START
+            + json.dumps({
+                "result": {
+                    "emptySuggestionsReason": reason,
+                    "meetingTimeSuggestions": suggestions,
+                },
+            })
+            + structured_delivery.RESULT_END
+        )
+
+    @staticmethod
+    def _suggestion(count=3, *, organizer="free", unavailable=None):
+        statuses = {
+            f"person-{index}@x.com": (
+                "busy" if unavailable == index else "free"
+            )
+            for index in range(count)
+        }
+        return {
+            "confidence": 100 if unavailable is None else (count - 1) / count * 100,
+            "organizerAvailability": organizer,
+            "attendeeAvailability": [
+                {
+                    "availability": status,
+                    "attendee": {
+                        "emailAddress": {"address": email},
+                    },
+                }
+                for email, status in statuses.items()
+            ],
+            "meetingTimeSlot": {
+                "start": {
+                    "dateTime": "2099-08-31T17:00:00.0000000",
+                    "timeZone": "UTC",
+                },
+                "end": {
+                    "dateTime": "2099-08-31T17:30:00.0000000",
+                    "timeZone": "UTC",
+                },
+            },
+        }
+
+    def test_calendar_phase_one_resolves_window_but_does_not_query_calendars(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        prompt = structured_delivery.preview_prompt(task, envelope)
+        self.assertIn("scheduling_constraints", prompt)
+        self.assertIn("Do not query calendar availability", prompt)
+
+    def test_attendee_injection_is_rejected_before_scheduler_run(self):
+        task = self._task()
+        payload = self._payload(task)
+        payload["attendees"].append({
+            "name": "Injected",
+            "email": "injected@x.com",
+        })
+        calls = []
+        original = structured_delivery._run
+        structured_delivery._run = lambda *a, **k: calls.append((a, k))
+        try:
+            with self.assertRaisesRegex(ValueError, "attendees"):
+                structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+        self.assertEqual(calls, [])
+
+    def test_same_day_search_window_is_clamped_past_now(self):
+        task = self._task()
+        payload = self._payload(task)
+        payload["scheduling_constraints"]["search_window"] = {
+            "start": "2099-08-31T09:00:00",
+            "end": "2099-08-31T17:00:00",
+            "timezone": "UTC",
+        }
+        now = datetime(2099, 8, 31, 12, 0, tzinfo=timezone.utc)
+        body, _duration, _offset, _zone = structured_delivery._scheduler_request(
+            task, payload, 100, now=now
+        )
+        queried = datetime.fromisoformat(
+            body["timeConstraint"]["timeSlots"][0]["start"]["dateTime"]
+        ).replace(tzinfo=timezone.utc)
+        self.assertGreater(queried, now)
+
+    def test_explicit_evening_or_weekend_window_can_be_unrestricted(self):
+        task = self._task()
+        payload = self._payload(task)
+        payload["scheduling_constraints"]["activity_domain"] = "unrestricted"
+        body, _duration, _offset, _zone = structured_delivery._scheduler_request(
+            task, payload, 100
+        )
+        self.assertEqual(
+            body["timeConstraint"]["activityDomain"], "unrestricted"
+        )
+
+    def test_scheduler_mints_findmeetingtimes_body_and_shifts_to_offset(self):
+        task = self._task()
+        payload = self._payload(task)
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append((argv, timeout))
+            return subprocess.CompletedProcess(
+                argv, 0,
+                stdout=self._scheduler_stdout([self._suggestion()]),
+                stderr="",
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            with mock.patch(
+                "src.services.cowork_runner.meeting_preferences",
+                return_value={
+                    "default_minutes": 25,
+                    "start_offset_minutes": 5,
+                },
+            ):
+                slots, evidence = structured_delivery._find_meeting_slots(
+                    task, payload
+                )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 1)
+        joined = " ".join(calls[0][0])
+        self.assertIn("/me/findMeetingTimes", joined)
+        self.assertIn('"meetingDuration":"PT30M"', joined.replace(" ", ""))
+        self.assertIn('"minimumAttendeePercentage":100', joined.replace(" ", ""))
+        self.assertEqual(calls[0][1], structured_delivery.SCHEDULER_TIMEOUT_SECONDS)
+        self.assertEqual(slots[0]["start"], "2099-08-31T13:05:00-04:00")
+        self.assertEqual(slots[0]["end"], "2099-08-31T13:30:00-04:00")
+        self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
+        self.assertTrue(evidence["availability_verified"])
+
+    def test_scheduler_retries_once_allowing_exactly_one_busy_attendee(self):
+        task = self._task()
+        payload = self._payload(task)
+        outputs = [
+            self._scheduler_stdout([], "AttendeesUnavailable"),
+            self._scheduler_stdout([self._suggestion(unavailable=2)]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            slots, evidence = structured_delivery._find_meeting_slots(
+                task, payload
+            )
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn(
+            '"minimumAttendeePercentage":66',
+            " ".join(calls[1]).replace(" ", ""),
+        )
+        self.assertEqual(slots[0]["availability"]["person-2@x.com"], "busy")
+        self.assertEqual(evidence["graph_minimum_attendee_percentage"], 66)
+
+    def test_scheduler_six_attendees_retries_at_eighty_three(self):
+        task = self._task(count=6)
+        payload = self._payload(task, count=6)
+        outputs = [
+            self._scheduler_stdout([], "AttendeesUnavailable"),
+            self._scheduler_stdout([self._suggestion(count=6, unavailable=5)]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn(
+            '"minimumAttendeePercentage":83',
+            " ".join(calls[1]).replace(" ", ""),
+        )
+
+    def test_scheduler_never_offers_oof_or_organizer_busy_suggestion(self):
+        task = self._task()
+        payload = self._payload(task)
+        oof = self._suggestion(unavailable=2)
+        oof["attendeeAvailability"][2]["availability"] = "oof"
+        organizer_busy = self._suggestion()
+        organizer_busy["organizerAvailability"] = "busy"
+        outputs = [
+            self._scheduler_stdout([oof, organizer_busy]),
+            self._scheduler_stdout([], "AttendeesUnavailable"),
+        ]
+        original = structured_delivery._run
+        call_index = 0
+
+        def fake_run(argv, timeout=300):
+            nonlocal call_index
+            output = outputs[call_index]
+            call_index += 1
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=output, stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+
+    def test_incomplete_graph_suggestion_triggers_fallback_not_no_mutual(self):
+        task = self._task()
+        payload = self._payload(task)
+        incomplete = self._suggestion()
+        incomplete["attendeeAvailability"][2]["availability"] = "unknown"
+        output = self._scheduler_stdout([incomplete])
+        original = structured_delivery._run
+        structured_delivery._run = lambda argv, timeout=300: subprocess.CompletedProcess(
+            argv, 0, stdout=output, stderr=""
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "suggestion"):
+                structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+
+    def test_flat_graph_response_is_accepted_without_prompt_wrapper(self):
+        flat = (
+            structured_delivery.RESULT_START
+            + json.dumps({
+                "emptySuggestionsReason": "",
+                "meetingTimeSuggestions": [self._suggestion()],
+            })
+            + structured_delivery.RESULT_END
+        )
+        parsed = structured_delivery._parse_find_times(flat)
+        self.assertEqual(len(parsed["meetingTimeSuggestions"]), 1)
+
+    def test_no_mutual_time_is_distinct_from_infrastructure_failure(self):
+        task = self._task()
+        payload = self._payload(task)
+        output = self._scheduler_stdout([], "AttendeesUnavailable")
+        original = structured_delivery._run
+        calls = []
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=output, stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            with self.assertRaises(
+                structured_delivery.NoMutualFreeTime
+            ):
+                structured_delivery._find_meeting_slots(task, payload)
+        finally:
+            structured_delivery._run = original
+        self.assertEqual(len(calls), 2)
+
+    def test_graph_evidence_bypasses_getschedule_but_keeps_finish_validators(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        payload = self._payload(task)
+        payload["slots"] = [{
+            "id": "0",
+            "label": "Monday, August 31, 2099, 1:05-1:30 PM ET",
+            "start": "2099-08-31T13:05:00-04:00",
+            "end": "2099-08-31T13:30:00-04:00",
+            "timezone": "Eastern Standard Time",
+            "availability": {
+                f"person-{index}@x.com": "free" for index in range(3)
+            },
+        }]
+        graph_evidence = {
+            "source": "FindMeetingTimes+structured",
+            "query_backed": True,
+            "availability_verified": True,
+            "graph_confidence": 100,
+            "graph_suggestion_count": 1,
+            "graph_minimum_attendee_percentage": 100,
+        }
+        stdout = (
+            structured_delivery.RESULT_START
+            + json.dumps({
+                "correlation_id": envelope["correlation_id"],
+                "phase": "preview",
+                "ok": True,
+                "payload": payload,
+            })
+            + structured_delivery.RESULT_END
+        )
+
+        structured_delivery.finish_preview(
+            action["id"],
+            stdout=stdout,
+            stderr="",
+            exit_code=0,
+            correlation_id=envelope["correlation_id"],
+            expected_channel="calendar",
+            expected_attendees={
+                f"person-{index}@x.com" for index in range(3)
+            },
+            expected_duration=25,
+            _graph_evidence=graph_evidence,
+        )
+
+        self.assertEqual(self.availability_probe_calls, [])
+        latest = get_latest_task_action(task["id"])
+        interaction = json.loads(latest["blocked_question"])
+        evidence = interaction["schedule_evidence"]
+        self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
+        self.assertTrue(evidence["availability_verified"])
+        self.assertEqual(evidence["availability_coverage"], "full")
+
+    def _phase_one_stdout(self, envelope, payload):
+        return (
+            structured_delivery.RESULT_START
+            + json.dumps({
+                "correlation_id": envelope["correlation_id"],
+                "phase": "preview",
+                "ok": True,
+                "payload": payload,
+            })
+            + structured_delivery.RESULT_END
+        )
+
+    def test_preview_worker_runs_scheduler_then_persists_graph_chooser(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        outputs = [
+            self._phase_one_stdout(envelope, self._payload(task)),
+            self._scheduler_stdout([self._suggestion()]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            with mock.patch(
+                "src.services.cowork_runner.meeting_preferences",
+                return_value={
+                    "default_minutes": 25,
+                    "start_offset_minutes": 5,
+                },
+            ):
+                structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.availability_probe_calls, [])
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing")
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
+        self.assertTrue(evidence["availability_verified"])
+
+    def test_working_elsewhere_survives_scheduler_into_chooser(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        suggestion = self._suggestion()
+        suggestion["attendeeAvailability"][0]["availability"] = "workingElsewhere"
+        outputs = [
+            self._phase_one_stdout(envelope, self._payload(task)),
+            self._scheduler_stdout([suggestion]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing", latest.get("error"))
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(
+            evidence["slots"][0]["availability"]["person-0@x.com"],
+            "workingElsewhere",
+        )
+
+    def test_no_mutual_time_fails_closed_without_getschedule_fallback(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        outputs = [
+            self._phase_one_stdout(envelope, self._payload(task)),
+            self._scheduler_stdout([], "AttendeesUnavailable"),
+            self._scheduler_stdout([], "AttendeesUnavailable"),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.availability_probe_calls, [])
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIn("No mutual free time", latest["error"])
+
+    def test_unreadable_scheduler_falls_back_to_existing_getschedule_path(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        outputs = [
+            self._phase_one_stdout(envelope, self._payload(task)),
+            "scheduler returned no result marker",
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(self.availability_probe_calls)
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing")
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["source"], "copilot-ask")
+        self.assertFalse(evidence["availability_verified"])
+
+    def test_nonzero_scheduler_process_falls_back_to_existing_getschedule_path(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        phase_one = self._phase_one_stdout(envelope, self._payload(task))
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=phase_one, stderr=""
+                )
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="scheduler auth failed"
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(self.availability_probe_calls)
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing")
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(evidence["source"], "copilot-ask")
 
 
 class TestAvailabilityVerification(StructuredDeliveryTestBase):

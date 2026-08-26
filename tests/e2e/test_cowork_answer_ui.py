@@ -661,6 +661,108 @@ def test_partly_checked_times_do_not_claim_nothing_was_read(page: Page, base_url
     expect(page.get_by_test_id("cw-answer-submit")).to_be_visible()
 
 
+def test_busy_attendee_stays_visible_in_availability_grid(page: Page, base_url):
+    """A contested time is a reason to show the matrix, not suppress it.
+
+    Task 2558 had one all-free slot and one where Remi was busy. CSS already
+    had a red busy state, but the parser allowed only free/tentative and fell
+    back to text pills, hiding the side-by-side comparison.
+    """
+    page.set_viewport_size({"width": 1280, "height": 900})
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={"title": "Coordinate the Pega meeting"},
+    )
+    task_id = created.json()["task"]["id"]
+
+    page.goto(base_url + "/")
+    page.wait_for_function(
+        f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
+    )
+    page.evaluate(
+        """taskId => {
+            const task = tasks.find(t => t.id === taskId);
+            task.parse_status = 'parsed';
+            task.action_type = 'schedule-meeting';
+            task.key_people = JSON.stringify([
+                {name: 'Remi Dyon', email: 'remidyon@microsoft.com'},
+                {name: 'Robert Kendall', email: 'rkendall@microsoft.com'}
+            ]);
+            clearInterval(parsePollerInterval);
+            parsePollerInterval = null;
+            startCoworkPoller = function() {};
+            selectedTaskId = taskId;
+            _cwActions[taskId] = {
+                task_id: taskId,
+                state: 'previewing',
+                waiting_on_user: true,
+                structured_payload: '{"channel":"calendar"}',
+                delivery_channel: 'calendar',
+                interaction_request: {
+                    invocation_id: 'structured-calendar-296',
+                    schedule_evidence: {
+                        valid: true,
+                        source: 'copilot-ask',
+                        query_backed: true,
+                        availability_verified: true,
+                        availability_coverage: 'full',
+                        duration_minutes: 25,
+                        attendees: [
+                            'remidyon@microsoft.com',
+                            'rkendall@microsoft.com'
+                        ],
+                        slots: [{
+                            value: '0',
+                            label: 'Fri Aug 28, 1:35-2:00 PM ET',
+                            availability: {
+                                'remidyon@microsoft.com': 'free',
+                                'rkendall@microsoft.com': 'free'
+                            }
+                        }, {
+                            value: '1',
+                            label: 'Wed Sep 2, 1:35-2:00 PM ET',
+                            availability: {
+                                'remidyon@microsoft.com': 'busy',
+                                'rkendall@microsoft.com': 'free'
+                            }
+                        }]
+                    },
+                    questions: [{
+                        id: '0',
+                        header: 'Select & create meeting',
+                        question: 'Choose one verified time.',
+                        options: [{
+                            value: '0',
+                            label: 'Fri Aug 28, 1:35-2:00 PM ET',
+                            description: 'All confirmed attendees are available.'
+                        }, {
+                            value: '1',
+                            label: 'Wed Sep 2, 1:35-2:00 PM ET',
+                            description: 'Remi Dyon is busy.'
+                        }]
+                    }]
+                },
+                blocked_question: '{"invocation_id":"structured-calendar-296"}',
+                conversation_id: 't:u:pega'
+            };
+            renderDetailPane(task);
+        }""",
+        task_id,
+    )
+
+    matrix = page.get_by_test_id("cw-avail-matrix")
+    expect(matrix).to_be_visible()
+    expect(page.get_by_test_id("cw-avail-row")).to_have_count(2)
+    expect(page.get_by_test_id("cw-avail-cell")).to_have_count(4)
+    expect(page.locator('[data-status="busy"]')).to_have_count(1)
+    expect(page.locator('[data-status="free"]')).to_have_count(3)
+    expect(page.get_by_test_id("cw-choice")).to_have_count(0)
+    os.makedirs("temp", exist_ok=True)
+    page.get_by_test_id("cw-blocked").screenshot(
+        path="temp/cowork-availability-busy.png"
+    )
+
+
 def test_coverage_is_read_off_slots_when_the_key_predates_it(page: Page, base_url):
     """Choosers stored before availability_coverage existed still carry slots.
 

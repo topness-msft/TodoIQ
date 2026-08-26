@@ -3644,6 +3644,7 @@ def schedule_interaction_is_attendee_clarification(interaction) -> bool:
 # wrote, which certified nothing.
 CERTIFIED_SCHEDULE_SOURCES = frozenset({
     "FindMeetingTimes+interaction",
+    "FindMeetingTimes+structured",
     "copilot-ask",
 })
 # "copilot-ask" means a read-only preview worker reported availability it had

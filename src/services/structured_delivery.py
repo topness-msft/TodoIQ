@@ -9,8 +9,11 @@ import os
 import subprocess
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from dateutil import tz
 
 from src.models import get_task, update_task_action
 from src.services.calendar_time import (
@@ -210,6 +213,10 @@ def _preview_schema(channel: str) -> str:
             '"body":"...","duration_minutes":25,'
             '"attendees":[{"name":"...","email":"..."}],'
             '"timezone":"named IANA or Windows timezone",'
+            '"scheduling_constraints":{"activity_domain":"work or unrestricted",'
+            '"search_window":{'
+            '"start":"local ISO-8601","end":"local ISO-8601",'
+            '"timezone":"same named timezone"}},'
             '"slots":[{"id":"0","label":"...","start":"ISO-8601",'
             '"end":"ISO-8601","timezone":"...",'
             '"availability":{"attendee@example.com":"free"}}]}'
@@ -260,7 +267,13 @@ def preview_prompt(task: dict, payload: dict) -> str:
         "another duration. "
         + offset_rule
         + "Suggest 1-3 future mutual-free slots, treating tentative calendar "
-        "blocks as available."
+        "blocks as available. Do not query calendar availability in this "
+        "phase and do not claim the provisional slots are checked; Riveter's "
+        "scheduler does that next. Resolve the task's requested date range "
+        "into scheduling_constraints.search_window (future, 1 hour to 30 days) "
+        "in the declared timezone. Keep 1-3 provisional slots only as an "
+        "infrastructure fallback. Set activity_domain to unrestricted when "
+        "the task explicitly requests evening or weekend times; otherwise work."
         # Free-text standing instructions. cowork_runner has always rendered
         # these; this path read only duration and offset, so anything Phil
         # wrote here never reached the worker that now books most meetings.
@@ -538,6 +551,330 @@ AVAILABILITY_TOOLS = "workiq-do_action"
 # keep the existing per-day response cap. Smaller sets batch all numbered
 # windows into one agent process.
 BATCH_THRESHOLD_ATTENDEE_DAYS = 12
+SCHEDULER_TIMEOUT_SECONDS = 90
+GRAPH_SCHEDULE_SOURCE = "FindMeetingTimes+structured"
+
+
+class NoMutualFreeTime(ValueError):
+    """Graph completed the search and found no usable overlap."""
+
+
+def _scheduler_request(
+    task: dict,
+    payload: dict,
+    minimum_percentage: int,
+    *,
+    now: datetime | None = None,
+) -> tuple[dict, int, int, str]:
+    """Mint the exact findMeetingTimes body after validating model output."""
+    expected_people = [
+        person for person in _key_people(task)
+        if str(person.get("email") or "").strip()
+    ]
+    expected = {
+        str(person.get("email") or "").strip().lower()
+        for person in expected_people
+    }
+    payload_people = [
+        person for person in payload.get("attendees") or []
+        if isinstance(person, dict)
+    ]
+    actual = {
+        str(person.get("email") or "").strip().lower()
+        for person in payload_people
+        if str(person.get("email") or "").strip()
+    }
+    if not expected or actual != expected:
+        raise ValueError("Calendar attendees changed before scheduler query")
+
+    duration = payload.get("duration_minutes")
+    if not isinstance(duration, int) or duration != _meeting_duration(task):
+        raise ValueError("Calendar duration changed before scheduler query")
+
+    constraints = payload.get("scheduling_constraints")
+    window = (
+        constraints.get("search_window")
+        if isinstance(constraints, dict)
+        else None
+    )
+    if not isinstance(window, dict):
+        raise ValueError("Calendar search window is missing")
+    timezone_name = str(
+        window.get("timezone") or payload.get("timezone") or ""
+    ).strip()
+    zone = tz.gettz(timezone_name)
+    if zone is None:
+        raise ValueError("Calendar search window timezone is invalid")
+
+    def _local(value):
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = parsed.replace(tzinfo=zone)
+        else:
+            parsed = parsed.astimezone(zone)
+        if not tz.datetime_exists(parsed) or tz.datetime_ambiguous(parsed):
+            raise ValueError("Calendar search window contains an invalid wall time")
+        return parsed
+
+    try:
+        start = _local(window.get("start"))
+        end = _local(window.get("end"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Calendar search window is invalid") from exc
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("Scheduler current time must be timezone-aware")
+    if start.astimezone(timezone.utc) <= current.astimezone(timezone.utc):
+        start = (
+            current.astimezone(zone).replace(second=0, microsecond=0)
+            + timedelta(minutes=1)
+        )
+    span = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+    if (
+        end.astimezone(timezone.utc) <= current.astimezone(timezone.utc)
+        or span < timedelta(hours=1)
+        or span > timedelta(days=30)
+    ):
+        raise ValueError("Calendar search window must be future and 1 hour to 30 days")
+
+    from src.services.cowork_runner import meeting_preferences
+
+    preferences = meeting_preferences() or {}
+    offset = int(preferences.get("start_offset_minutes") or 0) % 30
+    search_duration = duration + offset
+    activity_domain = str(
+        constraints.get("activity_domain") or "work"
+    ).strip().lower()
+    if activity_domain not in {"work", "unrestricted"}:
+        raise ValueError("Calendar activity domain is invalid")
+    body = {
+        "attendees": [
+            {
+                "type": "required",
+                "emailAddress": {
+                    "name": str(person.get("name") or "").strip(),
+                    "address": str(person.get("email") or "").strip(),
+                },
+            }
+            for person in expected_people
+        ],
+        "timeConstraint": {
+            "activityDomain": activity_domain,
+            "timeSlots": [{
+                "start": {
+                    "dateTime": start.replace(tzinfo=None).isoformat(),
+                    "timeZone": timezone_name,
+                },
+                "end": {
+                    "dateTime": end.replace(tzinfo=None).isoformat(),
+                    "timeZone": timezone_name,
+                },
+            }],
+        },
+        "meetingDuration": f"PT{search_duration}M",
+        "maxCandidates": 10,
+        "returnSuggestionReasons": True,
+        "minimumAttendeePercentage": minimum_percentage,
+    }
+    return body, duration, offset, timezone_name
+
+
+def _find_times_prompt(body: dict) -> str:
+    return f"""
+You are Riveter's scheduler probe. Make exactly this read-only action call:
+actionUrl: /me/findMeetingTimes
+jsonBody: {_json(body)}
+
+Do not call any other action and do not interpret or rewrite the response.
+Copy the response data object verbatim into exactly one result block:
+{RESULT_START}
+{{"result":{{"emptySuggestionsReason":"","meetingTimeSuggestions":[]}}}}
+{RESULT_END}
+""".strip()
+
+
+def _parse_find_times(output: str) -> dict | None:
+    text = output or ""
+    start = text.find(RESULT_START)
+    end = text.find(RESULT_END)
+    if start < 0 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start + len(RESULT_START):end].strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    result = parsed.get("result")
+    # The prompt asks for a wrapper, but "copy the response data verbatim" can
+    # reasonably produce the Graph object directly. Accept both rather than
+    # silently downgrading every such response to the slower fallback.
+    if result is None and isinstance(parsed.get("meetingTimeSuggestions"), list):
+        result = parsed
+    return result if isinstance(result, dict) else None
+
+
+def _scheduler_command(body: dict) -> list[str]:
+    return availability_command(_find_times_prompt(body))
+
+
+def _graph_datetime(value: dict) -> datetime | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        parsed = datetime.fromisoformat(
+            str(value.get("dateTime") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    zone = tz.gettz(str(value.get("timeZone") or "").strip())
+    if zone is None:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=zone)
+    return parsed if tz.datetime_exists(parsed) and not tz.datetime_ambiguous(parsed) else None
+
+
+def _graph_status(value) -> str | None:
+    text = str(value or "").strip().lower()
+    if text == "workingelsewhere":
+        return "workingElsewhere"
+    return text if text in AVAILABILITY_SEVERITY else None
+
+
+def _slot_label(start: datetime, end: datetime) -> str:
+    def _clock(value):
+        hour = value.strftime("%I").lstrip("0") or "0"
+        return f"{hour}:{value:%M} {value:%p}"
+
+    zone = start.tzname() or ""
+    return (
+        f"{start:%A, %B} {start.day}, {start.year}, "
+        f"{_clock(start)}-{_clock(end)} {zone}"
+    ).strip()
+
+
+def _slots_from_find_times(
+    result: dict,
+    attendees: set[str],
+    duration: int,
+    offset: int,
+    timezone_name: str,
+) -> list[dict]:
+    """Convert measured Graph blocks into exact event slots."""
+    zone = tz.gettz(timezone_name)
+    if zone is None:
+        raise ValueError("Calendar result timezone is invalid")
+    slots = []
+    for suggestion in result.get("meetingTimeSuggestions") or []:
+        if not isinstance(suggestion, dict):
+            continue
+        organizer = _graph_status(suggestion.get("organizerAvailability"))
+        if organizer not in {"free", "tentative", "workingElsewhere"}:
+            continue
+        availability = {}
+        for entry in suggestion.get("attendeeAvailability") or []:
+            if not isinstance(entry, dict):
+                continue
+            attendee = entry.get("attendee") or {}
+            address = str(
+                (attendee.get("emailAddress") or {}).get("address") or ""
+            ).strip().lower()
+            status = _graph_status(entry.get("availability"))
+            if address and status:
+                availability[address] = status
+        if set(availability) != attendees:
+            continue
+        if "oof" in availability.values():
+            continue
+        if sum(status == "busy" for status in availability.values()) > 1:
+            continue
+        raw = suggestion.get("meetingTimeSlot") or {}
+        graph_start = _graph_datetime(raw.get("start"))
+        graph_end = _graph_datetime(raw.get("end"))
+        if graph_start is None or graph_end is None:
+            continue
+        shifted = graph_start.astimezone(zone) + timedelta(minutes=offset)
+        event_end = shifted + timedelta(minutes=duration)
+        if event_end.astimezone(timezone.utc) > graph_end.astimezone(timezone.utc):
+            continue
+        start_text = shifted.isoformat()
+        end_text = event_end.isoformat()
+        slots.append({
+            "id": str(len(slots)),
+            "label": _slot_label(shifted, event_end),
+            "start": start_text,
+            "end": end_text,
+            "timezone": timezone_name,
+            "availability": availability,
+            "graph_confidence": suggestion.get("confidence"),
+        })
+        if len(slots) == 3:
+            break
+    return slots
+
+
+def _find_meeting_slots(task: dict, payload: dict) -> tuple[list[dict], dict]:
+    """Ask Graph for measured candidate blocks, then enforce Riveter policy."""
+    attendee_count = len([
+        person for person in payload.get("attendees") or []
+        if isinstance(person, dict) and person.get("email")
+    ])
+    if attendee_count < 1:
+        raise ValueError("Calendar attendees are missing")
+    percentages = [100]
+    if attendee_count > 1:
+        percentages.append(int((attendee_count - 1) / attendee_count * 100))
+    last_reason = ""
+    for percentage in percentages:
+        body, duration, offset, timezone_name = _scheduler_request(
+            task, payload, percentage
+        )
+        proc = _run(
+            _scheduler_command(body),
+            timeout=SCHEDULER_TIMEOUT_SECONDS,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                (proc.stderr or "Scheduler subprocess failed")[-1000:]
+            )
+        result = _parse_find_times(proc.stdout or "")
+        if result is None:
+            raise ValueError("Scheduler response was unreadable")
+        last_reason = str(result.get("emptySuggestionsReason") or "")
+        attendees = {
+            str(person.get("email") or "").strip().lower()
+            for person in payload.get("attendees") or []
+            if isinstance(person, dict) and person.get("email")
+        }
+        slots = _slots_from_find_times(
+            result, attendees, duration, offset, timezone_name
+        )
+        if slots:
+            confidences = [
+                float(slot["graph_confidence"])
+                for slot in slots
+                if isinstance(slot.get("graph_confidence"), (int, float))
+            ]
+            return slots, {
+                "source": GRAPH_SCHEDULE_SOURCE,
+                "query_backed": True,
+                "availability_verified": True,
+                "graph_confidence": min(confidences) if confidences else percentage,
+                "graph_suggestion_count": len(slots),
+                "graph_minimum_attendee_percentage": percentage,
+                "start_offset_minutes": offset,
+            }
+        if result.get("meetingTimeSuggestions"):
+            # Graph answered, but the response was incomplete or unsafe (for
+            # example an unknown attendee status). This is infrastructure/data
+            # quality, not proof that no mutual time exists; use the established
+            # getSchedule fallback instead of lying about the outcome.
+            raise ValueError("Scheduler suggestion was incomplete or unsafe")
+    raise NoMutualFreeTime(
+        "No mutual free time was found in the requested window"
+        + (f" ({last_reason})." if last_reason else ".")
+    )
 
 
 def availability_prompt(attendees: list, windows: list) -> str:
@@ -1318,6 +1655,7 @@ def finish_preview(
     expected_channel: str | None = None,
     expected_attendees: set[str] | None = None,
     expected_duration: int | None = None,
+    _graph_evidence: dict | None = None,
 ) -> dict | None:
     """Persist a validated preview or a fail-closed error."""
     if exit_code != 0:
@@ -1399,7 +1737,7 @@ def finish_preview(
                         str(email).strip().lower() for email in availability
                     } != set(attendees)
                     or any(
-                        str(status).strip().lower() not in AVAILABILITY_SEVERITY
+                        _graph_status(status) is None
                         for status in availability.values()
                     )
                 ):
@@ -1417,7 +1755,7 @@ def finish_preview(
                 ):
                     raise ValueError("Calendar slot has invalid date or timezone data")
                 normalized_availability = {
-                    str(email).strip().lower(): str(status).strip().lower()
+                    str(email).strip().lower(): _graph_status(status)
                     for email, status in availability.items()
                 }
                 options.append({
@@ -1433,31 +1771,45 @@ def finish_preview(
                     "timezone": timezone_name,
                     "availability": normalized_availability,
                 })
-            # The worker cannot reach getSchedule, so everything above is a
-            # claim. Riveter measures it before offering it: task 2478 proposed
-            # a Wednesday its own evidence called free while the attendee was
-            # out of office all day.
-            schedules = fetch_availability(attendees, evidence_slots)
-            # A probe can come back partly empty: one day's window succeeds and
-            # another does not. Verified means every candidate was measured,
-            # not that the call returned something.
-            availability_verified = bool(schedules) and all(
-                (entry or {}).get("schedules") for entry in schedules
-            )
-            if schedules:
-                evidence_slots = _apply_verified_availability(
-                    attendees, evidence_slots, schedules,
-                    AVAILABILITY_INTERVAL_MINUTES,
-                )
+            if _graph_evidence is not None:
+                if (
+                    not isinstance(_graph_evidence, dict)
+                    or _graph_evidence.get("source") != GRAPH_SCHEDULE_SOURCE
+                    or _graph_evidence.get("query_backed") is not True
+                    or _graph_evidence.get("availability_verified") is not True
+                ):
+                    raise ValueError("Structured scheduler evidence is invalid")
+                availability_verified = True
+                # Graph already measured these exact free blocks. Calling
+                # getSchedule here would spend another agent run and could
+                # overwrite stronger evidence with an infrastructure failure.
+                for slot_record in evidence_slots:
+                    conflicts = {
+                        email: status
+                        for email, status in slot_record["availability"].items()
+                        if status in CONFLICT_WEIGHTS
+                    }
+                    if conflicts:
+                        slot_record["conflicts"] = conflicts
             else:
-                # The probe returned nothing at all. Skipping the applier here
-                # let the worker's unverified claim pass straight through and
-                # be rendered as measurement (task 2558). Run it with no
-                # measurements so every attendee reads unknown.
-                evidence_slots = _apply_verified_availability(
-                    attendees, evidence_slots, [],
-                    AVAILABILITY_INTERVAL_MINUTES,
+                # The worker cannot reach getSchedule, so everything above is
+                # a claim. Riveter measures it before offering it: task 2478
+                # proposed a Wednesday its own evidence called free while the
+                # attendee was out of office all day.
+                schedules = fetch_availability(attendees, evidence_slots)
+                availability_verified = bool(schedules) and all(
+                    (entry or {}).get("schedules") for entry in schedules
                 )
+                if schedules:
+                    evidence_slots = _apply_verified_availability(
+                        attendees, evidence_slots, schedules,
+                        AVAILABILITY_INTERVAL_MINUTES,
+                    )
+                else:
+                    evidence_slots = _apply_verified_availability(
+                        attendees, evidence_slots, [],
+                        AVAILABILITY_INTERVAL_MINUTES,
+                    )
             attendee_names = {
                 str(person.get("email") or "").strip().lower():
                     str(person.get("name") or "").strip()
@@ -1522,7 +1874,11 @@ def finish_preview(
                     # confidence-ranked output, and the certifier is told which
                     # one it is rather than being handed a label it will match
                     # against itself.
-                    "source": "copilot-ask",
+                    "source": (
+                        _graph_evidence["source"]
+                        if _graph_evidence is not None
+                        else "copilot-ask"
+                    ),
                     "attendees": attendees,
                     "query_backed": True,
                     # Whether the availability above was measured against the
@@ -1534,8 +1890,22 @@ def finish_preview(
                     # the card can distinguish "none" from "not all".
                     "availability_coverage": coverage,
                     "duration_minutes": duration,
-                    "start_offset_minutes": None,
+                    "start_offset_minutes": (
+                        _graph_evidence.get("start_offset_minutes")
+                        if _graph_evidence is not None
+                        else None
+                    ),
                     "slots": evidence_slots,
+                    **({
+                        key: value
+                        for key, value in _graph_evidence.items()
+                        if key not in {
+                            "source",
+                            "query_backed",
+                            "availability_verified",
+                            "start_offset_minutes",
+                        }
+                    } if _graph_evidence is not None else {}),
                 },
             }
             fields.update({
@@ -1651,9 +2021,52 @@ def _preview_worker(task: dict, action: dict) -> None:
             preview_command(preview_prompt(task, payload)),
             timeout=_preview_timeout(payload.get("channel")),
         )
+        preview_stdout = result.stdout
+        graph_evidence = None
+        if payload["channel"] == "calendar" and result.returncode == 0:
+            try:
+                phase_one = parse_result_marker(
+                    result.stdout,
+                    correlation_id=correlation_id,
+                    phase="preview",
+                )
+                phase_one_payload = phase_one.get("payload")
+                if not isinstance(phase_one_payload, dict):
+                    raise ValueError("Calendar phase-one payload is missing")
+                slots, graph_evidence = _find_meeting_slots(
+                    task, phase_one_payload
+                )
+                phase_one_payload["slots"] = slots
+                preview_stdout = (
+                    RESULT_START
+                    + _json({
+                        "correlation_id": correlation_id,
+                        "phase": "preview",
+                        "ok": True,
+                        "payload": phase_one_payload,
+                    })
+                    + RESULT_END
+                )
+            except NoMutualFreeTime as exc:
+                update_task_action(
+                    action["id"],
+                    frozenset({"state", "error"}),
+                    required_state="previewing",
+                    state="failed",
+                    error=(
+                        f"{exc} Try a different week or say whose "
+                        "availability matters most."
+                    ),
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - existing probe is fallback
+                logger.warning(
+                    "Structured scheduler unavailable; using getSchedule fallback: %s",
+                    exc,
+                )
         finish_preview(
             action["id"],
-            stdout=result.stdout,
+            stdout=preview_stdout,
             stderr=result.stderr,
             exit_code=result.returncode,
             correlation_id=correlation_id,
@@ -1670,6 +2083,7 @@ def _preview_worker(task: dict, action: dict) -> None:
             expected_duration=(
                 _meeting_duration(task) if payload["channel"] == "calendar" else None
             ),
+            _graph_evidence=graph_evidence,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured preview failed")
