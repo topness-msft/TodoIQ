@@ -332,6 +332,31 @@ def default_delivery_channel():
 _MEETING_NOTE_MAX = 400
 
 
+_STANDING_MAX = 800
+
+
+def standing_instructions():
+    """Free-text standing instructions, or None when not configured.
+
+    The typed settings blocks cover voice and meeting numbers; this is the
+    general case for anything that fits neither, and unlike
+    meeting_preferences.notes it reaches every channel and both engines.
+
+    It does not replace the typed fields. The numeric meeting settings are
+    checked in code -- a slot whose start minute does not match the offset
+    fails certification, and the booking gate compares the created event
+    against the configured duration. Prose can be asked for; only a typed
+    value can be verified.
+    """
+    value = _settings_doc().get("standing_instructions")
+    if not isinstance(value, str) or isinstance(value, bool):
+        return None
+    # Collapsed to one line for the same reason the meeting note is: freeform
+    # prose must not be able to fake a layer header.
+    cleaned = " ".join(value.split())[:_STANDING_MAX].strip()
+    return cleaned or None
+
+
 def meeting_preferences():
     """The user's standing meeting defaults, or None when not configured.
 
@@ -938,6 +963,13 @@ def compose_prompt(task, destination: dict | None = None,
     meetings = _meeting_layer()
     if meetings:
         parts.append("[MEETINGS]\n" + meetings)
+
+    # Anything standing that fits neither the voice nor the meeting block.
+    # Same position as [MEETINGS] and for the same reason: before the
+    # correction, so a Redo still overrides it.
+    standing = standing_instructions()
+    if standing:
+        parts.append("[STANDING]\n" + standing)
 
     correction = _clean(redirect_text)
     if correction:

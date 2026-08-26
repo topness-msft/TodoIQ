@@ -336,13 +336,20 @@ def preview_prompt(task: dict, payload: dict) -> str:
 
     voice = voice_layer(channel) if channel in {"teams", "email"} else ""
     voice_rule = f"\n\n{voice}" if voice else ""
+    # Standing instructions that fit neither the voice nor the meeting block.
+    # Every channel, both engines -- meeting_preferences.notes only ever
+    # reached calendar prompts, so anything general had nowhere to live.
+    from src.services.cowork_runner import standing_instructions
+
+    standing = standing_instructions()
+    standing_block = f"\n\n{standing}" if standing else ""
     return f"""
 You are Riveter's read-only {channel} preview worker. Use only the visible WorkIQ
 read tools. Do not create, update, send, post, or delete anything.
 
 Resolve every delivery identifier now. Do not defer recipient, message, chat,
 team, channel, thread, attendee, timezone, or slot resolution until execution.
-{standing_rule}{steer_rule}{content_rule}{voice_rule}
+{standing_rule}{steer_rule}{content_rule}{voice_rule}{standing_block}
 
 Task snapshot:
 {_json(_task_snapshot(task))}
