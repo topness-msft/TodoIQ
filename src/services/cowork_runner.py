@@ -332,6 +332,81 @@ def default_delivery_channel():
 _MEETING_NOTE_MAX = 400
 
 
+def _outlook_signature_dir():
+    """Where Outlook keeps its plain-text signature exports."""
+    import os
+    from pathlib import Path
+
+    if OUTLOOK_SIGNATURE_DIR is not None:
+        return Path(OUTLOOK_SIGNATURE_DIR)
+    return Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Signatures"
+
+
+# Overridable so tests do not have to write into the real profile.
+OUTLOOK_SIGNATURE_DIR = None
+
+
+def email_signature():
+    """The signature to append to outgoing mail, or None when unconfigured.
+
+    Graph sends exactly the body it is given. /me/sendMail and /reply append
+    nothing, and Graph exposes no signature API, so a signature only exists
+    in Riveter's mail if Riveter puts it there. Outlook keeps a plain-text
+    copy of each configured signature next to the HTML one, which is what
+    this reads.
+
+    Returns None rather than raising when the file is missing: an absent
+    signature is a fact, not a failure.
+    """
+    block = _settings_doc().get("email_signature")
+    if not isinstance(block, dict):
+        return None
+
+    text = block.get("text")
+    if isinstance(text, str) and not isinstance(text, bool):
+        cleaned = text.strip()
+        if cleaned:
+            return cleaned
+
+    name = block.get("outlook_name")
+    if not isinstance(name, str) or isinstance(name, bool):
+        return None
+    name = name.strip()
+    # A filename, not a path. Without this a settings value could read any
+    # file the user can read.
+    from pathlib import Path
+
+    if not name or Path(name).name != name:
+        return None
+    try:
+        path = _outlook_signature_dir() / f"{name}.txt"
+        raw_bytes = path.read_bytes()
+    except OSError:
+        return None
+    # Outlook writes these as UTF-16 on this machine, not UTF-8. Sniffing by
+    # BOM rather than assuming: the first real file tried decoded as UTF-8
+    # raised UnicodeDecodeError, which is not an OSError and so would have
+    # crashed the preview rather than reporting no signature.
+    raw = None
+    for encoding in ("utf-8-sig", "utf-16"):
+        try:
+            raw = raw_bytes.decode(encoding)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    if raw is None:
+        # Deliberately no catch-all codec. cp1252 decodes almost any byte
+        # sequence, so a damaged file would become mojibake inside an
+        # outgoing email -- worse than sending none, and harder to notice.
+        return None
+    # Outlook pads the plain-text export with trailing blank lines and a
+    # stray space; keep the block, drop the padding.
+    lines = [line.rstrip() for line in raw.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines).strip() or None
+
+
 _STANDING_MAX = 800
 
 
@@ -454,8 +529,9 @@ def _voice_email() -> str:
         "- Open \"Hi {First},\" for peers, or just \"{First},\" for a leader or an "
         "active thread. Never \"Dear\", \"Hello,\" or \"Team,\".\n"
         "- Sign off with just \"Phil\". Never \"Best,\", \"Regards,\" or \"Thanks,\" "
-        "as a closing line; gratitude belongs in the body. The signature block "
-        "auto-appends, so do not retype it."
+        "as a closing line; gratitude belongs in the body. Do not write a "
+        "signature block: Riveter appends the configured one to the draft, "
+        "and Graph adds nothing of its own."
     )
 
 

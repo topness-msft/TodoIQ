@@ -1154,6 +1154,32 @@ def _run(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str
     )
 
 
+def apply_email_signature(payload: dict) -> None:
+    """Put the signature into the body the user is about to approve.
+
+    Graph sends exactly what it is given -- /me/sendMail and /reply append
+    nothing -- so mail Riveter sent went out unsigned while the voice layer
+    told the drafter a signature would be added for it.
+
+    Appended here rather than at send time because the user approves an exact
+    draft; adding text afterwards would deliver something they never read.
+    Appended rather than requested in the prompt because a signature is a
+    fixed block, not a judgement call.
+    """
+    if payload.get("channel") != "email":
+        return
+    from src.services.cowork_runner import email_signature
+
+    signature = email_signature()
+    if not signature:
+        return
+    body = str(payload.get("body") or "").rstrip()
+    # A drafter that already reproduced it should not get it twice.
+    if signature.splitlines()[0].strip() in body:
+        return
+    payload["body"] = f"{body}\n\n{signature}" if body else signature
+
+
 def _preview_draft(payload: dict) -> str:
     channel = payload.get("channel")
     if channel == "calendar":
@@ -1272,6 +1298,9 @@ def finish_preview(
         destination_ref, destination_display = _preview_destination(payload)
         if not destination_ref or not destination_display:
             raise ValueError("Structured preview destination is unresolved")
+        # Before the draft is built, so the text the user approves is the text
+        # that is sent.
+        apply_email_signature(payload)
         draft = _preview_draft(payload)
         if not draft:
             raise ValueError("Structured preview content is empty")
