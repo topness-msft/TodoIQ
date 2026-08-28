@@ -22,6 +22,7 @@ seed it exactly as the API emits it and exercise the renderer.
 """
 
 import json
+import os
 
 from playwright.sync_api import Page, expect
 
@@ -390,6 +391,16 @@ class TestRoutingAgreesWithTheServer:
         },
         "thread_readable": True,
     }
+    MEETING_LOCATOR = {
+        "locator": {
+            "version": 1, "kind": "meeting",
+            "conversation_id": None, "message_id": None,
+            "team_id": None, "channel_id": None,
+            "internet_message_id": None, "event_id": "AAMkMeeting=",
+            "source": "derived_from_url",
+        },
+        "thread_readable": True,
+    }
 
     def _engine(self, page: Page, task_id: int, patch: dict) -> str:
         return page.evaluate(
@@ -420,6 +431,52 @@ class TestRoutingAgreesWithTheServer:
             assert self._engine(page, task_id, {
                 "action_type": "follow-up", "source_type": "manual",
                 "source_locator_resolved": {"locator": None, "thread_readable": False},
+            }) == "cowork"
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_a_readable_meeting_follow_up_uses_workiq(self, page: Page, base_url):
+        task_id = _seed(page, base_url, title="Meeting follow-up routing")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            patch = {
+                "action_type": "follow-up", "source_type": "meeting",
+                "source_locator_resolved": self.MEETING_LOCATOR,
+                "parse_status": "parsed",
+            }
+            assert self._engine(page, task_id, patch) == "workiq"
+            page.evaluate(
+                f"""() => {{
+                    const t = tasks.find(x => x.id === {task_id});
+                    Object.assign(t, {json.dumps(patch)});
+                    selectedTaskId = {task_id};
+                    _cwActions[{task_id}] = null;
+                    renderDetailPane(t);
+                }}"""
+            )
+            expect(page.get_by_text("Preview with WorkIQ", exact=True)).to_be_visible()
+            expect(page.locator('img[data-engine="workiq"]')).to_be_visible()
+            os.makedirs("temp/meeting-routing", exist_ok=True)
+            page.locator(".cw-card").screenshot(
+                path="temp/meeting-routing/readable-meeting-workiq.png"
+            )
+        finally:
+            _delete(page, base_url, task_id)
+
+    def test_an_unreadable_meeting_follow_up_stays_cowork(
+        self, page: Page, base_url
+    ):
+        task_id = _seed(page, base_url, title="Unreadable meeting routing")
+        try:
+            page.goto(base_url + "/")
+            page.wait_for_function(f"Boolean(tasks.find(t => t.id === {task_id}))")
+            assert self._engine(page, task_id, {
+                "action_type": "follow-up", "source_type": "meeting",
+                "source_locator_resolved": {
+                    "locator": {"kind": "meeting", "event_id": None},
+                    "thread_readable": False,
+                },
             }) == "cowork"
         finally:
             _delete(page, base_url, task_id)

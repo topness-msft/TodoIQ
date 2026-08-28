@@ -65,10 +65,29 @@ def channel_for_task(task: dict) -> str | None:
         # the message could not be delivered at all. source_type records where
         # the task came FROM; a resolved conversation says where it is GOING,
         # which is what routing is actually asking.
-        located = source_locator.from_source_url(task.get("source_url"))
+        resolved = task.get("source_locator_resolved")
+        stored_locator = (
+            resolved.get("locator")
+            if isinstance(resolved, dict)
+            else task.get("source_locator")
+        )
+        located = source_locator.resolve(
+            stored_locator, task.get("source_url")
+        )
         if located and located["kind"] in (
             source_locator.KIND_TEAMS_CHAT,
             source_locator.KIND_TEAMS_CHANNEL,
+        ):
+            return "teams"
+        # A meeting-details URL is not itself a reply target, but its event id
+        # resolves to the meeting chat and gives WorkIQ real Teams context.
+        # The structured preview still resolves the actual destination from
+        # the task and confirmed people; it must not assume the meeting chat is
+        # where a person-directed follow-up should be sent.
+        if (
+            located
+            and located["kind"] == source_locator.KIND_MEETING
+            and source_locator.is_thread_readable(located)
         ):
             return "teams"
     return None
@@ -160,7 +179,7 @@ def _json(value: Any) -> str:
 
 
 def _task_snapshot(task: dict) -> dict:
-    return {
+    snapshot = {
         key: task.get(key)
         for key in (
             "id",
@@ -175,6 +194,17 @@ def _task_snapshot(task: dict) -> dict:
             "coaching_text",
         )
     }
+    resolved = task.get("source_locator_resolved")
+    stored_locator = (
+        resolved.get("locator")
+        if isinstance(resolved, dict)
+        else task.get("source_locator")
+    )
+    located = source_locator.resolve(stored_locator, task.get("source_url"))
+    if located:
+        snapshot["source_locator"] = located
+        snapshot["source_read_plan"] = source_locator.read_plan(located)
+    return snapshot
 
 
 def _key_people(task: dict) -> list[dict]:

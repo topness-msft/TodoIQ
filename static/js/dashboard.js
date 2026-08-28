@@ -3654,7 +3654,14 @@ function cwTaskUsesWorkIQ(task) {
     // other. `source_locator_resolved` is derived server-side, so both sides
     // read the same resolution rather than each parsing the URL their own way.
     var loc = task.source_locator_resolved && task.source_locator_resolved.locator;
-    return !!(loc && (loc.kind === 'teams_chat' || loc.kind === 'teams_channel'));
+    return !!(loc && (
+        loc.kind === 'teams_chat'
+        || loc.kind === 'teams_channel'
+        || (
+            loc.kind === 'meeting'
+            && task.source_locator_resolved.thread_readable === true
+        )
+    ));
 }
 
 // Which engine is behind this work. The card header already named the

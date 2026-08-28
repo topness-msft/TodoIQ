@@ -79,6 +79,13 @@ class TestIdentifiersProvenAgainstGraph(unittest.TestCase):
         self.assertEqual(got["kind"], sl.KIND_MEETING)
         self.assertTrue(got["event_id"].startswith("AAMkADFk"))
 
+    def test_an_unrelated_event_id_query_is_not_a_meeting(self):
+        self.assertIsNone(
+            sl.from_source_url(
+                "https://example.com/page?eventId=not-a-meeting"
+            )
+        )
+
     def test_an_outlook_url_without_an_item_id_still_yields_nothing(self):
         self.assertIsNone(sl.from_source_url(OUTLOOK))
 

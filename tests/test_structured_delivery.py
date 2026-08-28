@@ -3523,6 +3523,51 @@ class TestTeamsMessageRouting(StructuredDeliveryTestBase):
         }
         self.assertEqual(structured_delivery.channel_for_task(task), "teams")
 
+    def test_a_readable_meeting_source_routes_follow_up_to_workiq_teams(self):
+        task = {
+            "action_type": "follow-up",
+            "source_type": "meeting",
+            "source_url": (
+                "https://teams.microsoft.com/l/meeting/details"
+                "?eventId=AAMkMeeting%3d"
+            ),
+        }
+        self.assertEqual(structured_delivery.channel_for_task(task), "teams")
+
+    def test_an_unreadable_meeting_source_does_not_imply_teams_delivery(self):
+        task = {
+            "action_type": "follow-up",
+            "source_type": "meeting",
+            "source_url": "https://teams.microsoft.com/l/meeting/details",
+        }
+        self.assertIsNone(structured_delivery.channel_for_task(task))
+
+    def test_a_captured_meeting_locator_routes_without_a_source_url(self):
+        task = {
+            "action_type": "follow-up",
+            "source_type": "meeting",
+            "source_url": None,
+            "source_locator": json.dumps({
+                "version": 1,
+                "kind": "meeting",
+                "event_id": "AAMkCaptured=",
+                "source": "captured",
+            }),
+        }
+        self.assertEqual(structured_delivery.channel_for_task(task), "teams")
+        envelope = structured_delivery.initial_payload(task, "teams")
+        prompt = structured_delivery.preview_prompt(task, envelope)
+        self.assertIn("AAMkCaptured=", prompt)
+        self.assertIn("/me/events/AAMkCaptured=", prompt)
+
+    def test_an_arbitrary_event_id_query_is_not_a_teams_meeting(self):
+        task = {
+            "action_type": "follow-up",
+            "source_type": "manual",
+            "source_url": "https://example.com/page?eventId=not-a-meeting",
+        }
+        self.assertIsNone(structured_delivery.channel_for_task(task))
+
     def test_a_non_teams_link_does_not_route_to_teams(self):
         # An Outlook link is a mail thread, not a Teams destination. Routing it
         # to Teams would send the message somewhere it was never drafted for.

@@ -48,9 +48,9 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
         # is better evidence than anything reconstructed from a link. The
         # fallback exists for a task created after the startup backfill ran,
         # and is a single regex over one URL, not a scan.
-        located = source_locator.normalise(task["source_locator"])
-        if located is None:
-            located = source_locator.from_source_url(task.get("source_url"))
+        located = source_locator.resolve(
+            task["source_locator"], task.get("source_url")
+        )
         task["source_locator_resolved"] = {
             "locator": located,
             "thread_readable": source_locator.is_thread_readable(located),

@@ -101,6 +101,18 @@ def _query_param(url, name):
     return value or None
 
 
+def _is_teams_meeting_details_url(url):
+    """Only the proven Teams meeting-details shape carries a Graph event id."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return (
+        (parsed.hostname or "").lower() == "teams.microsoft.com"
+        and parsed.path.rstrip("/").lower() == "/l/meeting/details"
+    )
+
+
 def from_source_url(url):
     """Recover a locator from a stored link, or None if there isn't one."""
     parsed = parse_source_url(url)
@@ -124,7 +136,11 @@ def from_source_url(url):
         located["message_id"] = item_id
         return _validated(located)
 
-    event_id = _query_param(url, "eventId")
+    event_id = (
+        _query_param(url, "eventId")
+        if _is_teams_meeting_details_url(url)
+        else None
+    )
     if event_id:
         located = _blank(KIND_MEETING, SOURCE_DERIVED)
         located["event_id"] = event_id
@@ -187,6 +203,26 @@ def normalise(raw):
         value = data.get(key)
         located[key] = value if isinstance(value, str) and value.strip() else None
     return _validated(located)
+
+
+def resolve(stored, source_url):
+    """Use stored evidence, rejecting stale URL-derived meeting claims."""
+    located = normalise(stored)
+    if (
+        located
+        and located["kind"] == KIND_MEETING
+        and located.get("source") == SOURCE_DERIVED
+        and located.get("event_id")
+        and not located.get("conversation_id")
+    ):
+        derived = from_source_url(source_url)
+        if (
+            not derived
+            or derived["kind"] != KIND_MEETING
+            or derived.get("event_id") != located.get("event_id")
+        ):
+            located = None
+    return located or from_source_url(source_url)
 
 
 def read_plan(located):
