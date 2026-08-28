@@ -90,3 +90,51 @@ def test_action_type_switch_hides_stale_preview_without_starting_cowork(
         )
     finally:
         page.request.delete(f"{base_url}/api/tasks/{task_id}")
+
+
+def test_teams_message_is_a_selectable_workiq_action(page: Page, base_url):
+    created = page.request.post(
+        base_url + "/api/tasks",
+        data={
+            "title": "Message Joe in Teams",
+            "action_type": "follow-up",
+            "parse_status": "parsed",
+        },
+    )
+    task_id = created.json()["task"]["id"]
+    try:
+        page.goto(base_url + "/")
+        page.wait_for_function(
+            f"Boolean(tasks.find(t => t.id === {task_id}))"
+        )
+        page.evaluate(f"selectTask({task_id})")
+        selector = page.locator(".action-type-select")
+        expect(
+            selector.locator('option[value="teams-message"]')
+        ).to_contain_text("Message in Teams")
+        # Action-type switching queues an unrelated coaching re-parse. This
+        # test pins the selector/routing behavior, so keep that async refresh
+        # from racing the WorkIQ button render under full-suite load.
+        page.evaluate("refreshTask = function() {}")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "PUT"
+                and response.url.endswith(f"/api/tasks/{task_id}")
+            )
+        ) as response_info:
+            selector.select_option("teams-message")
+        response = response_info.value
+        assert response.status == 200, response.text()
+        page.evaluate(
+            f"""() => {{
+                const task = tasks.find(t => t.id === {task_id});
+                task.parse_status = 'parsed';
+                _cwActions[{task_id}] = null;
+                renderDetailPane(task);
+            }}"""
+        )
+        expect(
+            page.get_by_role("button", name="Preview with WorkIQ")
+        ).to_be_visible()
+    finally:
+        page.request.delete(f"{base_url}/api/tasks/{task_id}")

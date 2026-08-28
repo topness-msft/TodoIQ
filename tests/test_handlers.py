@@ -189,6 +189,22 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         )
         self.assertEqual(json.loads(resp.body)["task"]["cowork_revision"], 0)
 
+    def test_task_api_accepts_teams_message_action_type(self):
+        task = json.loads(self._create_task(
+            title="Follow up in Teams", action_type="follow-up"
+        ).body)["task"]
+        resp = self.fetch(
+            f"/api/tasks/{task['id']}",
+            method="PUT",
+            body=json.dumps({"action_type": "teams-message"}),
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(resp.code, 200, resp.body)
+        updated = json.loads(resp.body)["task"]
+        self.assertEqual(updated["action_type"], "teams-message")
+        self.assertEqual(updated["cowork_revision"], 1)
+
     def test_update_task_not_found(self):
         resp = self.fetch(
             "/api/tasks/99999",

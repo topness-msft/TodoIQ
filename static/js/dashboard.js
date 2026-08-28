@@ -1579,6 +1579,7 @@ function actionTypeLabel(actionType) {
         'review-document': 'Review Document',
         'follow-up': 'Follow Up',
         'awaiting-response': 'Awaiting Response',
+        'teams-message': 'Message in Teams',
         'prepare': 'Prepare',
         'general': 'General'
     };
@@ -1592,6 +1593,7 @@ function actionTypeIcon(actionType) {
         'review-document': '\uD83D\uDCC4',
         'follow-up': '\uD83D\uDD04',
         'awaiting-response': '\u231B',
+        'teams-message': '\uD83D\uDCAC',
         'prepare': '\uD83D\uDCCB',
         'general': '\u2699'
     };
@@ -1606,6 +1608,7 @@ function actionTypeSelector(task) {
         { value: 'review-document', label: 'Review Document', icon: '\uD83D\uDCC4' },
         { value: 'follow-up', label: 'Follow Up', icon: '\uD83D\uDD04' },
         { value: 'awaiting-response', label: 'Awaiting Response', icon: '\u231B' },
+        { value: 'teams-message', label: 'Message in Teams', icon: '\uD83D\uDCAC' },
         { value: 'prepare', label: 'Prepare', icon: '\uD83D\uDCCB' }
     ];
     var current = task.action_type || 'general';
