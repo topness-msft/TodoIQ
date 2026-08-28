@@ -12,6 +12,7 @@ Two behaviours are pinned here:
    eye, and uneditable in any case because the server refuses to change a
    destination the preview resolved.
 """
+import json
 import os
 
 from playwright.sync_api import Page, expect
@@ -159,7 +160,40 @@ def test_structured_teams_skips_the_destination_picker(page: Page, base_url: str
     """An unconfirmed structured destination must not raise the picker."""
     page.set_viewport_size({"width": 1280, "height": 900})
     task_id = _seed(page, base_url, "Teams picker skip gate")
+    posted = {}
+
+    def confirm_route(route):
+        posted.update(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "action": {
+                    "id": 902,
+                    "task_id": task_id,
+                    "action_type": "teams-message",
+                    "state": "ready",
+                    "delivery_channel": "teams",
+                    "structured_payload": json.dumps({
+                        "schema_version": 1,
+                        "channel": "teams",
+                        "chat_id": CHAT_ID,
+                    }),
+                    "draft": "Approved body",
+                    "destination_ref": CHAT_ID,
+                    "destination_display": (
+                        "Riveter delivery test (safe to delete)"
+                    ),
+                    "destination_source": "workiq_preview",
+                    "destination_confirmed_at": "2026-08-28T15:00:00Z",
+                },
+            }),
+        )
+
     try:
+        page.route(
+            f"**/api/tasks/{task_id}/cowork/destination", confirm_route
+        )
         page.goto(base_url + "/")
         page.wait_for_function(
             f"typeof tasks !== 'undefined' && tasks.some(t => t.id === {task_id})"
@@ -170,11 +204,6 @@ def test_structured_teams_skips_the_destination_picker(page: Page, base_url: str
                 task.parse_status = 'parsed';
                 task.action_type = 'teams-message';
                 selectedTaskId = taskId;
-                window.__confirmedDest = null;
-                // Record the confirm call instead of letting it reach the server.
-                window.cwConfirmDest = function(id, cont) {
-                    window.__confirmedDest = {id: id, cont: cont};
-                };
                 _cwActions[taskId] = {
                     id: 902,
                     task_id: taskId,
@@ -195,10 +224,21 @@ def test_structured_teams_skips_the_destination_picker(page: Page, base_url: str
             }""",
             [task_id, CHAT_ID],
         )
-        # It auto-confirms rather than showing an uneditable picker.
-        assert page.evaluate("window.__confirmedDest") == {
-            "id": task_id, "cont": True
+        confirmation = page.get_by_test_id("execute-confirmation")
+        expect(confirmation).to_be_visible()
+        assert posted == {
+            "delivery_channel": "teams",
+            "destination_ref": CHAT_ID,
+            "destination_display": (
+                "Riveter delivery test (safe to delete)"
+            ),
         }
         expect(page.locator("#dest-modal-ref")).to_have_count(0)
+        os.makedirs(os.path.join("temp", "engine-marks"), exist_ok=True)
+        confirmation.screenshot(
+            path=os.path.join(
+                "temp", "engine-marks", "structured-teams-one-click-review.png"
+            )
+        )
     finally:
         _delete(page, base_url, task_id)

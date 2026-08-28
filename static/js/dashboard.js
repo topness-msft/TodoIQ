@@ -4417,16 +4417,22 @@ function cwConfirmDest(taskId, continueToExecute) {
     var channel = document.getElementById('dest-modal-channel');
     var ref = document.getElementById('dest-modal-ref');
     var display = document.getElementById('dest-modal-display');
+    // Structured WorkIQ previews resolve and lock the channel before this
+    // function runs, so the destination picker deliberately does not exist.
+    // Requiring its dropdown made the silent confirmation path return early
+    // and forced users through a redundant manual audience confirmation.
+    var channelValue = channel
+        ? channel.value : String(action.delivery_channel || '').trim();
     var refValue = ref ? ref.value.trim() : (action.destination_ref || '').trim();
     var displayValue = display
         ? display.value.trim() : (action.destination_display || '').trim();
-    if ((!isMeeting && !isEmail && !channel) || !refValue || !displayValue) return;
+    if ((!isMeeting && !isEmail && !channelValue) || !refValue || !displayValue) return;
 
     var body = {
         destination_ref: refValue,
         destination_display: displayValue
     };
-    if (!isMeeting) body.delivery_channel = isEmail ? 'email' : channel.value;
+    if (!isMeeting) body.delivery_channel = isEmail ? 'email' : channelValue;
 
     fetch('/api/tasks/' + taskId + '/cowork/destination', {
         method: 'POST',
