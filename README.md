@@ -1,15 +1,20 @@
 # TodoIQ
 
-Local AI-powered task manager that integrates with Microsoft 365 via WorkIQ MCP.
+Riveter is a local AI-powered task manager that integrates with Microsoft 365
+through WorkIQ.
 
-TodoNess scans your Teams messages, meetings, and flagged emails to surface actionable items as suggested tasks. It provides AI coaching, follow-up drafting, and meeting prep through a web dashboard.
+It scans Teams messages, meetings, and flagged emails to surface actionable work
+as suggested tasks. From the dashboard, Riveter can read the relevant Microsoft
+365 context, prepare an exact action for review, and—with explicit
+confirmation—schedule a meeting, send an email, or post a Teams message.
 
 ## Prerequisites
 
 - Python 3.11+
 - GitHub Copilot CLI installed and authenticated
-- WorkIQ MCP configured for Microsoft 365 task discovery
-- Cowork authenticated for drafting and approved actions
+- WorkIQ MCP configured for Microsoft 365 discovery, context reads, and approved
+  actions
+- Cowork authenticated for general research and drafting flows
 
 ## Quick Start
 
@@ -49,22 +54,36 @@ right person from the **Key people** menu before continuing.
 2. Review its description, priority, due date, people, source, and notes.
 3. Correct anything that Riveter inferred incorrectly.
 4. Choose or change the action type, such as **Schedule meeting**, **Reply by
-   email**, **Follow up**, or **Prepare**.
-5. Add a note when Cowork needs extra context that is not in the source material.
+   email**, **Message in Teams**, **Follow up**, or **Prepare**.
+5. Add a note when WorkIQ or Cowork needs context that is not in the source
+   material.
 
-### Use Cowork
+### Preview and perform an action
 
-Select **Preview with Cowork** to research the task and prepare the action.
-Cowork can check Microsoft 365 context, draft a response, or find meeting
-availability. Nothing is sent during preview.
+Riveter selects the action engine from the task:
 
-If Cowork needs a decision, answer directly in the task card. Review and edit
-the final draft or meeting details, confirm the destination, and then use the
-final approval button to perform the action.
+- **WorkIQ** handles structured meeting, email, and Teams actions. It also
+  handles follow-ups tied to a readable Teams chat, channel thread, or meeting
+  chat.
+- **Cowork** handles general research, preparation, and drafting flows that do
+  not have a structured Microsoft 365 delivery channel.
+
+Select **Preview with WorkIQ** or **Preview with Cowork** on the task card.
+Preview is read-only: it gathers current Microsoft 365 context and prepares the
+action without sending, posting, or creating anything. For WorkIQ actions,
+Riveter also resolves the real message, chat, channel, meeting, recipients, or
+attendees before presenting the result. Meeting times shown as available are
+checked against the exact attendee calendars.
+
+Review and edit the draft or meeting details in Riveter. The final confirmation
+shows the exact destination and content. After confirmation, Riveter runs a
+separate, channel-specific WorkIQ action and records the returned delivery
+evidence. Email and meeting actions use idempotency protection; Teams retries
+check the destination thread before posting again.
 
 ### Keep the list current
 
-- **Mark complete** when the work is finished. Delivered Cowork actions also
+- **Mark complete** when the work is finished. Delivered actions also
   show a subtle completion button in their receipt.
 - Use **Waiting** when someone else owes the next move.
 - Use **Snooze** when the task should return later.
@@ -99,12 +118,12 @@ behaviour at all.
 
 ### `cowork_voice` — which voice a draft is written in
 
-Cowork drafts are written in your own voice using a Cowork skill, chosen by the
-channel the task is bound to. Set `teams` and `email` to the skill you want for
-each. Set either to `null` to name no skill for that channel; the inline
-mechanics (contractions, no em-dashes, no corporate filler, channel-specific
-openings and sign-offs) still apply, because a skill lives outside this repo and
-can change or fail to resolve without a code change.
+WorkIQ and Cowork drafts are written in your own voice using the same
+channel-specific guidance and configured Cowork skill. Set `teams` and `email`
+to the skill you want for each. Set either to `null` to name no skill for that
+channel; the inline mechanics (contractions, no em-dashes, no corporate filler,
+channel-specific openings and sign-offs) still apply, because a skill lives
+outside this repo and can change or fail to resolve without a code change.
 
 `default_channel` is the voice used when a task carries no channel signal of its
 own — typically one you typed yourself rather than one derived from a Teams
@@ -137,21 +156,31 @@ task is redirected into a meeting after the fact.
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture, database schema, and development notes.
 
+```text
+Background task discovery
+  |-- WorkIQ reads Teams, meetings, and flagged Inbox mail
+  |-- Riveter validates, deduplicates, and writes suggestions
+  v
+SQLite (data/claudetodo.db)
+  |-- tasks, source locators, action state, and delivery evidence
+  v
+Tornado dashboard (localhost:8766)
+  |-- structured action -> read-only WorkIQ preview
+  |                       -> user review and explicit confirmation
+  |                       -> one channel-specific WorkIQ write
+  |
+  `-- general action ----> write-barriered Cowork research/draft flow
 ```
-Claude Code Commands (/todo-refresh, /todo-add, skills)
-  |-- calls WorkIQ MCP for M365 data
-  |-- writes results to SQLite
 
-SQLite DB (data/claudetodo.db)
-  |-- tasks, task_context, refresh_schedule, sync_log
-
-Tornado Web Server (localhost:8766)
-  |-- reads SQLite, serves dashboard + REST API + WebSocket
-```
+Source locators preserve the identifiers needed to reopen an email thread,
+Teams conversation, channel reply chain, or meeting chat. Structured WorkIQ
+previews receive a validated read plan derived from those locators rather than
+searching for a display URL as text or guessing a destination.
 
 ## Run at Startup (Windows)
 
-TodoNess can run as a background app with a system tray icon that starts automatically at logon.
+Riveter can run as a background app with a system tray icon that starts
+automatically at logon.
 
 ```bash
 # Install dependencies and register startup task
