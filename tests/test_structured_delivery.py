@@ -2078,6 +2078,80 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
             "-3h",
         )
 
+    def test_preview_worker_replaces_worker_attendee_drift_with_key_people(self):
+        task = self._task(count=2)
+        task["description"] = (
+            "Schedule Person 0, Person 1, Christopher Monnier, and "
+            "Michael O Sullivan."
+        )
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        phase_one_payload = self._payload(task, count=2)
+        phase_one_payload["attendees"].pop()
+        phase_one_payload["attendees"].extend([
+            {"name": "Christopher Monnier", "email": "christopher@x.com"},
+            {"name": "Michael O Sullivan", "email": "michael@x.com"},
+        ])
+        outputs = [
+            self._phase_one_stdout(envelope, phase_one_payload),
+            self._scheduler_stdout([self._suggestion(count=2)]),
+        ]
+        calls = []
+        original = structured_delivery._run
+
+        def fake_run(argv, timeout=300):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+            )
+
+        structured_delivery._run = fake_run
+        try:
+            with mock.patch(
+                "src.services.cowork_runner.meeting_preferences",
+                return_value={
+                    "default_minutes": 25,
+                    "start_offset_minutes": 5,
+                },
+            ):
+                structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        self.assertEqual(len(calls), 2)
+        preview_prompt = " ".join(calls[0])
+        self.assertIn("Key People is authoritative", preview_prompt)
+        self.assertIn(
+            '[{"email":"person-0@x.com","name":"Person 0"},'
+            '{"email":"person-1@x.com","name":"Person 1"}]',
+            preview_prompt,
+        )
+        scheduler_prompt = " ".join(calls[1])
+        self.assertIn("person-0@x.com", scheduler_prompt)
+        self.assertIn("person-1@x.com", scheduler_prompt)
+        self.assertNotIn("christopher@x.com", scheduler_prompt)
+        self.assertNotIn("michael@x.com", scheduler_prompt)
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "previewing", latest.get("error"))
+        persisted = json.loads(latest["structured_payload"])
+        self.assertEqual(
+            persisted["attendees"],
+            [
+                {"name": "Person 0", "email": "person-0@x.com"},
+                {"name": "Person 1", "email": "person-1@x.com"},
+            ],
+        )
+        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
+        self.assertEqual(
+            evidence["attendees"],
+            ["person-0@x.com", "person-1@x.com"],
+        )
+
     def test_working_elsewhere_survives_scheduler_into_chooser(self):
         task = self._task()
         envelope = structured_delivery.initial_payload(task, "calendar")

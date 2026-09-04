@@ -3642,6 +3642,12 @@ function cwIsStructured(a) {
     return Boolean(a && a.structured_payload);
 }
 
+function cwIsAttendeeAuthorityError(a) {
+    var error = String((a && a.error) || '');
+    return /Calendar attendees changed (?:before scheduler query|during resolution)/i
+        .test(error);
+}
+
 function cwTaskUsesWorkIQ(task) {
     if (!task) return false;
     if (task.action_type === 'schedule-meeting'
@@ -5058,6 +5064,19 @@ function renderCoworkCard(task) {
     }
 
     if (a && a.state === 'failed') {
+        if (cwIsStructured(a) && cwIsAttendeeAuthorityError(a)) {
+            return cwShell('is-failed', 'needs you', task,
+                '<div class="cw-fail" data-testid="cw-attendee-authority-error"><b>'
+                + 'Key People controls who is invited.</b>'
+                + '<div class="cw-fail-sub">Names mentioned in the task description '
+                + 'are not added to the meeting. Review the Key People list above, '
+                + 'then retry with that exact attendee set.<br>Nothing was sent.</div>'
+                + '</div>',
+                '<button class="cw-btn cw-btn-go" '
+                + 'data-testid="cw-retry-key-people" '
+                + 'onclick="cwStart(' + task.id + ')">Retry with Key People</button>',
+                a);
+        }
         return cwShell('is-failed', 'failed', task,
             cwModeSwitch(task.id, a, false)
             + '<div class="cw-fail"><b>'

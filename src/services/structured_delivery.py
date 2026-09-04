@@ -224,6 +224,12 @@ def _meeting_duration(task: dict) -> int:
     return schedule_duration_minutes(task)
 
 
+def _calendar_attendees(task: dict) -> list[dict]:
+    from src.services.cowork_runner import schedule_attendees
+
+    return schedule_attendees(task)
+
+
 def initial_payload(task: dict, channel: str) -> dict:
     """Create the immutable request envelope stored before preview starts."""
     if channel not in STRUCTURED_CHANNELS:
@@ -311,6 +317,16 @@ def preview_prompt(task: dict, payload: dict) -> str:
         if channel == "calendar"
         else ""
     )
+    attendee_rule = (
+        "\nCalendar attendee authority:\n"
+        f"- Set `attendees` to exactly this Key People list: "
+        f"{_json(_calendar_attendees(task))}\n"
+        "- Key People is authoritative. Names mentioned in the title, description, "
+        "notes, or coaching text are context only and must not be added, removed, "
+        "resolved, or substituted."
+        if channel == "calendar"
+        else ""
+    )
     # cowork_runner carries an explicit "Include the agenda" instruction, added
     # after a real task produced a draft that gave attendees nothing to prepare
     # against. The structured rewrite dropped it and started emitting a single
@@ -392,7 +408,7 @@ read tools. Do not create, update, send, post, or delete anything.
 
 Resolve every delivery identifier now. Do not defer recipient, message, chat,
 team, channel, thread, attendee, timezone, or slot resolution until execution.
-{standing_rule}{steer_rule}{content_rule}{voice_rule}{standing_block}
+{standing_rule}{attendee_rule}{steer_rule}{content_rule}{voice_rule}{standing_block}
 
 Task snapshot:
 {_json(_task_snapshot(task))}
@@ -600,10 +616,7 @@ def _scheduler_request(
     now: datetime | None = None,
 ) -> tuple[dict, int, int, str]:
     """Mint the exact findMeetingTimes body after validating model output."""
-    expected_people = [
-        person for person in _key_people(task)
-        if str(person.get("email") or "").strip()
-    ]
+    expected_people = _calendar_attendees(task)
     expected = {
         str(person.get("email") or "").strip().lower()
         for person in expected_people
@@ -2234,6 +2247,10 @@ def _preview_worker(task: dict, action: dict) -> None:
                 phase_one_payload = phase_one.get("payload")
                 if not isinstance(phase_one_payload, dict):
                     raise ValueError("Calendar phase-one payload is missing")
+                # Attendees are selected and confirmed in Key People. The worker
+                # drafts content and a search window; it never gets to expand the
+                # audience from names that happen to appear in task prose.
+                phase_one_payload["attendees"] = _calendar_attendees(task)
                 slots, graph_evidence = _find_meeting_slots(
                     task, phase_one_payload
                 )
@@ -2268,7 +2285,7 @@ def _preview_worker(task: dict, action: dict) -> None:
                 if isinstance(phase_one_payload, dict):
                     expected = {
                         str(person.get("email") or "").strip().lower()
-                        for person in _key_people(task)
+                        for person in _calendar_attendees(task)
                         if str(person.get("email") or "").strip()
                     }
                     for slot in phase_one_payload.get("slots") or []:
@@ -2306,7 +2323,7 @@ def _preview_worker(task: dict, action: dict) -> None:
             expected_attendees=(
                 {
                     str(person.get("email") or "").strip().lower()
-                    for person in _key_people(task)
+                    for person in _calendar_attendees(task)
                     if str(person.get("email") or "").strip()
                 }
                 if payload["channel"] == "calendar"

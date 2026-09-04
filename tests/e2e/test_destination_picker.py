@@ -4,6 +4,7 @@ import json
 import os
 import re
 
+import pytest
 from playwright.sync_api import Page, expect
 
 
@@ -93,6 +94,101 @@ def _load_todo(page: Page, base_url: str, task_id: int, action: dict) -> None:
 
 
 class TestDestinationBinding:
+    @pytest.mark.parametrize(
+        "mismatch_error",
+        [
+            "Calendar attendees changed before scheduler query",
+            (
+                "Could not complete WorkIQ preview: "
+                "Calendar attendees changed during resolution"
+            ),
+        ],
+    )
+    def test_historical_attendee_mismatch_explains_key_people_and_retries(
+        self, page: Page, base_url, mismatch_error
+    ):
+        page.set_viewport_size({"width": 1280, "height": 900})
+        task_id = _seed_task(page, base_url)
+        action = _action(
+            task_id,
+            state="failed",
+            delivery_channel="calendar",
+            structured_payload=json.dumps({
+                "schema_version": 1,
+                "channel": "calendar",
+            }),
+            error=mismatch_error,
+        )
+        posted = {}
+
+        def retry_route(route):
+            posted.update(route.request.post_data_json)
+            route.fulfill(
+                status=202,
+                content_type="application/json",
+                body=json.dumps({
+                    "action": {
+                        **action,
+                        "state": "previewing",
+                        "error": None,
+                    },
+                }),
+            )
+
+        try:
+            _load_dashboard(page, base_url, task_id, action)
+            page.evaluate(
+                """taskId => {
+                    const task = tasks.find(item => item.id === taskId);
+                    task.action_type = 'schedule-meeting';
+                    task.description =
+                        'Meet with Rima, Henry, Christopher, and Michael.';
+                    task.key_people = JSON.stringify([
+                        {name: 'Rima Reyes', email: 'rima@microsoft.com'},
+                        {name: 'Henry James', email: 'henry@microsoft.com'}
+                    ]);
+                    renderDetailPane(task);
+                }""",
+                task_id,
+            )
+            page.route(f"**/api/tasks/{task_id}/cowork", retry_route)
+
+            notice = page.get_by_test_id("cw-attendee-authority-error")
+            expect(notice).to_be_visible()
+            expect(notice).to_contain_text("Key People controls who is invited")
+            expect(notice).to_contain_text(
+                "Names mentioned in the task description are not added"
+            )
+            expect(
+                page.get_by_role("button", name="Retry with Key People")
+            ).to_be_visible()
+            expect(page.get_by_role("button", name="Redo")).to_have_count(0)
+            bounds = notice.bounding_box()
+            assert bounds and bounds["width"] >= 300 and bounds["height"] < 220
+
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            page.screenshot(
+                path=os.path.join(
+                    SCREENSHOTS_DIR,
+                    "attendee-authority-failure-"
+                    + (
+                        "before-scheduler"
+                        if "before scheduler" in mismatch_error
+                        else "during-resolution"
+                    )
+                    + "-light.png",
+                ),
+                full_page=True,
+            )
+
+            page.get_by_role("button", name="Retry with Key People").click()
+            expect(
+                page.get_by_test_id("cw-attendee-authority-error")
+            ).to_have_count(0)
+            assert posted == {"interaction_mode": "interaction"}
+        finally:
+            _delete_task(page, base_url, task_id)
+
     def test_dashboard_confirmed_one_to_one_and_open_link(self, page: Page, base_url):
         task_id = _seed_task(page, base_url)
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
