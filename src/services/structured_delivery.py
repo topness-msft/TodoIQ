@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +23,22 @@ from src.services.calendar_time import (
     named_timezone_matches,
 )
 from src.services.runtime_mode import external_integrations_enabled
-from src.services import source_locator
+from src.services import source_locator, workiq_calendar
+from src.services.workiq_policy import CapabilityError as WorkIQCapabilityError
+from src.services.workiq_runtime import (
+    ActionHTTPError,
+    AuthRequiredError,
+    CapabilityDeniedError,
+    ConsentRequiredError,
+    EulaRequiredError,
+    InvalidStructuredContentError,
+    NotReadyError,
+    ProtocolError,
+    TimeoutError as WorkIQTimeoutError,
+    ToolError,
+    TransportError as WorkIQTransportError,
+    WorkIQError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -591,21 +607,111 @@ def _outside_working_hours(working_hours, slot_start: str, slot_end: str) -> boo
 # nothing. Riveter mints it; the model never chooses to call it and never sees
 # a tool that could create an event or send a message.
 AVAILABILITY_TOOLS = "workiq-do_action"
-# At ten schedule items per person/day, twelve attendee-days is roughly 120
-# items. Task 2478's six attendees across two candidate days sits exactly at
-# this boundary and already timed out at 420 seconds, so values AT the boundary
-# keep the existing per-day response cap. Smaller sets batch all numbered
-# windows into one agent process.
-BATCH_THRESHOLD_ATTENDEE_DAYS = 12
-# Direct Graph returns in seconds, but the Copilot CLI/MCP startup around the
-# call exceeded 90 seconds on task 2478. Keep this below the old 420-second
-# preview ceiling while giving the exact, single-action probe room to start.
 SCHEDULER_TIMEOUT_SECONDS = 180
+AVAILABILITY_TIMEOUT_SECONDS = 200
 GRAPH_SCHEDULE_SOURCE = "FindMeetingTimes+structured"
 
 
 class NoMutualFreeTime(ValueError):
     """Graph completed the search and found no usable overlap."""
+
+
+class RecoverableSchedulerError(ValueError):
+    """A findMeetingTimes response may be re-measured through getSchedule."""
+
+
+class AvailabilityUnavailable(RuntimeError):
+    """No owned live calendar result survived validation."""
+
+    _DETAILS = {
+        "eula_required": ("accept_eula", "Accept the Work IQ EULA, then check readiness."),
+        "auth_required": ("sign_in", "Sign in to Work IQ, then check readiness."),
+        "consent_required": (
+            "request_admin_consent",
+            "Request Work IQ administrator consent, then check readiness.",
+        ),
+        "not_ready": ("check_readiness", "Check Work IQ readiness, then try again."),
+        "capability_denied": (
+            "repair_setup",
+            "Repair the pinned Work IQ setup, then check readiness.",
+        ),
+        "timeout": ("retry", "The calendar read timed out. Try again."),
+        "protocol": ("restart_runtime", "Restart Work IQ, then try again."),
+        "invalid_structured_content": (
+            "retry",
+            "Work IQ returned an invalid calendar result. Try again.",
+        ),
+        "transport": ("restart_runtime", "Restart Work IQ, then try again."),
+        "action_http": ("retry", "The calendar service was unavailable. Try again."),
+        "tool": ("retry", "The calendar read failed. Try again."),
+    }
+    _PRECEDENCE = {
+        code: index for index, code in enumerate((
+            "eula_required",
+            "auth_required",
+            "consent_required",
+            "not_ready",
+            "capability_denied",
+            "timeout",
+            "protocol",
+            "invalid_structured_content",
+            "transport",
+            "action_http",
+            "tool",
+        ))
+    }
+
+    def __init__(self, code: str):
+        safe_code = code if code in self._DETAILS else "invalid_structured_content"
+        self.code = safe_code
+        self.action, message = self._DETAILS[safe_code]
+        super().__init__(message)
+
+    @classmethod
+    def from_errors(cls, *errors: BaseException) -> "AvailabilityUnavailable":
+        codes = [cls._code_for(error) for error in errors if error is not None]
+        code = min(codes or ["invalid_structured_content"], key=cls._PRECEDENCE.get)
+        return cls(code)
+
+    @classmethod
+    def _code_for(cls, error: BaseException) -> str:
+        if isinstance(error, AvailabilityUnavailable):
+            return error.code
+        if isinstance(error, WorkIQCapabilityError):
+            return "capability_denied"
+        if isinstance(error, RecoverableSchedulerError):
+            return "invalid_structured_content"
+        code = str(getattr(error, "code", "invalid_structured_content"))
+        return code if code in cls._DETAILS else "invalid_structured_content"
+
+    def persisted_message(self) -> str:
+        return (
+            f"Calendar availability unavailable [{self.code}; {self.action}]. "
+            f"{self} no unchecked times were saved."
+        )
+
+
+_TERMINAL_AVAILABILITY_ERRORS = (
+    EulaRequiredError,
+    AuthRequiredError,
+    ConsentRequiredError,
+    NotReadyError,
+    CapabilityDeniedError,
+    WorkIQCapabilityError,
+)
+_FALLBACK_AVAILABILITY_ERRORS = (
+    WorkIQTimeoutError,
+    WorkIQTransportError,
+    ProtocolError,
+    InvalidStructuredContentError,
+    ActionHTTPError,
+    ToolError,
+    RecoverableSchedulerError,
+)
+_ALL_AVAILABILITY_ERRORS = (
+    *_TERMINAL_AVAILABILITY_ERRORS,
+    *_FALLBACK_AVAILABILITY_ERRORS,
+)
 
 
 def _scheduler_request(
@@ -915,7 +1021,7 @@ def _timezones_from_measurements(measurements: list | None) -> dict[str, str]:
                 )
                 or ""
             ).strip()
-            if email and tz.gettz(timezone_name) is not None:
+            if email and timezone_name and tz.gettz(timezone_name) is not None:
                 timezones[email] = timezone_name
     return timezones
 
@@ -1004,33 +1110,69 @@ def _find_meeting_slots(task: dict, payload: dict) -> tuple[list[dict], dict]:
     if attendee_count > 1:
         percentages.append(int((attendee_count - 1) / attendee_count * 100))
     last_reason = ""
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     for percentage in percentages:
         body, duration, offset, timezone_name = _scheduler_request(
             task, payload, percentage
         )
-        proc = _run(
-            _scheduler_command(body),
-            timeout=SCHEDULER_TIMEOUT_SECONDS,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                (proc.stderr or "Scheduler subprocess failed")[-1000:]
-            )
-        result = _parse_find_times(proc.stdout or "")
-        if result is None:
-            raise ValueError("Scheduler response was unreadable")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WorkIQTimeoutError("Calendar availability deadline expired.")
+        result = workiq_calendar.find_meeting_times(body, timeout=remaining)
         last_reason = str(result.get("emptySuggestionsReason") or "")
         attendees = {
             str(person.get("email") or "").strip().lower()
             for person in payload.get("attendees") or []
             if isinstance(person, dict) and person.get("email")
         }
-        attendee_timezones = _validated_attendee_timezones(
-            result.get("_attendeeTimezones"), attendees
-        )
         slots = _slots_from_find_times(
             result, attendees, duration, offset, timezone_name
         )
+        attendee_timezones = {}
+        if slots:
+            search_start = body["timeConstraint"]["timeSlots"][0]["start"]
+            day = str(search_start["dateTime"]).split("T", 1)[0]
+            timezone_body = {
+                "schedules": sorted(attendees),
+                "startTime": {
+                    "dateTime": f"{day}T00:00:00",
+                    "timeZone": timezone_name,
+                },
+                "endTime": {
+                    "dateTime": f"{day}T01:00:00",
+                    "timeZone": timezone_name,
+                },
+            }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "Scheduler timezone metadata was skipped after the availability deadline."
+                )
+            else:
+                try:
+                    timezone_result = workiq_calendar.get_schedule(
+                        timezone_body, timeout=remaining
+                    )
+                    if not isinstance(timezone_result.get("value"), list):
+                        raise InvalidStructuredContentError(
+                            "Work IQ returned invalid timezone metadata."
+                        )
+                    attendee_timezones = _validated_attendee_timezones(
+                        _timezones_from_measurements(
+                            [{"schedules": timezone_result["value"]}]
+                        ),
+                        attendees,
+                    )
+                except (
+                    WorkIQError,
+                    WorkIQCapabilityError,
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    logger.warning(
+                        "Scheduler timezone metadata was unavailable: %s", exc
+                    )
         if slots:
             confidences = [
                 float(slot["graph_confidence"])
@@ -1055,7 +1197,9 @@ def _find_meeting_slots(task: dict, payload: dict) -> tuple[list[dict], dict]:
             # example an unknown attendee status). This is infrastructure/data
             # quality, not proof that no mutual time exists; use the established
             # getSchedule fallback instead of lying about the outcome.
-            raise ValueError("Scheduler suggestion was incomplete or unsafe")
+            raise RecoverableSchedulerError(
+                "Scheduler suggestion was incomplete or unsafe."
+            )
     raise NoMutualFreeTime(
         "No mutual free time was found in the requested window"
         + (f" ({last_reason})." if last_reason else ".")
@@ -1150,11 +1294,8 @@ def _parse_windows(output: str) -> dict | None:
 def fetch_availability(attendees: list, slots: list) -> list | None:
     """Measure the attendees' calendars across the proposed slots.
 
-    Normal sets use one agent process carrying every numbered day window.
-    getSchedule still receives one narrow call per day; batching removes the
-    repeated agent startup and session initialization around those calls.
-    Larger sets retain the per-day parallel response cap because six attendees
-    across two days already timed out in production (task 2478).
+    Calls are serialized through the one owned MCP runtime and share one total
+    deadline. Incomplete windows are retried once and partial results survive.
 
     Returns one entry per slot holding the raw schedules, so the caller can do
     its own overlap arithmetic. Returns None when nothing could be measured -
@@ -1171,11 +1312,8 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
             return None
         bounds.append((start.astimezone(timezone.utc), end.astimezone(timezone.utc)))
 
-    # One window per day, run concurrently. scheduleItems removed the
-    # resolution problem but not the span one: five days across five people is
-    # hundreds of meetings, and the worker cannot echo that back. Sequential
-    # day-windows then blew the timeout at ~120s each, so they go in parallel
-    # and the wait is the slowest window rather than their sum.
+    # Group slots into bounded day windows so each serialized response remains
+    # small enough to validate without retaining a wide calendar payload.
     groups: dict = {}
     for index, (start, _end) in enumerate(bounds):
         groups.setdefault(start.date(), []).append(index)
@@ -1190,82 +1328,74 @@ def fetch_availability(attendees: list, slots: list) -> list | None:
             max(bounds[i][1] for i in members).strftime("%Y-%m-%dT%H:%M:%S"),
         ))
 
-    def _measure_batch(batch_windows):
-        """Measure numbered windows in one process, preserving partial success."""
-        expected = set(range(len(batch_windows)))
-        expected_attendees = {
-            str(email).strip().lower() for email in attendees if str(email).strip()
+    expected_attendees = {
+        str(email).strip().lower() for email in attendees if str(email).strip()
+    }
+    measured: dict[int, list] = {}
+    failures: list[BaseException] = []
+
+    def _window_complete(index):
+        returned = {
+            str(entry.get("scheduleId") or "").strip().lower()
+            for entry in measured.get(index, [])
+            if isinstance(entry, dict)
         }
-        measured: dict[int, list] = {}
+        return expected_attendees.issubset(returned)
 
-        def _window_complete(index):
-            returned = {
-                str(entry.get("scheduleId") or "").strip().lower()
-                for entry in measured.get(index, [])
-                if isinstance(entry, dict)
+    deadline = time.monotonic() + AVAILABILITY_TIMEOUT_SECONDS
+    for attempt in (1, 2):
+        for index, (start, end) in enumerate(windows):
+            if _window_complete(index):
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            body = {
+                "schedules": list(attendees),
+                "startTime": {"dateTime": start, "timeZone": "UTC"},
+                "endTime": {"dateTime": end, "timeZone": "UTC"},
             }
-            return expected_attendees.issubset(returned)
-
-        # One retry: a window can come back unreadable for reasons that have
-        # nothing to do with its size -- a 30-minute window has failed where a
-        # five-hour one succeeded. Retry the whole batch, but only back-fill
-        # missing schedules: replacing the dict would discard a first-attempt
-        # success, while treating any nonempty list as complete would lose
-        # attendees returned only on the second attempt.
-        for attempt in (1, 2):
             try:
-                proc = _run(
-                    availability_command(
-                        availability_prompt(attendees, batch_windows)
-                    ),
-                    timeout=200,
-                )
-            except Exception as exc:  # noqa: BLE001 - never break preview
+                result = workiq_calendar.get_schedule(body, timeout=remaining)
+            except _TERMINAL_AVAILABILITY_ERRORS as exc:
+                raise AvailabilityUnavailable.from_errors(exc) from None
+            except _FALLBACK_AVAILABILITY_ERRORS as exc:
+                failures.append(exc)
                 logger.warning(
-                    "Availability probe failed to run (attempt %s): %s",
-                    attempt, exc,
+                    "Availability probe failed (attempt %s, window %s; %s).",
+                    attempt,
+                    index,
+                    AvailabilityUnavailable._code_for(exc),
                 )
                 continue
-            parsed = _parse_windows(proc.stdout or "") or {}
-            for index, schedules in parsed.items():
-                if index not in expected:
+            by_attendee = {
+                str(entry.get("scheduleId") or "").strip().lower(): entry
+                for entry in measured.get(index, [])
+                if isinstance(entry, dict) and entry.get("scheduleId")
+            }
+            for entry in result["value"]:
+                if not isinstance(entry, dict):
                     continue
-                by_attendee = {
-                    str(entry.get("scheduleId") or "").strip().lower(): entry
-                    for entry in measured.get(index, [])
-                    if isinstance(entry, dict) and entry.get("scheduleId")
-                }
-                for entry in schedules:
-                    if not isinstance(entry, dict):
-                        continue
-                    email = str(entry.get("scheduleId") or "").strip().lower()
-                    if email and email not in by_attendee:
-                        by_attendee[email] = entry
-                measured[index] = list(by_attendee.values())
-            if all(_window_complete(index) for index in expected):
-                return measured
-            logger.warning(
-                "Availability batch incomplete (attempt %s of 2; %s/%s windows complete)",
-                attempt,
-                sum(_window_complete(index) for index in expected),
-                len(expected),
-            )
-        return measured
+                email = str(entry.get("scheduleId") or "").strip().lower()
+                if email and email not in by_attendee:
+                    by_attendee[email] = entry
+            measured[index] = list(by_attendee.values())
+        if all(_window_complete(index) for index in range(len(windows))):
+            break
+        logger.warning(
+            "Availability batch incomplete (attempt %s of 2; %s/%s windows complete)",
+            attempt,
+            sum(_window_complete(index) for index in range(len(windows))),
+            len(windows),
+        )
+        if time.monotonic() >= deadline:
+            break
 
-    attendee_days = len(attendees) * len(windows)
-    if attendee_days < BATCH_THRESHOLD_ATTENDEE_DAYS:
-        batch = _measure_batch(windows)
-        results = [batch.get(index) for index in range(len(windows))]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        def _measure_window(window):
-            return _measure_batch([window]).get(0)
-
-        with ThreadPoolExecutor(max_workers=min(len(windows), 4)) as pool:
-            results = list(pool.map(_measure_window, windows))
+    results = [measured.get(index) for index in range(len(windows))]
 
     if not any(results):
+        if failures:
+            raise AvailabilityUnavailable.from_errors(*failures) from None
         logger.warning("Availability probe returned no readable schedules")
         return None
     return [
@@ -1326,18 +1456,18 @@ def _status_from_items(items, slot_start: str, slot_end: str) -> str | None:
     worst = "free"
     for item in items:
         if not isinstance(item, dict):
-            continue
+            return None
         status = str(item.get("status") or "").strip()
-        if status not in AVAILABILITY_SEVERITY:
-            continue
         begins = _parse_graph_instant(item.get("start"))
         finishes = _parse_graph_instant(item.get("end"))
         if not begins or not finishes:
-            continue
+            return None
         # Touching at an edge is not an overlap: a meeting ending at 1:00 does
         # not collide with the 1:00 half-hour.
         if finishes <= start or begins >= end:
             continue
+        if status not in AVAILABILITY_SEVERITY:
+            return None
         if AVAILABILITY_SEVERITY.index(status) > AVAILABILITY_SEVERITY.index(worst):
             worst = status
     return worst
@@ -1368,12 +1498,15 @@ def _parse_graph_instant(value):
         return parsed
     from datetime import timezone
 
-    if zone and zone.upper() != "UTC":
+    if not zone:
+        return None
+    if zone.upper() != "UTC":
         from dateutil import tz as _tz
 
         named = _tz.gettz(zone)
-        if named is not None:
-            return parsed.replace(tzinfo=named)
+        if named is None:
+            return None
+        return parsed.replace(tzinfo=named)
     return parsed.replace(tzinfo=timezone.utc)
 
 
@@ -1841,6 +1974,7 @@ def finish_preview(
     expected_attendees: set[str] | None = None,
     expected_duration: int | None = None,
     _graph_evidence: dict | None = None,
+    _graph_failure: BaseException | None = None,
 ) -> dict | None:
     """Persist a validated preview or a fail-closed error."""
     if exit_code != 0:
@@ -1995,25 +2129,7 @@ def finish_preview(
                     if conflicts:
                         slot_record["conflicts"] = conflicts
             else:
-                # The worker cannot reach getSchedule, so everything above is
-                # a claim. Riveter measures it before offering it: task 2478
-                # proposed a Wednesday its own evidence called free while the
-                # attendee was out of office all day.
-                schedules = fetch_availability(attendees, evidence_slots)
-                attendee_timezones = _timezones_from_measurements(schedules)
-                availability_verified = bool(schedules) and all(
-                    (entry or {}).get("schedules") for entry in schedules
-                )
-                if schedules:
-                    evidence_slots = _apply_verified_availability(
-                        attendees, evidence_slots, schedules,
-                        AVAILABILITY_INTERVAL_MINUTES,
-                    )
-                else:
-                    evidence_slots = _apply_verified_availability(
-                        attendees, evidence_slots, [],
-                        AVAILABILITY_INTERVAL_MINUTES,
-                    )
+                raise AvailabilityUnavailable("invalid_structured_content")
             attendee_names = {
                 str(person.get("email") or "").strip().lower():
                     str(person.get("name") or "").strip()
@@ -2070,18 +2186,12 @@ def finish_preview(
                 }],
                 "schedule_evidence": {
                     "valid": True,
-                    # Preview holds only read tools, and Graph's findMeetingTimes
-                    # and getSchedule are POST actions needing do_action, so this
-                    # worker cannot call the scheduler. Availability here comes
-                    # from Copilot M365 answering a live query. That is a genuine
-                    # query, just a weaker evidence class than the scheduler's
-                    # confidence-ranked output, and the certifier is told which
-                    # one it is rather than being handed a label it will match
-                    # against itself.
+                    # Availability is measured only by the owned, policy-minted
+                    # findMeetingTimes or getSchedule MCP paths.
                     "source": (
                         _graph_evidence["source"]
                         if _graph_evidence is not None
-                        else "copilot-ask"
+                        else GRAPH_SCHEDULE_SOURCE
                     ),
                     "attendees": attendees,
                     "query_backed": True,
@@ -2131,6 +2241,16 @@ def finish_preview(
             frozenset(fields),
             required_state="previewing",
             **fields,
+        )
+    except AvailabilityUnavailable as exc:
+        failure = AvailabilityUnavailable.from_errors(_graph_failure, exc)
+        return update_task_action(
+            action_id,
+            frozenset({"state", "error", "blocked_question"}),
+            required_state="previewing",
+            state="failed",
+            error=failure.persisted_message(),
+            blocked_question=None,
         )
     except ValueError as exc:
         return update_task_action(
@@ -2236,6 +2356,7 @@ def _preview_worker(task: dict, action: dict) -> None:
         )
         preview_stdout = result.stdout
         graph_evidence = None
+        graph_failure = None
         phase_one_payload = None
         if payload["channel"] == "calendar" and result.returncode == 0:
             try:
@@ -2277,62 +2398,45 @@ def _preview_worker(task: dict, action: dict) -> None:
                     ),
                 )
                 return
-            except Exception as exc:  # noqa: BLE001 - existing probe is fallback
-                logger.warning(
-                    "Structured scheduler unavailable; using getSchedule fallback: %s",
-                    exc,
-                )
-                if isinstance(phase_one_payload, dict):
-                    expected = {
+            except _ALL_AVAILABILITY_ERRORS as exc:
+                raise AvailabilityUnavailable.from_errors(exc) from None
+            except ValueError:
+                raise AvailabilityUnavailable.from_errors(
+                    WorkIQCapabilityError("Calendar request policy rejected the draft.")
+                ) from None
+        try:
+            finish_preview(
+                action["id"],
+                stdout=preview_stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                correlation_id=correlation_id,
+                expected_channel=payload["channel"],
+                expected_attendees=(
+                    {
                         str(person.get("email") or "").strip().lower()
                         for person in _calendar_attendees(task)
                         if str(person.get("email") or "").strip()
                     }
-                    for slot in phase_one_payload.get("slots") or []:
-                        if not isinstance(slot, dict):
-                            continue
-                        existing = {
-                            str(email).strip().lower(): (
-                                _graph_status(status) or "unknown"
-                            )
-                            for email, status in (
-                                slot.get("availability") or {}
-                            ).items()
-                        }
-                        slot["availability"] = {
-                            email: existing.get(email, "unknown")
-                            for email in expected
-                        }
-                    preview_stdout = (
-                        RESULT_START
-                        + _json({
-                            "correlation_id": correlation_id,
-                            "phase": "preview",
-                            "ok": True,
-                            "payload": phase_one_payload,
-                        })
-                        + RESULT_END
-                    )
-        finish_preview(
+                    if payload["channel"] == "calendar"
+                    else None
+                ),
+                expected_duration=(
+                    _meeting_duration(task) if payload["channel"] == "calendar" else None
+                ),
+                _graph_evidence=graph_evidence,
+                _graph_failure=graph_failure,
+            )
+        except AvailabilityUnavailable as exc:
+            raise AvailabilityUnavailable.from_errors(graph_failure, exc) from None
+    except AvailabilityUnavailable as exc:
+        update_task_action(
             action["id"],
-            stdout=preview_stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            correlation_id=correlation_id,
-            expected_channel=payload["channel"],
-            expected_attendees=(
-                {
-                    str(person.get("email") or "").strip().lower()
-                    for person in _calendar_attendees(task)
-                    if str(person.get("email") or "").strip()
-                }
-                if payload["channel"] == "calendar"
-                else None
-            ),
-            expected_duration=(
-                _meeting_duration(task) if payload["channel"] == "calendar" else None
-            ),
-            _graph_evidence=graph_evidence,
+            frozenset({"state", "error", "blocked_question"}),
+            required_state="previewing",
+            state="failed",
+            error=exc.persisted_message(),
+            blocked_question=None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("structured preview failed")

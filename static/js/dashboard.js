@@ -78,6 +78,7 @@ function init() {
     setupDropZones();
     startParsePoller();
     fetchSyncStatus();
+    fetchWorkIQStatus();
     startSyncWatcher();
     setupKeyboardShortcuts();
     initMainSplit();
@@ -97,6 +98,124 @@ function init() {
         }
     });
 }
+
+// ── Work IQ setup ──────────────────────────────────────────────────────
+function workIQStateCopy(state) {
+    var copy = {
+        missing_cli: ['Setup required', 'Install the pinned Work IQ runtime before checking readiness.'],
+        version_mismatch: ['Version mismatch', 'The installed Work IQ package does not match Riveter’s supported version.'],
+        mcp_unavailable: ['Not checked', 'The local runtime is installed. Check readiness to verify MCP and authentication.'],
+        auth_required: ['Sign in required', 'Sign in to Work IQ, then check readiness again.'],
+        consent_required: ['Consent required', 'Administrator consent is required before Work IQ can be used.'],
+        eula_required: ['EULA required', 'Read the official EULA and explicitly acknowledge it below.'],
+        capability_missing: ['Capability missing', 'This Work IQ runtime does not advertise the required calendar capabilities.'],
+        ready: ['Ready', 'Owned Work IQ MCP calendar reads are authenticated and ready.']
+    };
+    return copy[state] || ['Unavailable', 'Work IQ readiness could not be determined.'];
+}
+
+async function fetchWorkIQStatus() {
+    try {
+        var response = await fetch('/api/workiq/status');
+        if (!response.ok) throw new Error('Could not read Work IQ status.');
+        renderWorkIQStatus(await response.json());
+    } catch (error) {
+        renderWorkIQFailure(error.message);
+    }
+}
+
+function renderWorkIQStatus(status) {
+    var state = status.state || 'mcp_unavailable';
+    var copy = workIQStateCopy(state);
+    var badge = document.getElementById('workiq-state');
+    badge.dataset.state = state;
+    badge.textContent = copy[0];
+    document.getElementById('workiq-message').textContent = status.notice || copy[1];
+    var setup = status.setup || {};
+    var version = document.getElementById('workiq-version');
+    version.textContent = 'Installed: ' + (setup.installed_version || 'not installed')
+        + ' · Supported: ' + (setup.required_version || 'unknown');
+    var command = document.getElementById('workiq-install-command');
+    command.hidden = !setup.install_command
+        || !['missing_cli', 'version_mismatch'].includes(state);
+    command.textContent = setup.install_command || '';
+    var eula = status.eula || {};
+    document.getElementById('workiq-eula-link').href =
+        eula.url || 'https://github.com/microsoft/work-iq';
+    var controls = document.getElementById('workiq-eula-controls');
+    var eulaAccepted = eula.status === 'accepted';
+    controls.hidden = !['eula_required', 'mcp_unavailable'].includes(state)
+        || eulaAccepted;
+    var ack = document.getElementById('workiq-eula-ack');
+    var accept = document.getElementById('workiq-eula-accept');
+    if (controls.hidden) ack.checked = false;
+    accept.disabled = !ack.checked;
+    var readiness = document.getElementById('workiq-readiness-btn');
+    readiness.hidden = ['missing_cli', 'version_mismatch', 'ready'].includes(state);
+    readiness.disabled = false;
+    document.getElementById('workiq-error').hidden = true;
+}
+
+function renderWorkIQFailure(message) {
+    var error = document.getElementById('workiq-error');
+    error.textContent = message || 'Work IQ request failed.';
+    error.hidden = false;
+}
+
+async function requestWorkIQReadiness() {
+    var button = document.getElementById('workiq-readiness-btn');
+    button.disabled = true;
+    try {
+        var response = await fetch('/api/workiq/readiness', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}'
+        });
+        var result = await response.json();
+        if (result.status) renderWorkIQStatus(result.status);
+        if (!response.ok || !result.ok) {
+            throw new Error((result.error && result.error.message) || 'Readiness check failed.');
+        }
+    } catch (error) {
+        renderWorkIQFailure(error.message);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function acceptWorkIQEula() {
+    var ack = document.getElementById('workiq-eula-ack');
+    var button = document.getElementById('workiq-eula-accept');
+    if (!ack.checked) return;
+    button.disabled = true;
+    try {
+        var response = await fetch('/api/workiq/eula', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({acknowledged: true})
+        });
+        var result = await response.json();
+        if (result.status) renderWorkIQStatus(result.status);
+        if (!response.ok || !result.ok) {
+            throw new Error((result.error && result.error.message) || 'EULA acceptance failed.');
+        }
+    } catch (error) {
+        renderWorkIQFailure(error.message);
+    } finally {
+        button.disabled = !ack.checked;
+    }
+}
+
+document.addEventListener('change', function(event) {
+    if (event.target.id === 'workiq-eula-ack') {
+        document.getElementById('workiq-eula-accept').disabled = !event.target.checked;
+    }
+});
+
+document.addEventListener('click', function(event) {
+    if (event.target.id === 'workiq-readiness-btn') requestWorkIQReadiness();
+    if (event.target.id === 'workiq-eula-accept') acceptWorkIQEula();
+});
 
 // ── WebSocket ──────────────────────────────────────────────────────────
 function connectWebSocket() {

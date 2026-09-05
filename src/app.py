@@ -19,6 +19,11 @@ from .handlers.task_api import TaskListHandler, TaskDetailHandler, StatsHandler
 from .handlers.task_actions import TaskActionHandler, TaskRefreshHandler, TaskSkillHandler
 from .handlers.ws import TaskWebSocketHandler, broadcast
 from .handlers.sync_api import SyncStatusHandler, RunnerStatusHandler
+from .handlers.workiq_api import (
+    WorkIQEulaHandler,
+    WorkIQReadinessHandler,
+    WorkIQStatusHandler,
+)
 from .handlers.cowork import (
     CoworkDestinationHandler,
     CoworkAnswerHandler,
@@ -36,6 +41,7 @@ from .services.workspace_settings import (
     get_workspace_settings,
     missing_settings_warning,
 )
+from .services.workiq_runtime import shutdown_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +181,9 @@ def make_app() -> tornado.web.Application:
             (r"/api/stats", StatsHandler),
             (r"/api/sync-status", SyncStatusHandler),
             (r"/api/runner-status", RunnerStatusHandler),
+            (r"/api/workiq/status", WorkIQStatusHandler),
+            (r"/api/workiq/readiness", WorkIQReadinessHandler),
+            (r"/api/workiq/eula", WorkIQEulaHandler),
             # WebSocket
             (r"/ws", TaskWebSocketHandler),
         ],
@@ -322,7 +331,10 @@ def main():
     log_file = os.environ.get("TODONESS_LOG_FILE")
     setup_logging(log_file)
     _app, ioloop = start_server(port)
-    ioloop.start()
+    try:
+        ioloop.start()
+    finally:
+        shutdown_runtime()
 
 
 if __name__ == "__main__":

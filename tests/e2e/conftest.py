@@ -105,13 +105,74 @@ db_module.DB_PATH = Path(r"{tmp_db.name}")
 
 from src.app import make_app
 from src.db import get_connection, init_db
+import src.handlers.workiq_api as workiq_api
+from src.services.workiq_setup import EULA_URL
 import tornado.ioloop
+import tornado.web
+
+class E2EWorkIQSetup:
+    def inspect(self):
+        return {{
+            "state": "mcp_unavailable",
+            "required_version": "1.0.0",
+            "installed_version": "1.0.0",
+            "eula_url": EULA_URL,
+            "install_command": r"powershell -ExecutionPolicy Bypass -File scripts\\setup_workiq.ps1",
+        }}
+
+    def accept_eula(self):
+        return {{"ok": True, "message": "Work IQ EULA accepted. Check readiness again."}}
+
+class E2EWorkIQRuntime:
+    def __init__(self):
+        self.state = "eula_required"
+
+    def snapshot(self):
+        ready = self.state == "ready"
+        return {{
+            "state": self.state,
+            "error": (
+                {{"code": "eula_required", "message": "Work IQ requires EULA acceptance."}}
+                if self.state == "eula_required" else None
+            ),
+            "protocol_version": "2025-06-18" if ready else None,
+            "server": {{"name": "WorkIQ", "version": "1.0.0"}} if ready else None,
+            "allowed_capabilities": ["ask_work_iq", "do_action"] if ready else [],
+            "authenticated": ready,
+            "active_job_id": None,
+            "queue_depth": 0,
+        }}
+
+    def shutdown(self):
+        self.state = "stopped"
+
+    def invalidate_setup_state(self):
+        self.state = "stopped"
+
+    def probe(self):
+        self.state = "ready"
+        return {{"ok": True}}
+
+e2e_workiq_setup = E2EWorkIQSetup()
+e2e_workiq_runtime = E2EWorkIQRuntime()
+workiq_api.get_setup = lambda: e2e_workiq_setup
+workiq_api.get_runtime = lambda: e2e_workiq_runtime
+
+class GracefulShutdownHandler(tornado.web.RequestHandler):
+    def post(self):
+        from src.services.workiq_runtime import shutdown_runtime
+        shutdown_runtime()
+        self.write({{"ok": True}})
+        tornado.ioloop.IOLoop.current().add_callback(
+            tornado.ioloop.IOLoop.current().stop
+        )
 
 conn = get_connection()
 init_db(conn)
 conn.close()
 
 app = make_app()
+app.add_handlers(r".*$", [(r"/__test/shutdown", GracefulShutdownHandler)])
 app.listen(18766)
 print("E2E server running on 18766", flush=True)
 tornado.ioloop.IOLoop.current().start()
@@ -126,11 +187,18 @@ tornado.ioloop.IOLoop.current().start()
     )
     yield server
 
-    server.terminate()
     try:
+        request = urllib.request.Request(
+            BASE_URL + '/__test/shutdown', data=b'', method='POST'
+        )
+        urllib.request.urlopen(request, timeout=5).read()
         server.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        server.kill()
+    except (urllib.error.URLError, subprocess.TimeoutExpired):
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
     log_handle.close()
     os.unlink(tmp_db.name)
 

@@ -1067,13 +1067,9 @@ class TestTeamsRecovery(StructuredDeliveryTestBase):
 class TestEvidenceProvenance(StructuredDeliveryTestBase):
     """Slot evidence must say where it actually came from.
 
-    finish_preview stamped {"source": "FindMeetingTimes+interaction"} while the
-    preview worker only ever had workiq-ask/retrieve/fetch. Graph's
-    findMeetingTimes and getSchedule are POST actions needing workiq-do_action,
-    which preview deliberately does not have, so that label could never be
-    earned. Worse, schedule_interaction_is_certified() gated slot selection by
-    checking for that exact string, so Riveter was certifying meetings by
-    reading back a label it had written itself.
+    The owned calendar runtime earns FindMeetingTimes+structured only after a
+    typed Graph result survives local validation. Other sources cannot become
+    certifiable by relabelling their evidence.
     """
 
     def _evidence_from_preview(self):
@@ -1092,19 +1088,6 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         )
         duration = structured_delivery._meeting_duration(task)
         start = datetime(2028, 8, 21, 9, 5, tzinfo=timezone(timedelta(hours=-7)))
-        # These cases are about how the evidence is LABELLED, so give them a
-        # probe that genuinely measures the slot free. Availability that was
-        # never measured is covered separately.
-        structured_delivery.fetch_availability = lambda attendees, slots: [
-            {
-                "schedules": [{
-                    "scheduleId": "rima@microsoft.com",
-                    "availabilityView": "0" * 288,
-                }],
-                "view_start": start.astimezone(timezone.utc).isoformat(),
-            }
-            for _ in slots
-        ]
         structured_delivery.finish_preview(
             action["id"],
             stdout=(
@@ -1136,22 +1119,28 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             expected_channel="calendar",
             expected_attendees={"rima@microsoft.com"},
             expected_duration=duration,
+            _graph_evidence={
+                "source": "FindMeetingTimes+structured",
+                "query_backed": True,
+                "availability_verified": True,
+                "start_offset_minutes": 5,
+                "attendee_timezones": {},
+            },
         )
         latest = get_latest_task_action(task["id"])
         interaction = json.loads(latest["blocked_question"])
         return task, interaction
 
-    def test_preview_does_not_claim_a_scheduler_it_cannot_call(self):
+    def test_structured_preview_does_not_claim_cowork_scheduler_evidence(self):
         _task, interaction = self._evidence_from_preview()
         evidence = interaction["schedule_evidence"]
 
         self.assertNotEqual(
             evidence["source"], "FindMeetingTimes+interaction",
-            "preview cannot call findMeetingTimes; it has no do_action",
+            "owned MCP evidence must not claim Cowork produced it",
         )
-        # It was still a live M365 query, just a different class of one.
         self.assertTrue(evidence["query_backed"])
-        self.assertTrue(str(evidence["source"]).strip())
+        self.assertEqual(evidence["source"], "FindMeetingTimes+structured")
 
     def test_certifier_accepts_the_honest_preview_source(self):
         from src.services.cowork_runner import (
@@ -1171,15 +1160,7 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             "telling the truth silently disables scheduling",
         )
 
-    def test_certifier_does_not_gate_on_unmeasured_availability(self):
-        """Measurement is best-effort, not a veto.
-
-        Riveter checks the calendars when it can, but that check runs through a
-        subprocess taking one to three minutes which frequently returns
-        nothing. Refusing every unmeasured selection did not make scheduling
-        safer, it made it unusable. The preview says plainly when the times
-        were not checked instead.
-        """
+    def test_certifier_rejects_unmeasured_availability(self):
         from src.services.cowork_runner import (
             schedule_attendees, schedule_duration_minutes,
             schedule_interaction_is_certified,
@@ -1188,14 +1169,13 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         task, interaction = self._evidence_from_preview()
         interaction["schedule_evidence"]["availability_verified"] = False
 
-        self.assertTrue(schedule_interaction_is_certified(
+        self.assertFalse(schedule_interaction_is_certified(
             interaction,
             schedule_attendees(task),
             schedule_duration_minutes(task),
         ))
 
-    def test_scheduler_evidence_does_not_need_riveter_to_remeasure(self):
-        """FindMeetingTimes measured availability itself; do not gate it."""
+    def test_scheduler_evidence_requires_explicit_verified_flag(self):
         from src.services.cowork_runner import (
             schedule_attendees, schedule_duration_minutes,
             schedule_interaction_is_certified,
@@ -1205,7 +1185,7 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
         interaction["schedule_evidence"]["source"] = "FindMeetingTimes+interaction"
         interaction["schedule_evidence"].pop("availability_verified", None)
 
-        self.assertTrue(schedule_interaction_is_certified(
+        self.assertFalse(schedule_interaction_is_certified(
             interaction,
             schedule_attendees(task),
             schedule_duration_minutes(task),
@@ -1235,6 +1215,25 @@ class TestEvidenceProvenance(StructuredDeliveryTestBase):
             ),
             True,
         )
+
+    def test_getschedule_without_organizer_evidence_is_not_certified(self):
+        from src.services.cowork_runner import (
+            CERTIFIED_SCHEDULE_SOURCES,
+            schedule_attendees,
+            schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        task, interaction = self._evidence_from_preview()
+        interaction["schedule_evidence"]["source"] = "GetSchedule+structured"
+        interaction["schedule_evidence"]["availability_verified"] = True
+
+        self.assertNotIn("GetSchedule+structured", CERTIFIED_SCHEDULE_SOURCES)
+        self.assertFalse(schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(task),
+            schedule_duration_minutes(task),
+        ))
 
     def test_certifier_still_accepts_cowork_scheduler_evidence(self):
         """Cowork really does call FindMeetingTimes; those rows stay valid."""
@@ -1491,6 +1490,55 @@ class TestEmailRecipientEnforcement(StructuredDeliveryTestBase):
 
 
 class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
+    def setUp(self):
+        super().setUp()
+        self._real_find_meeting_times = (
+            structured_delivery.workiq_calendar.find_meeting_times
+        )
+        self._real_get_schedule = structured_delivery.workiq_calendar.get_schedule
+        self._legacy_scheduler_timezones = {}
+
+        def legacy_find(body, timeout):
+            proc = structured_delivery._run(
+                structured_delivery._scheduler_command(body),
+                timeout=timeout,
+            )
+            if proc.returncode != 0:
+                raise structured_delivery.ProtocolError(
+                    "Scheduler subprocess failed"
+                )
+            parsed = structured_delivery._parse_find_times(proc.stdout or "")
+            if parsed is None:
+                raise structured_delivery.InvalidStructuredContentError(
+                    "Scheduler response was unreadable"
+                )
+            self._legacy_scheduler_timezones = parsed.pop(
+                "_attendeeTimezones", {}
+            )
+            return parsed
+
+        def legacy_schedule(_body, timeout):
+            return {
+                "value": [
+                    {
+                        "scheduleId": email,
+                        "scheduleItems": [],
+                        "workingHours": {"timeZone": {"name": zone}},
+                    }
+                    for email, zone in self._legacy_scheduler_timezones.items()
+                ]
+            }
+
+        structured_delivery.workiq_calendar.find_meeting_times = legacy_find
+        structured_delivery.workiq_calendar.get_schedule = legacy_schedule
+
+    def tearDown(self):
+        structured_delivery.workiq_calendar.find_meeting_times = (
+            self._real_find_meeting_times
+        )
+        structured_delivery.workiq_calendar.get_schedule = self._real_get_schedule
+        super().tearDown()
+
     def _task(self, count=3):
         people = [
             {
@@ -1645,22 +1693,33 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         calls = []
         original = structured_delivery._run
 
-        def fake_run(argv, timeout=300):
-            calls.append((argv, timeout))
-            return subprocess.CompletedProcess(
-                argv, 0,
-                stdout=self._scheduler_stdout([self._suggestion()]),
-                stderr="",
-            )
+        def forbidden_run(*args, **kwargs):
+            raise AssertionError("availability must not use a subprocess")
 
-        structured_delivery._run = fake_run
+        structured_delivery._run = forbidden_run
         try:
-            with mock.patch(
-                "src.services.cowork_runner.meeting_preferences",
-                return_value={
-                    "default_minutes": 25,
-                    "start_offset_minutes": 5,
-                },
+            with (
+                mock.patch(
+                    "src.services.cowork_runner.meeting_preferences",
+                    return_value={
+                        "default_minutes": 25,
+                        "start_offset_minutes": 5,
+                    },
+                ),
+                mock.patch(
+                    "src.services.structured_delivery.workiq_calendar.find_meeting_times",
+                    side_effect=lambda body, timeout: (
+                        calls.append((body, timeout))
+                        or {
+                            "emptySuggestionsReason": "",
+                            "meetingTimeSuggestions": [self._suggestion()],
+                        }
+                    ),
+                ),
+                mock.patch(
+                    "src.services.structured_delivery.workiq_calendar.get_schedule",
+                    return_value={"value": []},
+                ),
             ):
                 slots, evidence = structured_delivery._find_meeting_slots(
                     task, payload
@@ -1669,14 +1728,38 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
             structured_delivery._run = original
 
         self.assertEqual(len(calls), 1)
-        joined = " ".join(calls[0][0])
-        self.assertIn("/me/findMeetingTimes", joined)
-        self.assertIn("/me/calendar/getSchedule", joined)
-        self.assertIn("attendeeTimezones", joined)
-        self.assertIn("If and only if meetingTimeSuggestions is nonempty", joined)
-        self.assertIn('"meetingDuration":"PT30M"', joined.replace(" ", ""))
-        self.assertIn('"minimumAttendeePercentage":100', joined.replace(" ", ""))
-        self.assertEqual(calls[0][1], structured_delivery.SCHEDULER_TIMEOUT_SECONDS)
+        body, timeout = calls[0]
+        self.assertEqual(body, {
+            "attendees": [
+                {
+                    "type": "required",
+                    "emailAddress": {
+                        "name": f"Person {index}",
+                        "address": f"person-{index}@x.com",
+                    },
+                }
+                for index in range(3)
+            ],
+            "timeConstraint": {
+                "activityDomain": "work",
+                "timeSlots": [{
+                    "start": {
+                        "dateTime": "2099-08-31T09:00:00",
+                        "timeZone": "Eastern Standard Time",
+                    },
+                    "end": {
+                        "dateTime": "2099-09-04T17:00:00",
+                        "timeZone": "Eastern Standard Time",
+                    },
+                }],
+            },
+            "meetingDuration": "PT30M",
+            "maxCandidates": 10,
+            "returnSuggestionReasons": True,
+            "minimumAttendeePercentage": 100,
+        })
+        self.assertLessEqual(timeout, structured_delivery.SCHEDULER_TIMEOUT_SECONDS)
+        self.assertGreater(timeout, 0)
         self.assertGreaterEqual(
             structured_delivery.SCHEDULER_TIMEOUT_SECONDS, 180
         )
@@ -1689,31 +1772,41 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         task = self._task()
         payload = self._payload(task)
         outputs = [
-            self._scheduler_stdout([], "AttendeesUnavailable"),
-            self._scheduler_stdout([self._suggestion(unavailable=2)]),
+            {
+                "emptySuggestionsReason": "AttendeesUnavailable",
+                "meetingTimeSuggestions": [],
+            },
+            {
+                "emptySuggestionsReason": "",
+                "meetingTimeSuggestions": [self._suggestion(unavailable=2)],
+            },
         ]
         calls = []
         original = structured_delivery._run
-
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
-            )
-
-        structured_delivery._run = fake_run
+        structured_delivery._run = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("availability must not use a subprocess")
+        )
         try:
-            slots, evidence = structured_delivery._find_meeting_slots(
-                task, payload
-            )
+            with (
+                mock.patch(
+                    "src.services.structured_delivery.workiq_calendar.find_meeting_times",
+                    side_effect=lambda body, timeout: (
+                        calls.append(body) or outputs[len(calls) - 1]
+                    ),
+                ),
+                mock.patch(
+                    "src.services.structured_delivery.workiq_calendar.get_schedule",
+                    return_value={"value": []},
+                ),
+            ):
+                slots, evidence = structured_delivery._find_meeting_slots(
+                    task, payload
+                )
         finally:
             structured_delivery._run = original
 
         self.assertEqual(len(calls), 2)
-        self.assertIn(
-            '"minimumAttendeePercentage":66',
-            " ".join(calls[1]).replace(" ", ""),
-        )
+        self.assertEqual(calls[1]["minimumAttendeePercentage"], 66)
         self.assertEqual(slots[0]["availability"]["person-2@x.com"], "busy")
         self.assertEqual(evidence["graph_minimum_attendee_percentage"], 66)
 
@@ -1877,7 +1970,7 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         )
         self.assertTrue(slots)
 
-    def test_unknown_timezone_attendee_is_rejected(self):
+    def test_unknown_timezone_attendee_metadata_is_discarded(self):
         task = self._task()
         payload = self._payload(task)
         output = self._scheduler_stdout(
@@ -1889,10 +1982,11 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
             argv, 0, stdout=output, stderr=""
         )
         try:
-            with self.assertRaisesRegex(ValueError, "timezone"):
-                structured_delivery._find_meeting_slots(task, payload)
+            slots, evidence = structured_delivery._find_meeting_slots(task, payload)
         finally:
             structured_delivery._run = original
+        self.assertTrue(slots)
+        self.assertEqual(evidence["attendee_timezones"], {})
 
     def test_unresolvable_optional_timezone_is_omitted_not_fatal(self):
         task = self._task()
@@ -2223,7 +2317,7 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
         self.assertEqual(latest["state"], "failed")
         self.assertIn("No mutual free time", latest["error"])
 
-    def test_unreadable_scheduler_falls_back_to_existing_getschedule_path(self):
+    def test_unreadable_scheduler_fails_closed_without_getschedule(self):
         task = self._task()
         envelope = structured_delivery.initial_payload(task, "calendar")
         action = create_task_action(
@@ -2246,19 +2340,22 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
 
         structured_delivery._run = fake_run
         try:
-            structured_delivery._preview_worker(task, action)
+            with mock.patch.object(
+                structured_delivery.workiq_calendar, "get_schedule"
+            ) as get_schedule:
+                structured_delivery._preview_worker(task, action)
         finally:
             structured_delivery._run = original
 
         self.assertEqual(len(calls), 2)
-        self.assertTrue(self.availability_probe_calls)
         latest = get_latest_task_action(task["id"])
-        self.assertEqual(latest["state"], "previewing")
-        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
-        self.assertEqual(evidence["source"], "copilot-ask")
-        self.assertFalse(evidence["availability_verified"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertIn("[invalid_structured_content; retry]", latest["error"])
+        self.assertEqual(self.availability_probe_calls, [])
+        get_schedule.assert_not_called()
 
-    def test_nonzero_scheduler_process_falls_back_to_existing_getschedule_path(self):
+    def test_nonzero_scheduler_process_fails_closed_without_getschedule(self):
         task = self._task()
         envelope = structured_delivery.initial_payload(task, "calendar")
         action = create_task_action(
@@ -2282,18 +2379,22 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
 
         structured_delivery._run = fake_run
         try:
-            structured_delivery._preview_worker(task, action)
+            with mock.patch.object(
+                structured_delivery.workiq_calendar, "get_schedule"
+            ) as get_schedule:
+                structured_delivery._preview_worker(task, action)
         finally:
             structured_delivery._run = original
 
         self.assertEqual(len(calls), 2)
-        self.assertTrue(self.availability_probe_calls)
         latest = get_latest_task_action(task["id"])
-        self.assertEqual(latest["state"], "previewing")
-        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
-        self.assertEqual(evidence["source"], "copilot-ask")
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertIn("[protocol; restart_runtime]", latest["error"])
+        self.assertEqual(self.availability_probe_calls, [])
+        get_schedule.assert_not_called()
 
-    def test_scheduler_fallback_fills_missing_provisional_attendee_as_unknown(self):
+    def test_incomplete_primary_result_never_certifies_provisional_slots(self):
         task = self._task()
         envelope = structured_delivery.initial_payload(task, "calendar")
         action = create_task_action(
@@ -2316,17 +2417,391 @@ class TestSchedulerFirstPreview(StructuredDeliveryTestBase):
 
         structured_delivery._run = fake_run
         try:
-            structured_delivery._preview_worker(task, action)
+            with mock.patch.object(
+                structured_delivery.workiq_calendar, "get_schedule"
+            ) as get_schedule:
+                structured_delivery._preview_worker(task, action)
         finally:
             structured_delivery._run = original
 
         latest = get_latest_task_action(task["id"])
-        self.assertEqual(latest["state"], "previewing", latest.get("error"))
-        evidence = json.loads(latest["blocked_question"])["schedule_evidence"]
-        self.assertEqual(
-            evidence["slots"][0]["availability"]["person-2@x.com"],
-            "unknown",
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertIn("[invalid_structured_content; retry]", latest["error"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.availability_probe_calls, [])
+        get_schedule.assert_not_called()
+
+    def test_scheduler_transport_failure_fails_closed_without_getschedule(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
         )
+        phase_one = self._phase_one_stdout(envelope, self._payload(task))
+        subprocess_calls = []
+
+        def phase_one_only(argv, timeout=300):
+            subprocess_calls.append(argv)
+            if len(subprocess_calls) > 1:
+                raise AssertionError("calendar fallback started a subprocess")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=phase_one, stderr=""
+            )
+
+        original = structured_delivery._run
+        original_probe = structured_delivery.fetch_availability
+        structured_delivery._run = phase_one_only
+        structured_delivery.fetch_availability = self._real_fetch_availability
+        try:
+            with (
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "find_meeting_times",
+                    side_effect=structured_delivery.ProtocolError(
+                        "synthetic direct scheduler failure"
+                    ),
+                ),
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "get_schedule",
+                ) as get_schedule,
+            ):
+                structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+            structured_delivery.fetch_availability = original_probe
+
+        self.assertEqual(len(subprocess_calls), 1)
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertIn("[protocol; restart_runtime]", latest["error"])
+        get_schedule.assert_not_called()
+
+    def test_organizer_busy_suggestion_never_falls_back_to_provisional_slots(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        phase_one = self._phase_one_stdout(envelope, self._payload(task))
+        organizer_busy = self._suggestion(organizer="busy")
+        original = structured_delivery._run
+        structured_delivery._run = lambda argv, timeout=300: subprocess.CompletedProcess(
+            argv, 0, stdout=phase_one, stderr=""
+        )
+        try:
+            with (
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "find_meeting_times",
+                    return_value={
+                        "emptySuggestionsReason": "",
+                        "meetingTimeSuggestions": [organizer_busy],
+                    },
+                ),
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "get_schedule",
+                ) as get_schedule,
+            ):
+                structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertIn("[invalid_structured_content; retry]", latest["error"])
+        get_schedule.assert_not_called()
+
+    def test_primary_failure_never_falls_back_or_certifies_unchecked_slots(self):
+        task = self._task()
+        envelope = structured_delivery.initial_payload(task, "calendar")
+        action = create_task_action(
+            task["id"],
+            delivery_channel="calendar",
+            structured_payload=json.dumps(envelope),
+        )
+        phase_one = self._phase_one_stdout(envelope, self._payload(task))
+        subprocess_calls = []
+
+        def phase_one_only(argv, timeout=300):
+            subprocess_calls.append(argv)
+            if len(subprocess_calls) > 1:
+                raise AssertionError("calendar failure started a subprocess")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=phase_one, stderr=""
+            )
+
+        original = structured_delivery._run
+        original_probe = structured_delivery.fetch_availability
+        structured_delivery._run = phase_one_only
+        structured_delivery.fetch_availability = self._real_fetch_availability
+        try:
+            with (
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "find_meeting_times",
+                    side_effect=structured_delivery.ProtocolError(
+                        "synthetic find failure"
+                    ),
+                ),
+                mock.patch.object(
+                    structured_delivery.workiq_calendar,
+                    "get_schedule",
+                ) as get_schedule,
+            ):
+                structured_delivery._preview_worker(task, action)
+        finally:
+            structured_delivery._run = original
+            structured_delivery.fetch_availability = original_probe
+
+        self.assertEqual(len(subprocess_calls), 1)
+        latest = get_latest_task_action(task["id"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertIsNone(latest["blocked_question"])
+        self.assertNotIn("copilot-ask", latest["error"])
+        self.assertIn("[protocol; restart_runtime]", latest["error"])
+        get_schedule.assert_not_called()
+
+    def test_terminal_scheduler_errors_do_not_enter_fallback(self):
+        failures = [
+            structured_delivery.EulaRequiredError("secret@example.com"),
+            structured_delivery.NotReadyError("secret@example.com"),
+            structured_delivery.WorkIQCapabilityError("secret@example.com"),
+        ]
+        expected_codes = ["eula_required", "not_ready", "capability_denied"]
+        for failure, expected_code in zip(failures, expected_codes):
+            with self.subTest(code=expected_code):
+                task = self._task()
+                envelope = structured_delivery.initial_payload(task, "calendar")
+                action = create_task_action(
+                    task["id"],
+                    delivery_channel="calendar",
+                    structured_payload=json.dumps(envelope),
+                )
+                phase_one = self._phase_one_stdout(envelope, self._payload(task))
+                subprocess_calls = []
+
+                def phase_one_only(argv, timeout=300):
+                    subprocess_calls.append(argv)
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout=phase_one, stderr=""
+                    )
+
+                with (
+                    mock.patch.object(structured_delivery, "_run", phase_one_only),
+                    mock.patch.object(
+                        structured_delivery,
+                        "fetch_availability",
+                        self._real_fetch_availability,
+                    ),
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "find_meeting_times",
+                        side_effect=failure,
+                    ),
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "get_schedule",
+                    ) as fallback,
+                ):
+                    structured_delivery._preview_worker(task, action)
+                latest = get_latest_task_action(task["id"])
+                self.assertEqual(latest["state"], "failed")
+                self.assertIsNone(latest["blocked_question"])
+                self.assertEqual(len(subprocess_calls), 1)
+                fallback.assert_not_called()
+                self.assertIn(f"[{expected_code};", latest["error"])
+                self.assertNotIn("secret@example.com", latest["error"])
+
+    def test_primary_failure_matrix_is_stable_without_secondary_call_or_payload(self):
+        failures = [
+            (structured_delivery.EulaRequiredError, "eula_required"),
+            (structured_delivery.NotReadyError, "not_ready"),
+            (structured_delivery.WorkIQCapabilityError, "capability_denied"),
+            (structured_delivery.WorkIQTimeoutError, "timeout"),
+            (structured_delivery.ProtocolError, "protocol"),
+            (
+                structured_delivery.InvalidStructuredContentError,
+                "invalid_structured_content",
+            ),
+        ]
+        for error_type, expected_code in failures:
+            with self.subTest(code=expected_code):
+                task = self._task()
+                envelope = structured_delivery.initial_payload(task, "calendar")
+                action = create_task_action(
+                    task["id"],
+                    delivery_channel="calendar",
+                    structured_payload=json.dumps(envelope),
+                )
+                phase_one = self._phase_one_stdout(envelope, self._payload(task))
+                subprocess_calls = []
+                def phase_one_only(argv, timeout=300):
+                    subprocess_calls.append(argv)
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout=phase_one, stderr=""
+                    )
+
+                with (
+                    mock.patch.object(structured_delivery, "_run", phase_one_only),
+                    mock.patch.object(
+                        structured_delivery,
+                        "fetch_availability",
+                        self._real_fetch_availability,
+                    ),
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "find_meeting_times",
+                        side_effect=error_type(
+                            "private@example.com scheduleItems confidential-value"
+                        ),
+                    ),
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "get_schedule",
+                    ) as get_schedule,
+                ):
+                    structured_delivery._preview_worker(task, action)
+                latest = get_latest_task_action(task["id"])
+                self.assertEqual(latest["state"], "failed")
+                self.assertIsNone(latest["blocked_question"])
+                self.assertEqual(len(subprocess_calls), 1)
+                get_schedule.assert_not_called()
+                self.assertIn(f"[{expected_code};", latest["error"])
+                self.assertNotIn("private@example.com", latest["error"])
+                self.assertNotIn("scheduleItems", latest["error"])
+
+    def test_optional_timezone_lookup_failure_keeps_valid_scheduler_slots(self):
+        task = self._task()
+        payload = self._payload(task)
+        with (
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "find_meeting_times",
+                return_value={
+                    "emptySuggestionsReason": "",
+                    "meetingTimeSuggestions": [self._suggestion()],
+                },
+            ),
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+                side_effect=structured_delivery.WorkIQTransportError(
+                    "synthetic metadata failure"
+                ),
+            ),
+        ):
+            slots, evidence = structured_delivery._find_meeting_slots(task, payload)
+        self.assertTrue(slots)
+        self.assertEqual(evidence["attendee_timezones"], {})
+
+    def test_malformed_timezone_metadata_is_nonfatal_after_valid_slots(self):
+        from src.services.workiq_runtime import InvalidStructuredContentError
+
+        task = self._task()
+        payload = self._payload(task)
+        with (
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "find_meeting_times",
+                return_value={
+                    "emptySuggestionsReason": "",
+                    "meetingTimeSuggestions": [self._suggestion()],
+                },
+            ),
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+                side_effect=InvalidStructuredContentError(
+                    "synthetic malformed metadata"
+                ),
+            ) as get_schedule,
+        ):
+            slots, evidence = structured_delivery._find_meeting_slots(task, payload)
+
+        self.assertTrue(slots)
+        self.assertEqual(evidence["attendee_timezones"], {})
+        get_schedule.assert_called_once()
+
+    def test_invalid_timezone_payload_is_nonfatal_after_valid_slots(self):
+        task = self._task()
+        payload = self._payload(task)
+        malformed = [
+            {},
+            {
+                "value": [{
+                    "scheduleId": "unexpected@x.com",
+                    "workingHours": {
+                        "timeZone": {"name": "Eastern Standard Time"}
+                    },
+                }],
+            },
+            {
+                "value": [{
+                    "scheduleId": "person-0@x.com",
+                    "workingHours": [],
+                }],
+            },
+        ]
+        for timezone_result in malformed:
+            with self.subTest(timezone_result=timezone_result):
+                with (
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "find_meeting_times",
+                        return_value={
+                            "emptySuggestionsReason": "",
+                            "meetingTimeSuggestions": [self._suggestion()],
+                        },
+                    ),
+                    mock.patch.object(
+                        structured_delivery.workiq_calendar,
+                        "get_schedule",
+                        return_value=timezone_result,
+                    ),
+                ):
+                    slots, evidence = structured_delivery._find_meeting_slots(
+                        task, payload
+                    )
+
+                self.assertTrue(slots)
+                self.assertEqual(evidence["attendee_timezones"], {})
+
+    def test_timezone_deadline_expiry_is_nonfatal_after_valid_slots(self):
+        task = self._task()
+        payload = self._payload(task)
+        with (
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "find_meeting_times",
+                return_value={
+                    "emptySuggestionsReason": "",
+                    "meetingTimeSuggestions": [self._suggestion()],
+                },
+            ),
+            mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+            ) as get_schedule,
+            mock.patch.object(
+                structured_delivery.time,
+                "monotonic",
+                side_effect=[0.0, 1.0, 181.0],
+            ),
+        ):
+            slots, evidence = structured_delivery._find_meeting_slots(task, payload)
+
+        self.assertTrue(slots)
+        self.assertEqual(evidence["attendee_timezones"], {})
+        get_schedule.assert_not_called()
 
 
 class TestAvailabilityVerification(StructuredDeliveryTestBase):
@@ -2745,50 +3220,44 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             },
         ]
 
-    def test_small_multi_day_probe_uses_one_subprocess_and_maps_indices(self):
+    def test_small_multi_day_probe_uses_serialized_direct_calls_and_maps_indices(self):
         """Day two must receive window index 1, never index 0 again."""
         calls = []
-        stdout = self._probe_stdout([
-            {
-                "index": 0,
-                "schedules": [
-                    {
-                        "scheduleId": email,
-                        "scheduleItems": [],
-                        "marker": "day-one",
-                    }
-                    for email in ("a@x.com", "b@x.com", "c@x.com")
-                ],
-            },
-            {
-                "index": 1,
-                "schedules": [
-                    {
-                        "scheduleId": email,
-                        "scheduleItems": [],
-                        "marker": "day-two",
-                    }
-                    for email in ("a@x.com", "b@x.com", "c@x.com")
-                ],
-            },
-        ])
         original = structured_delivery._run
+        structured_delivery._run = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("availability must not use a subprocess")
+        )
 
-        def fake_run(argv, timeout=300):
-            calls.append((argv, timeout))
-            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        def direct(body, timeout):
+            calls.append((body, timeout))
+            marker = "day-one" if body["startTime"]["dateTime"].startswith(
+                "2099-08-26"
+            ) else "day-two"
+            return {"value": [
+                {"scheduleId": email, "scheduleItems": [], "marker": marker}
+                for email in ("a@x.com", "b@x.com", "c@x.com")
+            ]}
 
-        structured_delivery._run = fake_run
         try:
-            measured = self._real_fetch_availability(
-                ["a@x.com", "b@x.com", "c@x.com"],
-                self._two_day_slots(),
-            )
+            with mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+                side_effect=direct,
+            ):
+                measured = self._real_fetch_availability(
+                    ["a@x.com", "b@x.com", "c@x.com"],
+                    self._two_day_slots(),
+                )
         finally:
             structured_delivery._run = original
 
-        self.assertEqual(len(calls), 1)
-        self.assertIn("1. actionUrl", " ".join(calls[0][0]))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(
+            calls[0][0]["startTime"]["dateTime"].startswith("2099-08-26")
+        )
+        self.assertTrue(
+            calls[1][0]["startTime"]["dateTime"].startswith("2099-08-27")
+        )
         self.assertEqual(
             measured[0]["schedules"][0]["marker"], "day-one"
         )
@@ -2798,81 +3267,50 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
 
     def test_batch_retry_preserves_first_attempt_success_and_fills_gap(self):
         """Retrying the whole batch must not discard a window already measured."""
-        outputs = [
-            self._probe_stdout([{
-                "index": 0,
-                "schedules": [
-                    {
-                        "scheduleId": email,
-                        "scheduleItems": [],
-                        "marker": "first",
-                    }
-                    for email in ("a@x.com", "b@x.com", "c@x.com")
-                ],
-            }]),
-            self._probe_stdout([{
-                "index": 1,
-                "schedules": [
-                    {
-                        "scheduleId": email,
-                        "scheduleItems": [],
-                        "marker": "second",
-                    }
-                    for email in ("a@x.com", "b@x.com", "c@x.com")
-                ],
-            }]),
-        ]
         calls = []
-        original = structured_delivery._run
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
-            )
+        def direct(body, timeout):
+            calls.append(body)
+            if len(calls) == 2:
+                raise structured_delivery.InvalidStructuredContentError(
+                    "synthetic first-attempt gap"
+                )
+            marker = "first" if len(calls) == 1 else "second"
+            return {"value": [
+                {"scheduleId": email, "scheduleItems": [], "marker": marker}
+                for email in ("a@x.com", "b@x.com", "c@x.com")
+            ]}
 
-        structured_delivery._run = fake_run
-        try:
+        with mock.patch.object(
+            structured_delivery.workiq_calendar, "get_schedule", side_effect=direct
+        ):
             measured = self._real_fetch_availability(
                 ["a@x.com", "b@x.com", "c@x.com"],
                 self._two_day_slots(),
             )
-        finally:
-            structured_delivery._run = original
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(measured[0]["schedules"][0]["marker"], "first")
         self.assertEqual(measured[1]["schedules"][0]["marker"], "second")
 
     def test_batch_retry_merges_attendees_within_the_same_window(self):
         """A nonempty window is not complete until every attendee is present."""
-        outputs = [
-            self._probe_stdout([{
-                "index": 0,
-                "schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}],
-            }]),
-            self._probe_stdout([{
-                "index": 0,
-                "schedules": [{"scheduleId": "b@x.com", "scheduleItems": []}],
-            }]),
-        ]
         calls = []
-        original = structured_delivery._run
-
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
-            )
-
-        structured_delivery._run = fake_run
-        try:
+        outputs = [
+            {"value": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+            {"value": [{"scheduleId": "b@x.com", "scheduleItems": []}]},
+        ]
+        with mock.patch.object(
+            structured_delivery.workiq_calendar,
+            "get_schedule",
+            side_effect=lambda body, timeout: (
+                calls.append(body) or outputs[len(calls) - 1]
+            ),
+        ):
             measured = self._real_fetch_availability(
                 ["a@x.com", "b@x.com"],
                 [self._two_day_slots()[0]],
             )
-        finally:
-            structured_delivery._run = original
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(
@@ -2883,109 +3321,101 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             {"a@x.com", "b@x.com"},
         )
 
-    def test_batch_stops_after_two_unreadable_attempts(self):
+    def test_batch_stops_after_two_unreadable_attempts_with_stable_error(self):
         calls = []
-        original = structured_delivery._run
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-        structured_delivery._run = fake_run
-        try:
-            measured = self._real_fetch_availability(
-                ["a@x.com", "b@x.com", "c@x.com"],
-                self._two_day_slots(),
+        def direct(body, timeout):
+            calls.append(body)
+            raise structured_delivery.InvalidStructuredContentError(
+                "synthetic invalid result"
             )
-        finally:
-            structured_delivery._run = original
 
-        self.assertIsNone(measured)
-        self.assertEqual(len(calls), 2)
+        with mock.patch.object(
+            structured_delivery.workiq_calendar, "get_schedule", side_effect=direct
+        ):
+            with self.assertRaises(structured_delivery.AvailabilityUnavailable) as caught:
+                self._real_fetch_availability(
+                    ["a@x.com", "b@x.com", "c@x.com"],
+                    self._two_day_slots(),
+                )
 
-    def test_batch_retries_real_timeout_then_returns_none(self):
+        self.assertEqual(caught.exception.code, "invalid_structured_content")
+        self.assertEqual(len(calls), 4)
+
+    def test_batch_retries_real_timeout_then_raises_stable_timeout(self):
         calls = []
-        original = structured_delivery._run
+        def direct(body, timeout):
+            calls.append(body)
+            raise structured_delivery.WorkIQTimeoutError("synthetic timeout")
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            raise subprocess.TimeoutExpired(argv, timeout)
+        with mock.patch.object(
+            structured_delivery.workiq_calendar, "get_schedule", side_effect=direct
+        ):
+            with self.assertRaises(structured_delivery.AvailabilityUnavailable) as caught:
+                self._real_fetch_availability(
+                    ["a@x.com", "b@x.com"],
+                    self._two_day_slots(),
+                )
 
-        structured_delivery._run = fake_run
-        try:
-            measured = self._real_fetch_availability(
-                ["a@x.com", "b@x.com"],
-                self._two_day_slots(),
-            )
-        finally:
-            structured_delivery._run = original
-
-        self.assertIsNone(measured)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(caught.exception.code, "timeout")
+        self.assertEqual(len(calls), 4)
 
     def test_batch_keeps_partial_coverage_after_retry_exhausts(self):
-        first = self._probe_stdout([{
-            "index": 0,
-            "schedules": [
-                {"scheduleId": email, "scheduleItems": []}
-                for email in ("a@x.com", "b@x.com")
-            ],
-        }])
-        outputs = [first, first]
         calls = []
-        original = structured_delivery._run
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, stdout=outputs[len(calls) - 1], stderr=""
+        def direct(body, timeout):
+            calls.append(body)
+            if body["startTime"]["dateTime"].startswith("2099-08-26"):
+                return {"value": [
+                    {"scheduleId": email, "scheduleItems": []}
+                    for email in ("a@x.com", "b@x.com")
+                ]}
+            raise structured_delivery.InvalidStructuredContentError(
+                "synthetic missing day"
             )
 
-        structured_delivery._run = fake_run
-        try:
+        with mock.patch.object(
+            structured_delivery.workiq_calendar, "get_schedule", side_effect=direct
+        ):
             measured = self._real_fetch_availability(
                 ["a@x.com", "b@x.com"],
                 self._two_day_slots(),
             )
-        finally:
-            structured_delivery._run = original
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertIsNotNone(measured[0]["schedules"])
         self.assertIsNone(measured[1]["schedules"])
 
-    def test_twelve_attendee_days_use_per_day_fallback(self):
-        """Task 2478's 6 attendees x 2 days is the fallback boundary."""
-        self.assertEqual(
-            structured_delivery.BATCH_THRESHOLD_ATTENDEE_DAYS, 12
-        )
+    def test_twelve_attendee_days_use_bounded_serialized_direct_calls(self):
         calls = []
         original = structured_delivery._run
         attendees = [f"person-{index}@x.com" for index in range(6)]
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            joined = " ".join(argv)
-            marker = "day-one" if "2099-08-26" in joined else "day-two"
-            stdout = self._probe_stdout([{
-                "index": 0,
-                "schedules": [
-                    {
-                        "scheduleId": email,
-                        "scheduleItems": [],
-                        "marker": marker,
-                    }
-                    for email in attendees
-                ],
-            }])
-            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
-
-        structured_delivery._run = fake_run
-        try:
-            measured = self._real_fetch_availability(
-                attendees,
-                self._two_day_slots(),
+        def direct(body, timeout):
+            calls.append((body, timeout))
+            marker = (
+                "day-one"
+                if body["startTime"]["dateTime"].startswith("2099-08-26")
+                else "day-two"
             )
+            return {"value": [
+                {"scheduleId": email, "scheduleItems": [], "marker": marker}
+                for email in attendees
+            ]}
+
+        structured_delivery._run = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("availability must not use a subprocess")
+        )
+        try:
+            with mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+                side_effect=direct,
+            ):
+                measured = self._real_fetch_availability(
+                    attendees,
+                    self._two_day_slots(),
+                )
         finally:
             structured_delivery._run = original
 
@@ -3008,17 +3438,22 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         calls = []
         original = structured_delivery._run
 
-        def fake_run(argv, timeout=300):
-            calls.append(argv)
-            stdout = self._probe_stdout([{
-                "index": 0,
-                "schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}],
-            }])
-            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        def direct(body, timeout):
+            calls.append(body)
+            return {"value": [
+                {"scheduleId": "a@x.com", "scheduleItems": []}
+            ]}
 
-        structured_delivery._run = fake_run
+        structured_delivery._run = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("availability must not use a subprocess")
+        )
         try:
-            measured = self._real_fetch_availability(["a@x.com"], slots)
+            with mock.patch.object(
+                structured_delivery.workiq_calendar,
+                "get_schedule",
+                side_effect=direct,
+            ):
+                measured = self._real_fetch_availability(["a@x.com"], slots)
         finally:
             structured_delivery._run = original
 
@@ -3026,8 +3461,31 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         self.assertEqual(measured[0], measured[1])
 
     # ---- wiring into preview --------------------------------------------
-    def _calendar_preview(self, probe):
-        """Drive a real finish_preview with a controllable availability probe."""
+    @staticmethod
+    def _candidate_slots():
+        return [
+            {
+                "id": "0",
+                "value": "0",
+                "label": "Wed",
+                "start": "2099-08-26T13:05:00-04:00",
+                "end": "2099-08-26T13:30:00-04:00",
+                "timezone": "Eastern Standard Time",
+                "availability": {"a@x.com": "free"},
+            },
+            {
+                "id": "1",
+                "value": "1",
+                "label": "Thu",
+                "start": "2099-08-27T13:05:00-04:00",
+                "end": "2099-08-27T13:30:00-04:00",
+                "timezone": "Eastern Standard Time",
+                "availability": {"a@x.com": "free"},
+            },
+        ]
+
+    def _calendar_preview_without_primary_evidence(self):
+        """Drive finish_preview without scheduler evidence; it must fail closed."""
         task = create_task("Schedule the kickoff", action_type="schedule-meeting")
         envelope = structured_delivery.initial_payload(task, "calendar")
         action = create_task_action(
@@ -3035,8 +3493,11 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             delivery_channel="calendar",
             structured_payload=json.dumps(envelope),
         )
-        structured_delivery.fetch_availability = probe
         duration = structured_delivery._meeting_duration(task)
+        slots = self._candidate_slots()
+        for slot in slots:
+            begin = datetime.fromisoformat(slot["start"])
+            slot["end"] = (begin + timedelta(minutes=duration)).isoformat()
         payload = {
             "schema_version": 1,
             "channel": "calendar",
@@ -3045,20 +3506,8 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             "duration_minutes": duration,
             "timezone": "Eastern Standard Time",
             "attendees": [{"name": "A", "email": "a@x.com"}],
-            "slots": [
-                {"id": "0", "label": "Wed",
-                 "start": "2099-08-26T13:05:00-04:00",
-                 "timezone": "Eastern Standard Time",
-                 "availability": {"a@x.com": "free"}},
-                {"id": "1", "label": "Thu",
-                 "start": "2099-08-27T13:05:00-04:00",
-                 "timezone": "Eastern Standard Time",
-                 "availability": {"a@x.com": "free"}},
-            ],
+            "slots": slots,
         }
-        for slot in payload["slots"]:
-            begin = datetime.fromisoformat(slot["start"])
-            slot["end"] = (begin + timedelta(minutes=duration)).isoformat()
         stdout = (
             structured_delivery.RESULT_START + "\n"
             + json.dumps({
@@ -3077,74 +3526,66 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
             correlation_id=envelope["correlation_id"],
         )
 
-    def test_preview_consults_the_probe(self):
-        seen = []
+    def test_fetch_availability_consults_getschedule_directly(self):
+        calls = []
 
-        def probe(attendees, slots):
-            seen.append((attendees, slots))
-            return None
+        def get_schedule(body, timeout):
+            calls.append((body, timeout))
+            return {
+                "value": [
+                    {"scheduleId": "a@x.com", "scheduleItems": []}
+                ]
+            }
 
-        self._calendar_preview(probe)
-        self.assertEqual(len(seen), 1, "preview must measure availability")
-        self.assertEqual(seen[0][0], ["a@x.com"])
-        self.assertEqual(len(seen[0][1]), 2)
+        with mock.patch.object(
+            structured_delivery.workiq_calendar,
+            "get_schedule",
+            side_effect=get_schedule,
+        ):
+            measured = self._real_fetch_availability(
+                ["a@x.com"], self._candidate_slots()
+            )
 
-    def test_preview_ranks_a_conflicted_slot_below_a_clear_one(self):
-        def probe(attendees, slots):
-            return [
-                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": [{
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(measured), 2)
+        self.assertEqual(calls[0][0]["schedules"], ["a@x.com"])
+
+    def test_apply_verified_availability_ranks_conflict_below_clear_slot(self):
+        measurements = [
+            {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": [{
                     "status": "oof",
                     "start": {"dateTime": "2099-08-26T17:00:00.0000000",
                               "timeZone": "UTC"},
                     "end": {"dateTime": "2099-08-26T17:30:00.0000000",
                             "timeZone": "UTC"},
                 }]}]},
-                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
-            ]
+            {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+        ]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"], self._candidate_slots(), measurements
+        )
 
-        _action, updated = self._calendar_preview(probe)
-        interaction = json.loads(updated["blocked_question"])
-        evidence = interaction["schedule_evidence"]
-
-        self.assertTrue(evidence["availability_verified"])
-        self.assertEqual([s["value"] for s in evidence["slots"]], ["1", "0"])
-        options = interaction["questions"][0]["options"]
-        self.assertEqual(options[0]["description"],
-                         "All confirmed attendees are available.")
-        self.assertIn("out of office", options[1]["description"])
+        self.assertEqual([slot["value"] for slot in ranked], ["1", "0"])
+        self.assertEqual(
+            structured_delivery._availability_description(ranked[0]),
+            "All confirmed attendees are available.",
+        )
+        self.assertIn(
+            "out of office",
+            structured_delivery._availability_description(ranked[1]),
+        )
 
     def test_preview_records_when_availability_could_not_be_measured(self):
-        _action, updated = self._calendar_preview(lambda a, s: None)
-        interaction = json.loads(updated["blocked_question"])
-        evidence = interaction["schedule_evidence"]
+        _action, updated = self._calendar_preview_without_primary_evidence()
+        self.assertEqual(updated["state"], "failed")
+        self.assertIsNone(updated["blocked_question"])
+        self.assertIn("no unchecked times were saved", updated["error"])
 
-        self.assertFalse(evidence["availability_verified"])
-        self.assertEqual(len(evidence["slots"]), 2)
-        # It must not imply these times were checked.
-        question = interaction["questions"][0]["question"]
-        self.assertIn("unchecked", question)
-        self.assertNotIn("verified time", question)
-
-    def test_an_unverified_preview_can_still_be_booked(self):
-        """Measurement is best-effort, not a gate.
-
-        The probe runs through a subprocess that takes minutes and often
-        returns nothing. Refusing every unmeasured selection turned a useful
-        check into a broken feature, so an unverified preview still books --
-        it just says plainly that the times were not checked.
-        """
-        from src.services.cowork_runner import schedule_interaction_is_certified
-
-        _action, updated = self._calendar_preview(lambda a, s: None)
-        interaction = json.loads(updated["blocked_question"])
-        self.assertFalse(
-            interaction["schedule_evidence"]["availability_verified"]
-        )
-        self.assertTrue(schedule_interaction_is_certified(
-            interaction,
-            [{"name": "A", "email": "a@x.com"}],
-            interaction["schedule_evidence"]["duration_minutes"],
-        ))
+    def test_dual_direct_failure_never_persists_a_certifiable_choice(self):
+        _action, updated = self._calendar_preview_without_primary_evidence()
+        self.assertEqual(updated["state"], "failed")
+        self.assertIsNone(updated["blocked_question"])
+        self.assertNotIn("copilot-ask", updated["error"])
 
     def test_unmeasured_availability_is_never_reported_as_free(self):
         """A claim the probe could not confirm must not be dressed as measurement.
@@ -3156,38 +3597,27 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         is precisely what must not survive into evidence the UI renders as
         fact.
         """
-        _action, updated = self._calendar_preview(lambda a, s: None)
-        interaction = json.loads(updated["blocked_question"])
-        evidence = interaction["schedule_evidence"]
-
-        self.assertFalse(evidence["availability_verified"])
-        for slot in evidence["slots"]:
-            self.assertEqual(
-                sorted({str(v) for v in slot["availability"].values()}),
-                ["unknown"],
-                "unmeasured availability must read unknown, never free",
-            )
+        _action, updated = self._calendar_preview_without_primary_evidence()
+        self.assertEqual(updated["state"], "failed")
+        self.assertIsNone(updated["blocked_question"])
 
     def test_unmeasured_slots_do_not_claim_everyone_is_available(self):
         """The option text is read as the answer, so it must not assert one."""
-        _action, updated = self._calendar_preview(lambda a, s: None)
-        interaction = json.loads(updated["blocked_question"])
-
-        for option in interaction["questions"][0]["options"]:
-            self.assertNotIn("are available", option["description"])
-            self.assertIn("not checked", option["description"].lower())
+        _action, updated = self._calendar_preview_without_primary_evidence()
+        self.assertEqual(updated["state"], "failed")
+        self.assertIsNone(updated["blocked_question"])
 
     def test_only_the_unmeasured_slot_loses_its_claim(self):
         """Partial measurement must not punish the slot that was measured."""
-        def probe(attendees, slots):
-            return [
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            self._candidate_slots(),
+            [
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
                 {"schedules": None},
-            ]
-
-        _action, updated = self._calendar_preview(probe)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
-        by_value = {s["value"]: s["availability"] for s in evidence["slots"]}
+            ],
+        )
+        by_value = {slot["value"]: slot["availability"] for slot in ranked}
 
         self.assertEqual(by_value["0"]["a@x.com"], "free")
         self.assertEqual(by_value["1"]["a@x.com"], "unknown")
@@ -3342,44 +3772,52 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         calendars "could not be read" -- overstating the failure exactly as
         claiming "free" overstated the success.
         """
-        def partial(attendees, slots):
-            return [
+        slots = self._candidate_slots()
+        partial = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            slots,
+            [
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
                 {"schedules": None},
-            ]
-
-        _action, updated = self._calendar_preview(partial)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
-        self.assertEqual(evidence["availability_coverage"], "partial")
-
-        _action, updated = self._calendar_preview(lambda a, s: None)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
-        self.assertEqual(evidence["availability_coverage"], "none")
-
-        def full(attendees, slots):
-            return [
+            ],
+        )
+        none = structured_delivery._apply_verified_availability(
+            ["a@x.com"], slots, []
+        )
+        full = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            slots,
+            [
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
-            ]
+            ],
+        )
 
-        _action, updated = self._calendar_preview(full)
-        evidence = json.loads(updated["blocked_question"])["schedule_evidence"]
-        self.assertEqual(evidence["availability_coverage"], "full")
+        self.assertEqual(
+            structured_delivery._availability_coverage(partial), "partial"
+        )
+        self.assertEqual(structured_delivery._availability_coverage(none), "none")
+        self.assertEqual(structured_delivery._availability_coverage(full), "full")
 
-    def test_a_partly_measured_preview_does_not_claim_nothing_was_read(self):
-        """The question text must match which slots were actually measured."""
-        def partial(attendees, slots):
-            return [
+    def test_partly_measured_descriptions_distinguish_checked_and_unchecked(self):
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            self._candidate_slots(),
+            [
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
                 {"schedules": None},
-            ]
+            ],
+        )
+        by_value = {slot["value"]: slot for slot in ranked}
 
-        _action, updated = self._calendar_preview(partial)
-        question = json.loads(
-            updated["blocked_question"]
-        )["questions"][0]["question"]
-        self.assertNotIn("could not read the attendees' calendars", question)
-        self.assertIn("some", question.lower())
+        self.assertEqual(
+            structured_delivery._availability_description(by_value["0"]),
+            "All confirmed attendees are available.",
+        )
+        self.assertIn(
+            "Availability not checked",
+            structured_delivery._availability_description(by_value["1"]),
+        )
 
     def test_partly_measured_is_not_verified(self):
         """One day's window can succeed while another fails.
@@ -3388,43 +3826,141 @@ class TestAvailabilityVerification(StructuredDeliveryTestBase):
         returned something -- otherwise an unmeasured slot rides along on its
         neighbour's certificate.
         """
-        def probe(attendees, slots):
-            return [
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            self._candidate_slots(),
+            [
                 {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
                 {"schedules": None},
-            ]
+            ],
+        )
 
-        _action, updated = self._calendar_preview(probe)
-        interaction = json.loads(updated["blocked_question"])
-        evidence = interaction["schedule_evidence"]
+        self.assertNotEqual(
+            structured_delivery._availability_coverage(ranked), "full"
+        )
+        self.assertEqual(len(ranked), 2)
 
-        self.assertFalse(evidence["availability_verified"])
-        # The measured slot still gets its real answer.
-        self.assertEqual(len(evidence["slots"]), 2)
+    def test_partial_unknown_slot_is_not_certifiable(self):
+        from src.services.cowork_runner import schedule_interaction_is_certified
 
-    def test_preview_offers_the_best_of_a_bad_set_and_invites_steering(self):
-        """Nobody is free. Offer the least-bad times and say who is missing."""
-        def probe(attendees, slots):
-            blocked = [{"scheduleId": "a@x.com", "scheduleItems": [{
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            self._candidate_slots(),
+            [
+                {"schedules": [{"scheduleId": "a@x.com", "scheduleItems": []}]},
+                {"schedules": None},
+            ],
+        )
+        interaction = {
+            "schedule_evidence": {
+                "valid": True,
+                "source": "FindMeetingTimes+structured",
+                "query_backed": True,
+                "availability_verified": True,
+                "availability_coverage": "partial",
+                "attendees": ["a@x.com"],
+                "duration_minutes": 25,
+                "start_offset_minutes": 5,
+                "slots": ranked,
+            }
+        }
+        self.assertFalse(
+            schedule_interaction_is_certified(
+                interaction,
+                [{"name": "A", "email": "a@x.com"}],
+                25,
+            )
+        )
+
+    def test_overlapping_unknown_graph_item_is_not_classified_free(self):
+        status = structured_delivery._status_from_items(
+            [{
+                "status": "unknown",
+                "start": {
+                    "dateTime": "2099-08-26T17:00:00",
+                    "timeZone": "UTC",
+                },
+                "end": {
+                    "dateTime": "2099-08-26T17:30:00",
+                    "timeZone": "UTC",
+                },
+            }],
+            "2099-08-26T13:05:00-04:00",
+            "2099-08-26T13:30:00-04:00",
+        )
+        self.assertIsNone(status)
+
+    def test_invalid_graph_timezone_is_not_treated_as_utc(self):
+        status = structured_delivery._status_from_items(
+            [{
+                "status": "busy",
+                "start": {
+                    "dateTime": "2099-08-26T17:00:00",
+                    "timeZone": "Not/AZone",
+                },
+                "end": {
+                    "dateTime": "2099-08-26T17:30:00",
+                    "timeZone": "Not/AZone",
+                },
+            }],
+            "2099-08-26T13:05:00-04:00",
+            "2099-08-26T13:30:00-04:00",
+        )
+        self.assertIsNone(status)
+
+    def test_slot_missing_an_attendee_is_not_certifiable(self):
+        from src.services.cowork_runner import schedule_interaction_is_certified
+
+        interaction = {
+            "schedule_evidence": {
+                "valid": True,
+                "source": "GetSchedule+structured",
+                "query_backed": True,
+                "availability_verified": True,
+                "attendees": ["a@x.com", "b@x.com"],
+                "duration_minutes": 25,
+                "start_offset_minutes": 5,
+                "slots": [{
+                    "value": "0",
+                    "start": "2099-08-26T13:05:00-04:00",
+                    "end": "2099-08-26T13:30:00-04:00",
+                    "timezone": "Eastern Standard Time",
+                    "availability": {"a@x.com": "free"},
+                }],
+            }
+        }
+        self.assertFalse(
+            schedule_interaction_is_certified(
+                interaction,
+                [
+                    {"name": "A", "email": "a@x.com"},
+                    {"name": "B", "email": "b@x.com"},
+                ],
+                25,
+            )
+        )
+
+    def test_apply_verified_availability_keeps_the_best_of_a_bad_set(self):
+        """Nobody is free, but the ranking helper retains every measured option."""
+        blocked = [{"scheduleId": "a@x.com", "scheduleItems": [{
                 "status": "oof",
                 "start": {"dateTime": "2099-08-01T00:00:00.0000000",
                           "timeZone": "UTC"},
                 "end": {"dateTime": "2099-09-01T00:00:00.0000000",
                         "timeZone": "UTC"},
             }]}]
-            return [{"schedules": blocked} for _ in slots]
+        ranked = structured_delivery._apply_verified_availability(
+            ["a@x.com"],
+            self._candidate_slots(),
+            [{"schedules": blocked}, {"schedules": blocked}],
+        )
 
-        _action, updated = self._calendar_preview(probe)
-        interaction = json.loads(updated["blocked_question"])
-
-        self.assertEqual(updated["state"], "previewing")
-        options = interaction["questions"][0]["options"]
-        self.assertEqual(len(options), 2, "the user must still have a choice")
-        for option in options:
-            self.assertIn("out of office", option["description"])
-        question = interaction["questions"][0]["question"]
-        self.assertIn("No time suits everyone", question)
-        self.assertIn("matters most", question)
+        self.assertEqual(len(ranked), 2, "the user must still have a choice")
+        for slot in ranked:
+            self.assertIn(
+                "out of office",
+                structured_delivery._availability_description(slot),
+            )
 
 
 class TestTeamsDestinationDiscovery(StructuredDeliveryTestBase):
@@ -3877,6 +4413,16 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             headers={"Content-Type": "application/json"},
         )
 
+    @staticmethod
+    def _verified_graph_evidence(start_offset_minutes=5):
+        return {
+            "source": "FindMeetingTimes+structured",
+            "query_backed": True,
+            "availability_verified": True,
+            "start_offset_minutes": start_offset_minutes,
+            "attendee_timezones": {},
+        }
+
     def test_three_structured_modes_bypass_cowork_preview(self):
         from src.handlers import cowork as handler
 
@@ -4065,6 +4611,10 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             stderr="",
             exit_code=0,
             correlation_id=envelope["correlation_id"],
+            expected_channel="calendar",
+            expected_attendees={"rima@microsoft.com"},
+            expected_duration=25,
+            _graph_evidence=self._verified_graph_evidence(),
         )
         waiting = get_latest_task_action(task["id"])
         interaction = json.loads(waiting["blocked_question"])
@@ -4529,6 +5079,7 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
                 "sally.shi@microsoft.com", "ameer@microsoft.com"
             },
             expected_duration=duration,
+            _graph_evidence=self._verified_graph_evidence(),
         )
 
         waiting = get_latest_task_action(task["id"])
@@ -4645,6 +5196,7 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             expected_channel="calendar",
             expected_attendees={"rima@microsoft.com"},
             expected_duration=duration,
+            _graph_evidence=self._verified_graph_evidence(),
         )
         waiting = get_latest_task_action(task["id"])
         interaction = json.loads(waiting["blocked_question"])

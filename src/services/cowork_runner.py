@@ -3490,6 +3490,7 @@ def certify_schedule_interaction(
         "source": "FindMeetingTimes+interaction",
         "attendees": expected,
         "query_backed": True,
+        "availability_verified": True,
         "duration_minutes": duration_minutes,
         "start_offset_minutes": start_offset_minutes,
         "slots": slots,
@@ -3636,24 +3637,12 @@ def schedule_interaction_is_attendee_clarification(interaction) -> bool:
 
 
 # Which live-query sources may back a slot the user is allowed to select.
-# "FindMeetingTimes+interaction" is Cowork, which really does call the Graph
-# scheduler. "copilot-ask" is the structured preview, whose tools are read-only
-# and so reason over a Copilot M365 answer instead. Both are live queries; they
-# differ in strength, and recording which one produced a slot is the point. The
-# check used to be equality against the single string finish_preview itself
-# wrote, which certified nothing.
+# Only recognized, directly measured calendar sources may back a selectable slot.
 CERTIFIED_SCHEDULE_SOURCES = frozenset({
     "FindMeetingTimes+interaction",
     "FindMeetingTimes+structured",
-    "copilot-ask",
 })
-# "copilot-ask" means a read-only preview worker reported availability it had
-# no way to measure: getSchedule and findMeetingTimes are POST, and that worker
-# holds read tools only. Task 2478 offered a time its own evidence called free
-# while the attendee was out of office all day. Evidence from that source is
-# only certified once Riveter has checked it against the calendars itself.
-# "FindMeetingTimes+interaction" comes from the scheduler, which measured it.
-SELF_REPORTED_SCHEDULE_SOURCES = frozenset({"copilot-ask"})
+SELF_REPORTED_SCHEDULE_SOURCES = frozenset()
 
 
 def schedule_interaction_is_certified(
@@ -3672,14 +3661,19 @@ def schedule_interaction_is_certified(
         evidence.get("valid") is not True
         or evidence.get("source") not in CERTIFIED_SCHEDULE_SOURCES
         or evidence.get("query_backed") is not True
-        # Availability measurement is best-effort, not a gate. Riveter checks
-        # the calendars when it can, but the check runs through a subprocess
-        # that takes one to three minutes and frequently returns nothing, and
-        # refusing every unmeasured selection turned a useful check into a
-        # broken feature. The architect set the threshold explicitly: past a
-        # ~20% failure rate, honest labelling beats blocking. So an unverified
-        # preview still books -- it just says plainly that the times were not
-        # checked, and never claims everyone is available.
+        or evidence.get("availability_verified") is not True
+        or any(
+            set(
+                str(email).strip().lower()
+                for email in (slot.get("availability") or {})
+            ) != set(evidence.get("attendees") or [])
+            or any(
+                str(status).strip().lower() == "unknown"
+                for status in (slot.get("availability") or {}).values()
+            )
+            for slot in (evidence.get("slots") or [])
+            if isinstance(slot, dict)
+        )
         or evidence.get("attendees") != _attendee_emails(attendees)
         or not isinstance(duration, int)
         or (

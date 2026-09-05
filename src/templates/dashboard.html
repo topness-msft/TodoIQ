@@ -43,6 +43,34 @@
             <div class="search-bar">
                 <input type="text" id="search-input" class="search-input" placeholder="Filter tasks..." autocomplete="off" oninput="applySearchFilter()">
             </div>
+            <details class="workiq-setup-card" data-testid="workiq-setup-card" open>
+                <summary class="workiq-setup-summary">
+                    <span>Work IQ calendar</span>
+                    <span id="workiq-state" class="workiq-state" data-testid="workiq-state" data-state="loading">Checking</span>
+                </summary>
+                <div class="workiq-setup-body">
+                    <p id="workiq-message" class="workiq-message" aria-live="polite">Checking local setup…</p>
+                    <p id="workiq-version" class="workiq-version"></p>
+                    <code id="workiq-install-command" class="workiq-install-command" hidden></code>
+                    <p>
+                        <a id="workiq-eula-link" href="https://github.com/microsoft/work-iq"
+                           target="_blank" rel="noopener noreferrer">Official Work IQ EULA</a>
+                    </p>
+                    <div id="workiq-eula-controls" class="workiq-eula-controls" hidden>
+                        <label>
+                            <input type="checkbox" id="workiq-eula-ack" data-testid="workiq-eula-ack">
+                            I have read and agree to the official EULA.
+                        </label>
+                        <button type="button" id="workiq-eula-accept" data-testid="workiq-eula-accept"
+                                class="btn btn-primary" disabled>Accept EULA</button>
+                    </div>
+                    <p id="workiq-error" data-testid="workiq-error" class="workiq-error" role="alert" hidden></p>
+                    <div class="workiq-actions">
+                        <button type="button" id="workiq-readiness-btn" data-testid="workiq-readiness"
+                                class="btn">Check readiness</button>
+                    </div>
+                </div>
+            </details>
             <div id="task-list" class="task-list">
                 <!-- Active Section -->
                 <div class="section" id="section-active">

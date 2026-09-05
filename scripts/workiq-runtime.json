@@ -1,0 +1,14 @@
+{
+  "package": "@microsoft/workiq",
+  "packageVersion": "1.0.0",
+  "serverName": "WorkIQ",
+  "serverVersion": "1.0.0",
+  "askTools": ["ask_work_iq", "ask"],
+  "platformEntries": {
+    "win32-x64": "node_modules/@microsoft/workiq/bin/win-x64/workiq.exe",
+    "win32-arm64": "node_modules/@microsoft/workiq/bin/win-arm64/workiq.exe"
+  },
+  "nodeMinimum": "16.0.0",
+  "mcpArguments": ["mcp"],
+  "eulaArguments": ["accept-eula"]
+}

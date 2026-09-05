@@ -510,6 +510,96 @@ html, body {
     box-shadow: 0 0 0 1px var(--accent);
 }
 
+/* ── Work IQ setup ──────────────────────────────────────────────────── */
+.workiq-setup-card {
+    flex: 0 0 auto;
+    margin: 8px 10px 0;
+    border: 1px solid var(--border-primary);
+    border-radius: 7px;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.workiq-setup-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.workiq-state {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--warning-bg);
+    color: var(--warning);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.workiq-state[data-state="ready"] {
+    background: var(--success-bg);
+    color: var(--success);
+}
+
+.workiq-state[data-state="auth_required"],
+.workiq-state[data-state="consent_required"],
+.workiq-state[data-state="eula_required"],
+.workiq-state[data-state="capability_missing"] {
+    background: var(--danger-bg);
+    color: var(--danger);
+}
+
+.workiq-setup-body {
+    display: grid;
+    gap: 7px;
+    padding: 0 10px 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.workiq-version {
+    color: var(--text-tertiary);
+    font-size: 11px;
+}
+
+.workiq-install-command {
+    overflow-wrap: anywhere;
+    padding: 6px;
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+}
+
+.workiq-eula-controls {
+    display: grid;
+    gap: 7px;
+}
+
+.workiq-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.workiq-error {
+    padding: 6px;
+    border-radius: 4px;
+    color: var(--danger);
+    background: var(--danger-bg);
+}
+
+.workiq-setup-card .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.workiq-setup-body [hidden] {
+    display: none;
+}
+
 .search-input::placeholder {
     color: var(--text-tertiary);
 }
