@@ -101,14 +101,16 @@ function init() {
 
 // ── Work IQ setup ──────────────────────────────────────────────────────
 function workIQStateCopy(state) {
+    var readinessDisclosure = ' Check readiness performs a one-time 30-minute read '
+        + 'of your own availability and discards the result.';
     var copy = {
         missing_cli: ['Setup required', 'Install the pinned Work IQ runtime before checking readiness.'],
         version_mismatch: ['Version mismatch', 'The installed Work IQ package does not match Riveter’s supported version.'],
-        mcp_unavailable: ['Not checked', 'The local runtime is installed. Check readiness to verify MCP and authentication.'],
-        auth_required: ['Sign in required', 'Sign in to Work IQ, then check readiness again.'],
-        consent_required: ['Consent required', 'Administrator consent is required before Work IQ can be used.'],
-        eula_required: ['EULA required', 'Read the official EULA and explicitly acknowledge it below.'],
-        capability_missing: ['Capability missing', 'This Work IQ runtime does not advertise the required calendar capabilities.'],
+        mcp_unavailable: ['Not checked', 'The local runtime is installed.' + readinessDisclosure],
+        auth_required: ['Sign in required', 'Sign in to Work IQ, then check readiness again.' + readinessDisclosure],
+        consent_required: ['Consent required', 'Administrator consent is required before Work IQ can be used.' + readinessDisclosure],
+        eula_required: ['EULA required', 'Read the official EULA and explicitly acknowledge it below.' + readinessDisclosure],
+        capability_missing: ['Capability missing', 'This Work IQ runtime does not advertise the required calendar capabilities.' + readinessDisclosure],
         ready: ['Ready', 'Owned Work IQ MCP calendar reads are authenticated and ready.']
     };
     return copy[state] || ['Unavailable', 'Work IQ readiness could not be determined.'];
@@ -127,10 +129,15 @@ async function fetchWorkIQStatus() {
 function renderWorkIQStatus(status) {
     var state = status.state || 'mcp_unavailable';
     var copy = workIQStateCopy(state);
+    var readinessActionable = ![
+        'missing_cli', 'version_mismatch', 'ready'
+    ].includes(state);
     var badge = document.getElementById('workiq-state');
     badge.dataset.state = state;
     badge.textContent = copy[0];
-    document.getElementById('workiq-message').textContent = status.notice || copy[1];
+    document.getElementById('workiq-message').textContent = status.notice
+        ? status.notice + (readinessActionable ? ' ' + copy[1] : '')
+        : copy[1];
     var setup = status.setup || {};
     var version = document.getElementById('workiq-version');
     version.textContent = 'Installed: ' + (setup.installed_version || 'not installed')
@@ -143,15 +150,13 @@ function renderWorkIQStatus(status) {
     document.getElementById('workiq-eula-link').href =
         eula.url || 'https://github.com/microsoft/work-iq';
     var controls = document.getElementById('workiq-eula-controls');
-    var eulaAccepted = eula.status === 'accepted';
-    controls.hidden = !['eula_required', 'mcp_unavailable'].includes(state)
-        || eulaAccepted;
+    controls.hidden = state !== 'eula_required';
     var ack = document.getElementById('workiq-eula-ack');
     var accept = document.getElementById('workiq-eula-accept');
     if (controls.hidden) ack.checked = false;
     accept.disabled = !ack.checked;
     var readiness = document.getElementById('workiq-readiness-btn');
-    readiness.hidden = ['missing_cli', 'version_mismatch', 'ready'].includes(state);
+    readiness.hidden = !readinessActionable;
     readiness.disabled = false;
     document.getElementById('workiq-error').hidden = true;
 }

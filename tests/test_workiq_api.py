@@ -156,6 +156,86 @@ class TestWorkIQAPI(tornado.testing.AsyncHTTPTestCase):
         assert json.loads(response.body)["error"]["code"] == "auth_required"
         runtime.probe.assert_called_once_with()
 
+    def test_readiness_maps_blockers_and_generic_failures(self):
+        setup = Mock()
+        setup.inspect.return_value = {"state": "mcp_unavailable"}
+        for code, expected_status, expected_state in (
+            ("eula_required", 409, "eula_required"),
+            ("auth_required", 409, "auth_required"),
+            ("consent_required", 409, "consent_required"),
+            ("capability_denied", 409, "capability_missing"),
+            ("mcp_unavailable", 503, "mcp_unavailable"),
+            ("tool", 503, "mcp_unavailable"),
+            ("action_http", 503, "mcp_unavailable"),
+            ("invalid_structured_content", 503, "mcp_unavailable"),
+            ("timeout", 503, "mcp_unavailable"),
+            ("protocol", 503, "mcp_unavailable"),
+            ("transport", 503, "mcp_unavailable"),
+        ):
+            runtime = Mock()
+            runtime.probe.return_value = {
+                "ok": False,
+                "error": {"code": code, "message": "Readiness failed."},
+            }
+            runtime.snapshot.return_value = {
+                "state": code if expected_status == 409 else "faulted",
+                "error": {"code": code, "message": "Readiness failed."},
+                "authenticated": False,
+            }
+            with (
+                self.subTest(code=code),
+                patch("src.handlers.workiq_api.get_setup", return_value=setup),
+                patch("src.handlers.workiq_api.get_runtime", return_value=runtime),
+            ):
+                response = self.fetch(
+                    "/api/workiq/readiness",
+                    method="POST",
+                    body="{}",
+                    headers={"Content-Type": "application/json"},
+                )
+                assert response.code == expected_status
+                body = json.loads(response.body)
+                assert body["error"]["code"] == code
+                assert body["status"]["state"] == expected_state
+
+    def test_status_never_reports_ready_without_authenticated_runtime(self):
+        setup = Mock()
+        setup.inspect.return_value = {"state": "mcp_unavailable"}
+        runtime = Mock()
+        runtime.snapshot.return_value = {
+            "state": "ready",
+            "error": None,
+            "authenticated": False,
+        }
+        with (
+            patch("src.handlers.workiq_api.get_setup", return_value=setup),
+            patch("src.handlers.workiq_api.get_runtime", return_value=runtime),
+        ):
+            response = self.fetch("/api/workiq/status")
+
+        assert response.code == 200
+        assert json.loads(response.body)["state"] == "mcp_unavailable"
+
+    def test_readiness_rejects_caller_supplied_account_or_action(self):
+        runtime = Mock()
+        for body in (
+            {"account": "attacker@example.com"},
+            {"actionUrl": "/me/sendMail"},
+            {"schedules": ["attacker@example.com"]},
+        ):
+            with patch(
+                "src.handlers.workiq_api.get_runtime",
+                return_value=runtime,
+            ):
+                response = self.fetch(
+                    "/api/workiq/readiness",
+                    method="POST",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+            assert response.code == 400
+        runtime.probe.assert_not_called()
+
     def test_failed_eula_acceptance_preserves_required_blocker(self):
         setup = Mock()
         setup.inspect.return_value = {

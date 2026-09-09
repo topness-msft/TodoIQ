@@ -1,7 +1,6 @@
 import pytest
 
 from src.services.workiq_policy import (
-    ASK_TOOLS,
     CalendarAction,
     CapabilityError,
     build_calendar_operation,
@@ -10,7 +9,7 @@ from src.services.workiq_policy import (
 from src.services.workiq_setup import load_runtime_manifest
 
 
-def test_policy_allows_only_exact_runtime_discovered_ask_tool():
+def test_policy_allows_only_exact_runtime_discovered_action_tool():
     tools = [
         {"name": "ask_work_iq"},
         {"name": "accept_eula"},
@@ -19,10 +18,10 @@ def test_policy_allows_only_exact_runtime_discovered_ask_tool():
         {"name": "ASK_WORK_IQ"},
     ]
     tools.append({"name": "do_action"})
-    assert discover_read_capabilities(tools) == ("ask_work_iq", "do_action")
+    assert discover_read_capabilities(tools) == ("do_action",)
 
 
-def test_policy_supports_pinned_runtime_ask_name_without_exposing_other_reads():
+def test_policy_does_not_require_or_expose_ask():
     tools = [
         {"name": "retrieve"},
         {"name": "fetch"},
@@ -30,24 +29,19 @@ def test_policy_supports_pinned_runtime_ask_name_without_exposing_other_reads():
         {"name": "accept_eula"},
     ]
     tools.append({"name": "do_action"})
-    assert discover_read_capabilities(tools) == ("ask", "do_action")
-
-
-def test_runtime_manifest_and_policy_use_same_supported_ask_names():
-    assert load_runtime_manifest()["askTools"] == list(ASK_TOOLS)
+    assert discover_read_capabilities(tools) == ("do_action",)
 
 
 @pytest.mark.parametrize(
     "tools",
     [
         [],
-        [{"name": "accept_eula"}, {"name": "do_action"}],
-        [{"name": "ask_work_iq"}, {"name": "ask_work_iq"}, {"name": "do_action"}],
+        [{"name": "do_action"}, {"name": "do_action"}],
         [{"name": 7}],
         [{"name": "ask_work_iq"}],
     ],
 )
-def test_policy_fails_closed_without_one_valid_ask_tool(tools):
+def test_policy_fails_closed_without_one_valid_action_tool(tools):
     with pytest.raises(CapabilityError):
         discover_read_capabilities(tools)
 

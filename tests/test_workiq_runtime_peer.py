@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 from src.services.workiq_policy import CalendarAction, build_calendar_operation
 from src.services.workiq_runtime import (
     ActionHTTPError,
@@ -15,15 +18,25 @@ from src.services.workiq_runtime import (
     EulaRequiredError,
     InvalidStructuredContentError,
     NotReadyError,
-    READINESS_PROMPT,
+    ProtocolError,
     ToolError,
+    TimeoutError as WorkIQTimeoutError,
     TransportError,
+    SetupUnavailableError,
     WorkIQRuntime,
     _Operation,
 )
 
 
 FAKE_PEER = Path(__file__).parent / "fakes" / "fake_workiq_mcp_peer.py"
+
+
+@pytest.fixture(autouse=True)
+def configured_readiness_account(monkeypatch):
+    setup = SimpleNamespace(
+        configured_account=lambda timeout=None: "ada@example.com"
+    )
+    monkeypatch.setattr("src.services.workiq_runtime.get_setup", lambda: setup)
 
 
 def command_for(scenario, trace=None):
@@ -48,7 +61,7 @@ def test_start_initializes_then_notifies_then_lists_tools_before_ready(tmp_path)
     try:
         snapshot = runtime.start()
         assert snapshot["state"] == "ready"
-        assert snapshot["allowed_capabilities"] == ["ask_work_iq", "do_action"]
+        assert snapshot["allowed_capabilities"] == ["do_action"]
         messages = [json.loads(line) for line in trace.read_text().splitlines()]
         assert [message["method"] for message in messages[:3]] == [
             "initialize",
@@ -187,10 +200,10 @@ def test_concurrent_start_calls_share_one_child():
 @pytest.mark.parametrize(
     ("scenario", "code", "state"),
     [
-        ("eula", "eula_required", "eula_required"),
-        ("auth", "auth_required", "auth_required"),
-        ("consent", "consent_required", "consent_required"),
-        ("remote-error", "remote", "faulted"),
+        ("readiness-eula", "eula_required", "eula_required"),
+        ("readiness-auth", "auth_required", "auth_required"),
+        ("readiness-consent", "consent_required", "consent_required"),
+        ("readiness-tool-error", "tool", "faulted"),
     ],
 )
 def test_readiness_classifies_remote_failures(scenario, code, state):
@@ -333,6 +346,17 @@ def test_shutdown_finishes_active_operation_without_unscoped_cancel():
     assert operation.calendar is None
 
 
+def test_shutdown_revokes_authenticated_readiness_state():
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"))
+    runtime.start()
+    assert runtime.probe(timeout=2)["ok"] is True
+    assert runtime.snapshot()["authenticated"] is True
+
+    runtime.shutdown()
+
+    assert runtime.snapshot()["authenticated"] is False
+
+
 def test_termination_ignores_reader_thread_that_never_started():
     runtime = WorkIQRuntime(command=lambda: command_for("ok"))
     process = subprocess.Popen(
@@ -447,31 +471,9 @@ def test_handshake_rejects_incompatible_protocol_or_capabilities(scenario, code)
         runtime.shutdown()
 
 
-def test_readiness_requires_the_exact_ready_sentinel():
-    runtime = WorkIQRuntime(command=lambda: command_for("not-ready"))
-    try:
-        runtime.start()
-        result = runtime.probe(timeout=2)
-        assert result["ok"] is False
-        assert result["error"]["code"] == "invalid_response"
-        assert runtime.snapshot()["authenticated"] is False
-    finally:
-        runtime.shutdown()
-
-
-def test_readiness_accepts_pinned_ga_duplicated_sentinel():
-    runtime = WorkIQRuntime(command=lambda: command_for("duplicated-ready"))
-    try:
-        runtime.start()
-        assert runtime.probe(timeout=2)["ok"] is True
-        assert runtime.snapshot()["authenticated"] is True
-    finally:
-        runtime.shutdown()
-
-
 def test_readiness_state_is_published_before_completion_event(monkeypatch):
     runtime = WorkIQRuntime()
-    runtime._allowed = ("ask_work_iq", "do_action")
+    runtime._allowed = ("do_action",)
     observed = []
     operation = runtime._operations["probe-order"] = _Operation("probe-order", 2)
     runtime._active_operation = operation
@@ -493,8 +495,12 @@ def test_readiness_state_is_published_before_completion_event(monkeypatch):
         runtime,
         "_rpc",
         lambda *args, **kwargs: {
-            "content": [{"type": "text", "text": "ready"}],
+            "content": [],
             "isError": False,
+            "structuredContent": {
+                "statusCode": 200,
+                "data": {"value": [{"scheduleId": "ada@example.com"}]},
+            },
         },
     )
     runtime._run_readiness(operation)
@@ -507,20 +513,241 @@ def test_readiness_state_is_published_before_completion_event(monkeypatch):
     assert runtime._active_request_id is None
 
 
-def test_readiness_uses_only_discovered_ask_and_retains_no_payload(tmp_path):
+def test_failed_reprobe_clears_previous_authenticated_state(monkeypatch):
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"))
+    try:
+        runtime.start()
+        assert runtime.probe(timeout=2)["ok"] is True
+        assert runtime.snapshot()["authenticated"] is True
+        monkeypatch.setattr(
+            runtime,
+            "_rpc",
+            lambda *args, **kwargs: {
+                "content": [],
+                "isError": True,
+            },
+        )
+
+        result = runtime.probe(timeout=2)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "tool"
+        snapshot = runtime.snapshot()
+        assert snapshot["authenticated"] is False
+        assert snapshot["state"] == "faulted"
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_state"),
+    [
+        (EulaRequiredError("eula"), "eula_required"),
+        (AuthRequiredError("auth"), "auth_required"),
+        (ConsentRequiredError("consent"), "consent_required"),
+        (SetupUnavailableError("config"), "faulted"),
+        (ToolError("tool"), "faulted"),
+        (ActionHTTPError("http"), "faulted"),
+        (InvalidStructuredContentError("shape"), "faulted"),
+        (WorkIQTimeoutError("timeout"), "faulted"),
+        (ProtocolError("protocol"), "faulted"),
+        (TransportError("transport"), "faulted"),
+    ],
+)
+def test_every_failed_reprobe_clears_auth_before_completion(
+    monkeypatch, error, expected_state
+):
+    runtime = WorkIQRuntime()
+    runtime._authenticated = True
+    runtime._state = "busy"
+    operation = _Operation("failed-reprobe", 2)
+    runtime._active_operation = operation
+    observed = []
+
+    class EventSpy:
+        def __init__(self):
+            self._set = False
+
+        def is_set(self):
+            return self._set
+
+        def set(self):
+            observed.append(runtime.snapshot())
+            self._set = True
+
+    operation.event = EventSpy()
+    monkeypatch.setattr(
+        runtime,
+        "_run_readiness",
+        lambda _operation: (_ for _ in ()).throw(error),
+    )
+    monkeypatch.setattr(runtime, "_terminate_child", lambda *args, **kwargs: None)
+
+    runtime._run_operation(operation)
+
+    assert observed[0]["authenticated"] is False
+    assert observed[0]["state"] == expected_state
+
+
+def test_readiness_uses_one_deadline_for_account_lookup_and_mcp(monkeypatch):
+    runtime = WorkIQRuntime(
+        clock=lambda: datetime(
+            2026, 9, 9, 15, 27, 47, tzinfo=timezone.utc
+        )
+    )
+    runtime._allowed = ("do_action",)
+    operation = _Operation("deadline", 45)
+    account_timeouts = []
+    rpc_timeouts = []
+    moments = iter([100.0, 100.0, 112.0])
+    monkeypatch.setattr(
+        "src.services.workiq_runtime.time.monotonic",
+        lambda: next(moments),
+    )
+    monkeypatch.setattr(
+        "src.services.workiq_runtime.get_setup",
+        lambda: SimpleNamespace(
+            configured_account=lambda timeout: (
+                account_timeouts.append(timeout) or "ada@example.com"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_rpc",
+        lambda method, params, timeout: (
+            rpc_timeouts.append(timeout)
+            or {
+                "content": [],
+                "isError": False,
+                "structuredContent": {
+                    "statusCode": 200,
+                    "data": {"value": [{"scheduleId": "ada@example.com"}]},
+                },
+            }
+        ),
+    )
+
+    runtime._run_readiness(operation)
+
+    assert account_timeouts == [45.0]
+    assert rpc_timeouts == [33.0]
+
+
+def test_cancelled_reprobe_clears_previous_authentication():
+    runtime = WorkIQRuntime()
+    runtime._authenticated = True
+    runtime._state = "busy"
+    operation = _Operation("cancel-readiness", 45, state="running")
+    runtime._operations[operation.job_id] = operation
+    runtime._active_operation = operation
+    runtime._terminate_child = lambda *args, **kwargs: None
+
+    assert runtime.cancel(operation.job_id) is True
+
+    snapshot = runtime.snapshot()
+    assert snapshot["authenticated"] is False
+    assert snapshot["state"] == "faulted"
+
+
+def test_readiness_uses_exact_self_schedule_action_and_retains_no_payload(tmp_path):
     trace = tmp_path / "trace.jsonl"
-    runtime = WorkIQRuntime(command=lambda: command_for("ok", trace))
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok", trace),
+        clock=lambda: datetime(
+            2026, 9, 9, 15, 27, 47, tzinfo=timezone.utc
+        ),
+    )
     try:
         runtime.start()
         assert runtime.probe(timeout=2)["ok"] is True
         messages = [json.loads(line) for line in trace.read_text().splitlines()]
-        call = next(message for message in messages if message["method"] == "tools/call")
+        calls = [
+            message for message in messages
+            if message["method"] == "tools/call"
+        ]
+        assert len(calls) == 1
+        call = calls[0]
         assert call["params"] == {
-            "name": "ask_work_iq",
-            "arguments": {"question": READINESS_PROMPT},
+            "name": "do_action",
+            "arguments": {
+                "actionUrl": "/me/calendar/getSchedule",
+                "jsonBody": {
+                    "schedules": ["ada@example.com"],
+                    "startTime": {
+                        "dateTime": "2026-09-09T15:27:00",
+                        "timeZone": "UTC",
+                    },
+                    "endTime": {
+                        "dateTime": "2026-09-09T15:57:00",
+                        "timeZone": "UTC",
+                    },
+                },
+            },
         }
         snapshot = json.dumps(runtime.snapshot())
-        assert '"ready"' not in snapshot.replace('"state": "ready"', "")
+        assert "ada@example.com" not in snapshot
+        assert '"value"' not in snapshot
+    finally:
+        runtime.shutdown()
+
+
+def test_readiness_discards_private_calendar_response_and_account():
+    runtime = WorkIQRuntime(command=lambda: command_for("readiness-private"))
+    try:
+        runtime.start()
+        assert runtime.probe(timeout=2)["ok"] is True
+        serialized = json.dumps(runtime.snapshot())
+        assert "ada@example.com" not in serialized
+        assert "private@example.com" not in serialized
+        assert "Private calendar subject" not in serialized
+        assert '"value"' not in serialized
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "readiness-empty",
+        "readiness-error-row",
+        "readiness-empty-error",
+        "readiness-unrelated",
+        "readiness-multiple",
+    ],
+)
+def test_readiness_requires_one_matching_error_free_schedule(scenario):
+    runtime = WorkIQRuntime(command=lambda: command_for(scenario))
+    try:
+        runtime.start()
+        result = runtime.probe(timeout=2)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "invalid_structured_content"
+        assert runtime.snapshot()["authenticated"] is False
+    finally:
+        runtime.shutdown()
+
+
+def test_cancelling_active_calendar_read_revokes_authentication():
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("hang-action"),
+        terminate_grace=0.1,
+    )
+    try:
+        runtime.start()
+        assert runtime.probe(timeout=2)["ok"] is True
+        operation = build_calendar_operation(
+            CalendarAction.GET_SCHEDULE, SCHEDULE_BODY
+        )
+        job_id = runtime.submit("calendar", timeout=10, calendar=operation)
+        assert wait_until(lambda: runtime.snapshot()["active_job_id"] == job_id)
+
+        assert runtime.cancel(job_id) is True
+
+        snapshot = runtime.snapshot()
+        assert snapshot["authenticated"] is False
+        assert snapshot["state"] == "faulted"
     finally:
         runtime.shutdown()
 
@@ -614,8 +841,7 @@ def test_transient_missing_capability_retries_tools_list_once(tmp_path):
         snapshot = runtime.start()
 
         assert snapshot["state"] == "ready"
-        assert snapshot["allowed_capabilities"][0] in {"ask", "ask_work_iq"}
-        assert snapshot["allowed_capabilities"][1] == "do_action"
+        assert snapshot["allowed_capabilities"] == ["do_action"]
         methods = [
             json.loads(line)["method"] for line in trace.read_text().splitlines()
         ]
@@ -813,6 +1039,7 @@ def test_calendar_actions_parse_typed_structured_content(
             message for message in messages
             if message.get("method") == "tools/call"
             and message["params"]["name"] == "do_action"
+            and message["params"]["arguments"]["jsonBody"] == body
         ]
         assert len(action_call) == 1
         assert action_call[0]["params"] == {

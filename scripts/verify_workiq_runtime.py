@@ -65,7 +65,7 @@ def verify(setup, runtime, calendar_reader, identity: str) -> dict:
     start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     end = start + timedelta(minutes=30)
     try:
-        calendar_reader(
+        result = calendar_reader(
             {
                 "schedules": [identity],
                 "startTime": {
@@ -82,6 +82,22 @@ def verify(setup, runtime, calendar_reader, identity: str) -> dict:
     except WorkIQError as exc:
         evidence["steps"]["calendar_read"] = "failed"
         evidence["error_code"] = exc.code
+        evidence["duration_seconds"] = round(time.monotonic() - started_at, 3)
+        return evidence
+    schedules = result.get("value") if isinstance(result, dict) else None
+    if (
+        not isinstance(schedules, list)
+        or len(schedules) != 1
+        or not isinstance(schedules[0], dict)
+        or str(schedules[0].get("scheduleId") or "").strip().lower()
+        != identity.lower()
+        or (
+            "error" in schedules[0]
+            and schedules[0]["error"] is not None
+        )
+    ):
+        evidence["steps"]["calendar_read"] = "failed"
+        evidence["error_code"] = "invalid_structured_content"
         evidence["duration_seconds"] = round(time.monotonic() - started_at, 3)
         return evidence
     evidence["steps"]["calendar_read"] = "passed"

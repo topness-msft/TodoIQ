@@ -17,7 +17,7 @@ def test_real_runtime_proof_emits_metadata_only_and_cannot_accept_eula():
         "state": "ready",
         "protocol_version": "2025-06-18",
         "server": {"name": "WorkIQ", "version": "1.0.0"},
-        "allowed_capabilities": ["ask_work_iq", "do_action"],
+        "allowed_capabilities": ["do_action"],
     }
     runtime.probe.return_value = {"ok": True}
     runtime.snapshot.return_value = {"authenticated": True}
@@ -31,3 +31,52 @@ def test_real_runtime_proof_emits_metadata_only_and_cannot_accept_eula():
     assert "scheduleItems" not in serialized
     assert "secret" not in serialized
     assert not hasattr(setup, "accept_eula")
+
+
+def test_real_runtime_proof_rejects_invalid_schedule_result():
+    identity = "private-person@example.com"
+    setup = Mock(spec=["inspect"])
+    setup.inspect.return_value = {
+        "state": "mcp_unavailable",
+        "installed_version": "1.0.0",
+    }
+    runtime = Mock()
+    runtime.start.return_value = {
+        "state": "ready",
+        "protocol_version": "2025-06-18",
+        "server": {"name": "WorkIQ", "version": "1.0.0"},
+        "allowed_capabilities": ["do_action"],
+    }
+    runtime.probe.return_value = {"ok": True}
+    runtime.snapshot.return_value = {"authenticated": True}
+
+    for result in (
+        {"value": []},
+        {"value": [{"scheduleId": "other@example.com"}]},
+        {
+            "value": [{
+                "scheduleId": identity,
+                "error": {"code": "Synthetic"},
+            }]
+        },
+        {
+            "value": [{
+                "scheduleId": identity,
+                "error": {},
+            }]
+        },
+        {
+            "value": [
+                {"scheduleId": identity},
+                {"scheduleId": identity},
+            ]
+        },
+    ):
+        evidence = verify(
+            setup,
+            runtime,
+            Mock(return_value=result),
+            identity,
+        )
+        assert evidence["steps"]["calendar_read"] == "failed"
+        assert evidence["error_code"] == "invalid_structured_content"

@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
-ASK_TOOLS = ("ask_work_iq", "ask")
 ACTION_TOOL = "do_action"
 _DURATION_RE = re.compile(r"^PT[1-9]\d*M$")
 _MINT = object()
@@ -41,15 +40,9 @@ def discover_read_capabilities(tools: object) -> tuple[str, ...]:
         names.append(tool["name"])
     if len(names) != len(set(names)):
         raise CapabilityError("Work IQ returned duplicate capabilities.")
-    ask = next((name for name in ASK_TOOLS if name in names), None)
-    if ask is None or ACTION_TOOL not in names:
+    if ACTION_TOOL not in names:
         raise CapabilityError("Work IQ does not advertise the required read capabilities.")
-    return ask, ACTION_TOOL
-
-
-def require_allowed_tool(tool_name: str, allowed: tuple[str, ...]) -> None:
-    if tool_name not in ASK_TOOLS or tool_name not in allowed:
-        raise CapabilityError(f"Riveter denied Work IQ tool {tool_name!r}.")
+    return (ACTION_TOOL,)
 
 
 def _datetime(value: object) -> bool:

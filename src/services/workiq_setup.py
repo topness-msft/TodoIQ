@@ -22,6 +22,14 @@ _SECRET_RE = re.compile(
 )
 
 
+class WorkIQAccountError(RuntimeError):
+    """The pinned runtime's account configuration could not be read safely."""
+
+
+class WorkIQAccountRequiredError(WorkIQAccountError):
+    """The pinned runtime has no configured default account."""
+
+
 def redact(text: object, limit: int = 32 * 1024) -> str:
     value = str(text or "")
     value = _SECRET_RE.sub(lambda match: match.group(1) + "[REDACTED]", value)
@@ -35,7 +43,6 @@ def load_runtime_manifest(path: Path = MANIFEST_PATH) -> dict:
         "packageVersion",
         "serverName",
         "serverVersion",
-        "askTools",
         "platformEntries",
         "mcpArguments",
         "eulaArguments",
@@ -117,6 +124,61 @@ class WorkIQSetup:
             str(self.entry_point.resolve()),
             *self.manifest["mcpArguments"],
         ]
+
+    def configured_account(self, timeout: float = 30) -> str:
+        status = self.inspect()
+        if status["state"] != "mcp_unavailable":
+            raise WorkIQAccountError(
+                "The pinned Work IQ runtime is not available."
+            )
+        argv = [str(self.entry_point.resolve()), "config", "show"]
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": max(0.1, min(30, timeout)),
+            "shell": False,
+            "cwd": str(PROJECT_ROOT),
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            result = self.executor(argv, **kwargs)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkIQAccountError(
+                "Work IQ account configuration is unavailable."
+            ) from exc
+        if result.returncode != 0:
+            raise WorkIQAccountError(
+                "Work IQ account configuration is unavailable."
+            )
+        accounts = []
+        malformed = False
+        for raw_line in str(result.stdout or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "=" not in line:
+                malformed = True
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "defaultAccount":
+                accounts.append(value.strip())
+        if malformed or len(accounts) > 1:
+            raise WorkIQAccountError(
+                "Work IQ account configuration is invalid."
+            )
+        if not accounts or not accounts[0]:
+            raise WorkIQAccountRequiredError(
+                "Work IQ sign-in is required."
+            )
+        if (
+            "=" in accounts[0]
+            or re.fullmatch(r"[^\s@=]+@[^\s@=]+", accounts[0]) is None
+        ):
+            raise WorkIQAccountError(
+                "Work IQ account configuration is invalid."
+            )
+        return accounts[0]
 
     def accept_eula(self) -> dict:
         if not self._eula_lock.acquire(blocking=False):

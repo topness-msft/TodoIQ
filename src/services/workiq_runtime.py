@@ -14,6 +14,7 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .workiq_policy import (
@@ -21,21 +22,20 @@ from .workiq_policy import (
     CalendarAction,
     CalendarOperation,
     CapabilityError,
+    build_calendar_operation,
     discover_read_capabilities,
-    require_allowed_tool,
     require_calendar_operation,
 )
-from .workiq_setup import get_setup, redact
+from .workiq_setup import (
+    WorkIQAccountError,
+    WorkIQAccountRequiredError,
+    get_setup,
+    redact,
+)
 
 
 logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = "2025-06-18"
-READINESS_PROMPT = (
-    "Confirm only that Work IQ can answer this signed-in session. "
-    "Do not access or summarize mail, files, chats, meetings, people, or other personal content. "
-    "Reply with the single word ready."
-)
-READINESS_SENTINELS = frozenset({"ready", "readyready"})
 
 
 class WorkIQError(Exception):
@@ -63,6 +63,10 @@ class ProtocolError(WorkIQError):
 
 class RemoteError(WorkIQError):
     code = "remote"
+
+
+class SetupUnavailableError(WorkIQError):
+    code = "mcp_unavailable"
 
 
 class InvalidResponseError(WorkIQError):
@@ -155,6 +159,7 @@ class WorkIQRuntime:
         startup_timeout: float = 240,
         terminate_grace: float = 5,
         required_server_version: str = "1.0.0",
+        clock: Callable[[], datetime] | None = None,
     ):
         self._command = command or (lambda: get_setup().runtime_command())
         self._process_factory = process_factory
@@ -165,6 +170,7 @@ class WorkIQRuntime:
         self._startup_timeout = startup_timeout
         self._terminate_grace = terminate_grace
         self._required_server_version = required_server_version
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
@@ -366,9 +372,32 @@ class WorkIQRuntime:
                 return False
             operation.cancel_requested.set()
             if operation.state == "queued":
-                self._finish(operation, "cancelled", CancelledError("Work IQ read was cancelled."))
+                self._finish(
+                    operation,
+                    "cancelled",
+                    CancelledError("Work IQ read was cancelled."),
+                    **(
+                        {
+                            "runtime_state": "faulted",
+                            "runtime_error": CancelledError(
+                                "Work IQ readiness was cancelled."
+                            ),
+                            "authenticated": False,
+                        }
+                        if operation.plan == "readiness"
+                        else {}
+                    ),
+                )
                 return True
-            self._finish(operation, "cancelled", CancelledError("Work IQ read was cancelled."))
+            cancellation = CancelledError("Work IQ read was cancelled.")
+            self._finish(
+                operation,
+                "cancelled",
+                cancellation,
+                runtime_state="faulted",
+                runtime_error=cancellation,
+                authenticated=False,
+            )
         self._terminate_child()
         return True
 
@@ -401,6 +430,7 @@ class WorkIQRuntime:
             self._stopping.set()
             self._state = "stopping"
             self._ready_event.set()
+            self._authenticated = False
             process = self._process
             commands = self._commands
             incoming = self._incoming
@@ -708,16 +738,24 @@ class WorkIQRuntime:
             )
             return False
         except (ToolError, ActionHTTPError, InvalidStructuredContentError) as exc:
-            # The MCP exchange completed and the child remains authenticated.
-            # A tool-level or response-shape failure rejects this operation but
-            # must not force an unrelated readiness round-trip before the next.
-            self._finish(
-                operation,
-                "failed",
-                exc,
-                runtime_state="ready",
-                runtime_error=None,
-            )
+            if operation.plan == "readiness":
+                self._finish(
+                    operation,
+                    "failed",
+                    exc,
+                    runtime_state="faulted",
+                    runtime_error=exc,
+                    authenticated=False,
+                )
+            else:
+                # The MCP exchange completed and the child remains authenticated.
+                self._finish(
+                    operation,
+                    "failed",
+                    exc,
+                    runtime_state="ready",
+                    runtime_error=None,
+                )
             return False
         except NotReadyError as exc:
             with self._lock:
@@ -740,6 +778,7 @@ class WorkIQRuntime:
                 exc,
                 runtime_state="faulted",
                 runtime_error=exc,
+                authenticated=False if operation.plan == "readiness" else None,
             )
             return False
         except Exception as exc:
@@ -759,18 +798,68 @@ class WorkIQRuntime:
             return True
 
     def _run_readiness(self, operation: _Operation) -> None:
-        ask_tool = self._allowed[0] if self._allowed else ""
-        require_allowed_tool(ask_tool, self._allowed)
+        if ACTION_TOOL not in self._allowed:
+            raise CapabilityDeniedError(
+                "Work IQ does not advertise calendar actions."
+            )
+        deadline = time.monotonic() + operation.timeout
+        try:
+            account = get_setup().configured_account(
+                timeout=max(0.1, deadline - time.monotonic())
+            )
+        except WorkIQAccountRequiredError as exc:
+            raise AuthRequiredError("Work IQ authentication is required.") from exc
+        except WorkIQAccountError as exc:
+            raise SetupUnavailableError(
+                "Work IQ account configuration is unavailable."
+            ) from exc
+        start = self._clock().astimezone(timezone.utc).replace(
+            second=0,
+            microsecond=0,
+        )
+        calendar = build_calendar_operation(
+            CalendarAction.GET_SCHEDULE,
+            {
+                "schedules": [account],
+                "startTime": {
+                    "dateTime": start.replace(tzinfo=None).isoformat(),
+                    "timeZone": "UTC",
+                },
+                "endTime": {
+                    "dateTime": (
+                        start + timedelta(minutes=30)
+                    ).replace(tzinfo=None).isoformat(),
+                    "timeZone": "UTC",
+                },
+            },
+        )
         result = self._rpc(
             "tools/call",
-            {"name": ask_tool, "arguments": {"question": READINESS_PROMPT}},
-            operation.timeout,
+            {
+                "name": ACTION_TOOL,
+                "arguments": {
+                    "actionUrl": calendar.path,
+                    "jsonBody": calendar.body,
+                },
+            },
+            max(0.1, deadline - time.monotonic()),
         )
-        is_error, meta, texts = self._validate_tool_result(result)
-        if is_error:
-            raise self._classify_remote_error(meta, texts)
-        if len(texts) != 1 or texts[0].strip().lower() not in READINESS_SENTINELS:
-            raise InvalidResponseError("Work IQ returned an invalid readiness response.")
+        data = self._validate_calendar_result(calendar, result)
+        schedules = data.get("value")
+        if (
+            not isinstance(schedules, list)
+            or len(schedules) != 1
+            or not isinstance(schedules[0], Mapping)
+            or str(schedules[0].get("scheduleId") or "").strip().lower()
+            != account.lower()
+            or (
+                "error" in schedules[0]
+                and schedules[0]["error"] is not None
+            )
+        ):
+            raise InvalidStructuredContentError(
+                "Work IQ readiness did not return the configured account."
+            )
         self._finish(
             operation,
             "succeeded",
@@ -1094,6 +1183,7 @@ class WorkIQRuntime:
             "transport": TransportError,
             "protocol": ProtocolError,
             "remote": RemoteError,
+            "mcp_unavailable": SetupUnavailableError,
             "invalid_response": InvalidResponseError,
             "capability_denied": CapabilityDeniedError,
             "auth_required": AuthRequiredError,

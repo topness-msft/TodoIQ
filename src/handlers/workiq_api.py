@@ -115,11 +115,14 @@ class WorkIQReadinessHandler(_WorkIQHandler):
         if not self._require_mutation_request():
             return
         body = self._json_body()
-        if not isinstance(body, dict):
+        if not isinstance(body, dict) or body:
             self.set_status(400)
             self.write(json.dumps({
                 "ok": False,
-                "error": {"code": "invalid_request", "message": "A JSON object is required."},
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Readiness accepts only an empty JSON object.",
+                },
             }))
             return
         setup = get_setup().inspect()

@@ -137,7 +137,7 @@ class E2EWorkIQRuntime:
             ),
             "protocol_version": "2025-06-18" if ready else None,
             "server": {{"name": "WorkIQ", "version": "1.0.0"}} if ready else None,
-            "allowed_capabilities": ["ask_work_iq", "do_action"] if ready else [],
+            "allowed_capabilities": ["do_action"] if ready else [],
             "authenticated": ready,
             "active_job_id": None,
             "queue_depth": 0,

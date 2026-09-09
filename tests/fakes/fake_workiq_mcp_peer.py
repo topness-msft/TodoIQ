@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 
 
 def emit(payload):
@@ -113,11 +114,80 @@ def main():
                 emit({"jsonrpc": "2.0", "id": 9001, "method": "ping", "params": {}})
             tool_name = (request.get("params") or {}).get("name")
             if tool_name == "do_action":
-                if args.scenario == "hang-action":
+                readiness_error = {
+                    "readiness-eula": (
+                        "eula_required",
+                        "Accept the End User License Agreement",
+                    ),
+                    "readiness-auth": (
+                        "auth_required",
+                        "Sign in is required",
+                    ),
+                    "readiness-consent": (
+                        "consent_required",
+                        "Administrator consent is required",
+                    ),
+                }.get(args.scenario)
+                if readiness_error and call_count == 1:
+                    code, message = readiness_error
+                    emit({
+                        "jsonrpc": "2.0",
+                        "id": response_id,
+                        "result": {
+                            "content": [{"type": "text", "text": message}],
+                            "isError": True,
+                            "_meta": {"code": code},
+                        },
+                    })
+                    continue
+                if args.scenario == "readiness-tool-error" and call_count == 1:
+                    emit({
+                        "jsonrpc": "2.0",
+                        "id": response_id,
+                        "result": {"content": [], "isError": True},
+                    })
+                    continue
+                if args.scenario == "oversized" and call_count == 1:
+                    emit({
+                        "jsonrpc": "2.0",
+                        "id": response_id,
+                        "result": {
+                            "content": [],
+                            "isError": False,
+                            "structuredContent": {
+                                "statusCode": 200,
+                                "data": {
+                                    "value": [],
+                                    "padding": "x" * (300 * 1024),
+                                },
+                            },
+                        },
+                    })
+                    continue
+                if args.scenario == "hang-action" and call_count > 1:
                     continue
                 arguments = (request.get("params") or {}).get("arguments") or {}
                 path = arguments.get("actionUrl")
-                if args.scenario in {"action-eula", "action-auth", "action-consent"}:
+                requested = arguments.get("jsonBody") or {}
+                is_readiness_window = False
+                if path == "/me/calendar/getSchedule":
+                    try:
+                        start = datetime.fromisoformat(
+                            requested["startTime"]["dateTime"]
+                        )
+                        end = datetime.fromisoformat(
+                            requested["endTime"]["dateTime"]
+                        )
+                        is_readiness_window = (
+                            (end - start).total_seconds() == 30 * 60
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if (
+                    call_count > 1
+                    and args.scenario
+                    in {"action-eula", "action-auth", "action-consent"}
+                ):
                     messages = {
                         "action-eula": (
                             "eula_required",
@@ -140,22 +210,22 @@ def main():
                         },
                     })
                     continue
-                if args.scenario == "action-tool-error":
+                if args.scenario == "action-tool-error" and call_count > 1:
                     emit({
                         "jsonrpc": "2.0",
                         "id": response_id,
                         "result": {"content": [], "isError": True},
                     })
                     continue
-                if args.scenario == "action-no-structured":
+                if args.scenario == "action-no-structured" and call_count > 1:
                     structured = None
-                elif args.scenario == "action-status-string":
+                elif args.scenario == "action-status-string" and call_count > 1:
                     structured = {"statusCode": "200", "data": {}}
-                elif args.scenario == "action-http":
+                elif args.scenario == "action-http" and call_count > 1:
                     structured = {"statusCode": 503, "data": {}}
-                elif args.scenario == "action-no-data":
+                elif args.scenario == "action-no-data" and call_count > 1:
                     structured = {"statusCode": 200, "data": None}
-                elif args.scenario == "action-wrong-list":
+                elif args.scenario == "action-wrong-list" and call_count > 1:
                     field = (
                         "meetingTimeSuggestions"
                         if path == "/me/findMeetingTimes"
@@ -168,6 +238,50 @@ def main():
                         if path == "/me/findMeetingTimes"
                         else {"value": []}
                     )
+                    if path == "/me/calendar/getSchedule" and is_readiness_window:
+                        schedules = requested.get("schedules") or []
+                        schedule_id = schedules[0] if schedules else ""
+                        data = {"value": [{"scheduleId": schedule_id}]}
+                        if args.scenario == "readiness-empty":
+                            data = {"value": []}
+                        elif args.scenario == "readiness-error-row":
+                            data = {
+                                "value": [{
+                                    "scheduleId": schedule_id,
+                                    "error": {
+                                        "code": "MailboxNotEnabledForRESTAPI"
+                                    },
+                                }]
+                            }
+                        elif args.scenario == "readiness-empty-error":
+                            data = {
+                                "value": [{
+                                    "scheduleId": schedule_id,
+                                    "error": {},
+                                }]
+                            }
+                        elif args.scenario == "readiness-unrelated":
+                            data = {
+                                "value": [{
+                                    "scheduleId": "other@example.com"
+                                }]
+                            }
+                        elif args.scenario == "readiness-multiple":
+                            data = {
+                                "value": [
+                                    {"scheduleId": schedule_id},
+                                    {"scheduleId": schedule_id},
+                                ]
+                            }
+                    if args.scenario == "readiness-private" and call_count == 1:
+                        data = {
+                            "value": [{
+                                "scheduleId": "ada@example.com",
+                                "scheduleItems": [{
+                                    "subject": "Private calendar subject",
+                                }],
+                            }]
+                        }
                     structured = {"statusCode": 200, "data": data}
                 result = {"content": [], "isError": False}
                 if structured is not None:

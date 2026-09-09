@@ -25,7 +25,7 @@ def status_for(state):
         "runtime": {
             "state": "ready" if state == "ready" else state,
             "allowed_capabilities": (
-                ["ask_work_iq", "do_action"] if state == "ready" else []
+                ["do_action"] if state == "ready" else []
             ),
             "authenticated": state == "ready",
         },
@@ -73,14 +73,28 @@ def mock_status(page, state):
 
 
 class TestWorkIQSetupVisuals:
+    def test_status_failure_keeps_readiness_hidden_and_disabled(
+        self, page: Page, base_url
+    ):
+        page.route("**/api/workiq/status", lambda route: route.abort())
+
+        page.goto(base_url + "/")
+
+        readiness = page.get_by_test_id("workiq-readiness")
+        expect(readiness).to_be_hidden()
+        expect(readiness).to_be_disabled()
+
     def test_unchecked_runtime_offers_explicit_eula_and_readiness_actions(
         self, page: Page, base_url
     ):
         mock_status(page, "mcp_unavailable")
         page.goto(base_url + "/")
-        expect(page.get_by_test_id("workiq-eula-ack")).to_be_visible()
-        expect(page.get_by_test_id("workiq-eula-accept")).to_be_disabled()
+        expect(page.get_by_test_id("workiq-eula-ack")).to_be_hidden()
+        expect(page.get_by_test_id("workiq-eula-accept")).to_be_hidden()
         expect(page.get_by_test_id("workiq-readiness")).to_be_visible()
+        expect(page.locator("#workiq-message")).to_contain_text(
+            "one-time 30-minute read"
+        )
 
     def test_readiness_blocker_immediately_reveals_eula_controls(
         self, page: Page, base_url
@@ -93,9 +107,15 @@ class TestWorkIQSetupVisuals:
                 status=200, content_type="application/json", body=json.dumps(initial)
             ),
         )
-        page.route(
-            "**/api/workiq/readiness",
-            lambda route: route.fulfill(
+        requests = []
+
+        def readiness(route, request):
+            requests.append({
+                "method": request.method,
+                "content_type": request.headers.get("content-type"),
+                "body": request.post_data,
+            })
+            route.fulfill(
                 status=409,
                 content_type="application/json",
                 body=json.dumps({
@@ -106,14 +126,39 @@ class TestWorkIQSetupVisuals:
                     },
                     "status": blocked,
                 }),
-            ),
-        )
+            )
+
+        page.route("**/api/workiq/readiness", readiness)
         page.goto(base_url + "/")
         page.get_by_test_id("workiq-readiness").click()
         expect(page.get_by_test_id("workiq-state")).to_have_attribute(
             "data-state", "eula_required"
         )
         expect(page.get_by_test_id("workiq-eula-ack")).to_be_visible()
+        assert requests == [{
+            "method": "POST",
+            "content_type": "application/json",
+            "body": "{}",
+        }]
+
+    def test_live_eula_blocker_overrides_cached_accepted_hint(
+        self, page: Page, base_url
+    ):
+        blocked = status_for("eula_required")
+        blocked["eula"]["status"] = "accepted"
+        page.route(
+            "**/api/workiq/status",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(blocked),
+            ),
+        )
+
+        page.goto(base_url + "/")
+
+        expect(page.get_by_test_id("workiq-eula-ack")).to_be_visible()
+        expect(page.get_by_test_id("workiq-eula-accept")).to_be_disabled()
 
     def test_all_setup_states_desktop(self, page: Page, base_url):
         page.set_viewport_size({"width": 1440, "height": 960})
@@ -130,27 +175,27 @@ class TestWorkIQSetupVisuals:
             ),
             "mcp_unavailable": (
                 "Not checked",
-                "The local runtime is installed. Check readiness to verify MCP and authentication.",
-                False, True, True,
+                "The local runtime is installed. Check readiness performs a one-time 30-minute read of your own availability and discards the result.",
+                False, False, True,
             ),
             "eula_required": (
                 "EULA required",
-                "Read the official EULA and explicitly acknowledge it below.",
+                "Read the official EULA and explicitly acknowledge it below. Check readiness performs a one-time 30-minute read of your own availability and discards the result.",
                 False, True, True,
             ),
             "auth_required": (
                 "Sign in required",
-                "Sign in to Work IQ, then check readiness again.",
+                "Sign in to Work IQ, then check readiness again. Check readiness performs a one-time 30-minute read of your own availability and discards the result.",
                 False, False, True,
             ),
             "consent_required": (
                 "Consent required",
-                "Administrator consent is required before Work IQ can be used.",
+                "Administrator consent is required before Work IQ can be used. Check readiness performs a one-time 30-minute read of your own availability and discards the result.",
                 False, False, True,
             ),
             "capability_missing": (
                 "Capability missing",
-                "This Work IQ runtime does not advertise the required calendar capabilities.",
+                "This Work IQ runtime does not advertise the required calendar capabilities. Check readiness performs a one-time 30-minute read of your own availability and discards the result.",
                 False, False, True,
             ),
             "ready": (
@@ -265,8 +310,11 @@ class TestWorkIQSetupVisuals:
             "data-state", "mcp_unavailable"
         )
         expect(page.get_by_test_id("workiq-eula-ack")).to_be_hidden()
-        expect(page.locator("#workiq-message")).to_have_text(
+        expect(page.locator("#workiq-message")).to_contain_text(
             "Work IQ EULA accepted. Select Check readiness to verify sign-in."
+        )
+        expect(page.locator("#workiq-message")).to_contain_text(
+            "one-time 30-minute read of your own availability"
         )
         expect(page.get_by_test_id("workiq-readiness")).to_be_visible()
         expect(page.get_by_test_id("workiq-error")).to_be_hidden()
