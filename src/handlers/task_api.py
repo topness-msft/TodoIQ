@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import tornado.web
 
 from ..models import (
+    DELIVERY_CONFLICT_MESSAGE,
     create_task, get_task, list_tasks, update_task, update_task_for_action_type,
     delete_task,
     get_contexts, get_stats, get_last_sync,
@@ -154,7 +155,15 @@ class TaskDetailHandler(tornado.web.RequestHandler):
         broadcast({"type": "task_updated", "task": updated})
 
     def delete(self, task_id):
-        if delete_task(int(task_id)):
+        try:
+            deleted = delete_task(int(task_id))
+        except ValueError as exc:
+            self.set_status(
+                409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400
+            )
+            self.write(json.dumps({"error": str(exc)}))
+            return
+        if deleted:
             self.write(json.dumps({"ok": True}))
             broadcast({"type": "task_deleted", "task_id": int(task_id)})
         else:

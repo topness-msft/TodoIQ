@@ -19,6 +19,8 @@ from typing import Callable
 
 from .workiq_policy import (
     ACTION_TOOL,
+    FETCH_TOOL,
+    SENT_ITEMS_URL,
     CalendarAction,
     CalendarOperation,
     CapabilityError,
@@ -258,7 +260,7 @@ class WorkIQRuntime:
         *,
         calendar: CalendarOperation | None = None,
     ) -> str:
-        if plan not in {"readiness", "calendar"}:
+        if plan not in {"readiness", "calendar", "sent_items"}:
             raise CapabilityError("Riveter has no approved plan for this read.")
         if plan == "calendar":
             calendar = require_calendar_operation(calendar)
@@ -364,6 +366,47 @@ class WorkIQRuntime:
                     stored.calendar = None
                     if stored.result:
                         stored.result.pop("data", None)
+
+    def read_sent_items(self, *, timeout: float) -> dict:
+        """Read one sealed Sent Items page after explicit authenticated readiness.
+
+        The typed MCP result is
+        ``structuredContent.results[0] = {statusCode: 200,
+        data: {value: [...], optional @odata.nextLink}}``. The raw page is
+        returned only to the synchronous caller and is removed from operation
+        history before this method returns or raises.
+        """
+        with self._lock:
+            if (
+                not self._authenticated
+                or self._state not in {"ready", "busy"}
+            ):
+                raise NotReadyError("Work IQ authenticated readiness is required.")
+            if FETCH_TOOL not in self._allowed:
+                raise CapabilityDeniedError(
+                    "Work IQ does not advertise the required email read capability."
+                )
+        job_id = self.submit("sent_items", timeout=timeout)
+        result = self.wait(job_id, timeout + self._terminate_grace + 1)
+        try:
+            if result.get("state") not in {
+                "succeeded", "failed", "timed_out", "cancelled"
+            }:
+                self.cancel(job_id)
+                raise TimeoutError("Work IQ Sent Items read timed out.")
+            if not result.get("ok"):
+                self._raise_public_error(result.get("error"))
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise InvalidStructuredContentError(
+                    "Work IQ Sent Items read returned invalid structured content."
+                )
+            return dict(data)
+        finally:
+            with self._lock:
+                stored = self._operations.get(job_id)
+                if stored and stored.result:
+                    stored.result.pop("data", None)
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:
@@ -702,8 +745,10 @@ class WorkIQRuntime:
         try:
             if operation.plan == "readiness":
                 self._run_readiness(operation)
-            else:
+            elif operation.plan == "calendar":
                 self._run_calendar(operation)
+            else:
+                self._run_sent_items(operation)
             return False
         except TimeoutError as exc:
             self._finish(
@@ -884,6 +929,30 @@ class WorkIQRuntime:
             operation.timeout,
         )
         data = self._validate_calendar_result(calendar, result)
+        self._finish(
+            operation,
+            "succeeded",
+            result_data=data,
+            runtime_state="ready",
+        )
+
+    def _run_sent_items(self, operation: _Operation) -> None:
+        with self._lock:
+            if not self._authenticated:
+                raise NotReadyError("Work IQ authenticated readiness is required.")
+            if FETCH_TOOL not in self._allowed:
+                raise CapabilityDeniedError(
+                    "Work IQ does not advertise the required email read capability."
+                )
+        result = self._rpc(
+            "tools/call",
+            {
+                "name": FETCH_TOOL,
+                "arguments": {"entityUrls": [SENT_ITEMS_URL]},
+            },
+            operation.timeout,
+        )
+        data = self._validate_sent_items_result(result)
         self._finish(
             operation,
             "succeeded",
@@ -1151,6 +1220,67 @@ class WorkIQRuntime:
         if not isinstance(data.get(expected), list):
             raise InvalidStructuredContentError(
                 "Work IQ calendar action returned invalid structured content."
+            )
+        return dict(data)
+
+    def _validate_sent_items_result(self, result: dict) -> dict:
+        content = result.get("content")
+        is_error = result.get("isError", False)
+        meta = result.get("_meta") or {}
+        if (
+            not isinstance(content, list)
+            or not isinstance(is_error, bool)
+            or not isinstance(meta, dict)
+        ):
+            raise InvalidStructuredContentError(
+                "Work IQ Sent Items read returned invalid structured content."
+            )
+        texts = [
+            item.get("text")
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        ]
+        if len(texts) != len(content):
+            raise InvalidStructuredContentError(
+                "Work IQ Sent Items read returned invalid structured content."
+            )
+        if is_error:
+            remote = self._classify_remote_error(meta, texts)
+            if isinstance(
+                remote,
+                (EulaRequiredError, AuthRequiredError, ConsentRequiredError),
+            ):
+                raise remote
+            raise ToolError("Work IQ Sent Items read failed.")
+        structured = result.get("structuredContent")
+        results = (
+            structured.get("results")
+            if isinstance(structured, Mapping)
+            else None
+        )
+        if (
+            not isinstance(results, list)
+            or len(results) != 1
+            or not isinstance(results[0], Mapping)
+        ):
+            raise InvalidStructuredContentError(
+                "Work IQ Sent Items read returned invalid structured content."
+            )
+        status = results[0].get("statusCode")
+        if not isinstance(status, int) or isinstance(status, bool):
+            raise InvalidStructuredContentError(
+                "Work IQ Sent Items read returned invalid structured content."
+            )
+        if status != 200:
+            raise ActionHTTPError(
+                "Work IQ Sent Items read returned a non-success status."
+            )
+        data = results[0].get("data")
+        if not isinstance(data, Mapping) or not isinstance(data.get("value"), list):
+            raise InvalidStructuredContentError(
+                "Work IQ Sent Items read returned invalid structured content."
             )
         return dict(data)
 

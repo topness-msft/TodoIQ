@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 from ..models import (
     ACTION_EDITABLE_FIELDS,
     DELIVERY_CHANNELS,
+    DELIVERY_CONFLICT_MESSAGE,
     clear_blocked_question_if_unchanged,
+    claim_task_action_recovery,
     claim_blocked_question_answer,
     confirm_destination,
     create_execution_action,
@@ -36,6 +38,8 @@ from ..models import (
     set_blocked_question_if_missing,
     update_calendar_payload_if_question_open,
     update_task_action,
+    update_task_action_draft_if_unchanged,
+    task_has_unresolved_delivery,
 )
 from ..services.cowork_runner import (
     AlreadyRunning,
@@ -1249,6 +1253,8 @@ class CoworkHandler(tornado.web.RequestHandler):
         task = get_task(tid)
         if not task:
             return self._fail(404, "Not found")
+        if task_has_unresolved_delivery(tid):
+            return self._fail(409, DELIVERY_CONFLICT_MESSAGE)
 
         body = self._body()
         if body is None:
@@ -1309,18 +1315,24 @@ class CoworkHandler(tornado.web.RequestHandler):
             payload = structured_initial_payload(task, structured_channel)
             if redirect_text:
                 payload["redirect_text"] = redirect_text
-            action = create_task_action(
-                tid,
-                action_type=task.get("action_type") or "general",
-                intent=task.get("coaching_text"),
-                notes_snapshot=task.get("user_notes"),
-                redirect_text=redirect_text,
-                delivery_channel=structured_channel,
-                structured_payload=json.dumps(
-                    payload, separators=(",", ":"), sort_keys=True
-                ),
-                interaction_mode="interaction",
-            )
+            try:
+                action = create_task_action(
+                    tid,
+                    action_type=task.get("action_type") or "general",
+                    intent=task.get("coaching_text"),
+                    notes_snapshot=task.get("user_notes"),
+                    redirect_text=redirect_text,
+                    delivery_channel=structured_channel,
+                    structured_payload=json.dumps(
+                        payload, separators=(",", ":"), sort_keys=True
+                    ),
+                    interaction_mode="interaction",
+                )
+            except ValueError as exc:
+                return self._fail(
+                    409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                    str(exc),
+                )
             try:
                 preview = STRUCTURED_PREVIEW_FN or start_structured_preview
                 preview(task, action)
@@ -1367,19 +1379,25 @@ class CoworkHandler(tornado.web.RequestHandler):
 
         # A Redo is a NEW row, never an update: the original intent survives and
         # the correction chain stays auditable.
-        action = create_task_action(
-            tid,
-            action_type=task.get("action_type") or "general",
-            intent=task.get("coaching_text"),
-            notes_snapshot=task.get("user_notes"),
-            redirect_text=redirect_text,
-            composed_prompt=prompt,
-            destination_kind=destination.get("kind"),
-            island_url=get_cached_cowork_island(),
-            conversation_id=conversation_id,
-            interaction_mode=interaction_mode,
-            **resolved,
-        )
+        try:
+            action = create_task_action(
+                tid,
+                action_type=task.get("action_type") or "general",
+                intent=task.get("coaching_text"),
+                notes_snapshot=task.get("user_notes"),
+                redirect_text=redirect_text,
+                composed_prompt=prompt,
+                destination_kind=destination.get("kind"),
+                island_url=get_cached_cowork_island(),
+                conversation_id=conversation_id,
+                interaction_mode=interaction_mode,
+                **resolved,
+            )
+        except ValueError as exc:
+            return self._fail(
+                409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                str(exc),
+            )
 
         try:
             start_preview(
@@ -1574,11 +1592,18 @@ class CoworkHandler(tornado.web.RequestHandler):
             structured_payload = json.dumps(
                 payload, separators=(",", ":"), sort_keys=True
             )
-            updated = update_calendar_payload_if_question_open(
-                action["id"],
-                action["blocked_question"],
-                structured_payload,
-            )
+            try:
+                updated = update_calendar_payload_if_question_open(
+                    action["id"],
+                    action["blocked_question"],
+                    action["structured_payload"],
+                    structured_payload,
+                )
+            except ValueError as exc:
+                return self._fail(
+                    409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                    str(exc),
+                )
             if updated is None:
                 return self._fail(
                     409,
@@ -1617,12 +1642,22 @@ class CoworkHandler(tornado.web.RequestHandler):
             updates["structured_payload"] = json.dumps(
                 payload, separators=(",", ":"), sort_keys=True
             )
-        updated = update_task_action(
-            action["id"],
-            frozenset(updates),
-            required_state=action["state"],
-            **updates,
-        )
+        try:
+            updated = update_task_action_draft_if_unchanged(
+                action["id"],
+                expected_state=action["state"],
+                expected_draft_edited=action.get("draft_edited"),
+                expected_structured_payload=action.get("structured_payload"),
+                draft_edited=str(updates.get("draft_edited") or ""),
+                structured_payload=updates.get(
+                    "structured_payload", action.get("structured_payload")
+                ),
+            )
+        except ValueError as exc:
+            return self._fail(
+                409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                str(exc),
+            )
         if updated is None:
             return self._fail(409, "The draft changed state before it was saved.")
 
@@ -1655,6 +1690,8 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
         task = get_task(tid)
         if not task:
             return self._fail(404, "Not found")
+        if task_has_unresolved_delivery(tid):
+            return self._fail(409, DELIVERY_CONFLICT_MESSAGE)
 
         parent = get_latest_task_action(tid)
         if not parent or parent.get("state") != "ready":
@@ -1685,6 +1722,8 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
                 parent["id"], approved_snapshot
             )
             if not action:
+                if task_has_unresolved_delivery(tid):
+                    return self._fail(409, DELIVERY_CONFLICT_MESSAGE)
                 return self._fail(
                     409,
                     "The draft or destination changed after review, or this action "
@@ -1765,6 +1804,8 @@ class CoworkExecuteHandler(tornado.web.RequestHandler):
 
         action = create_execution_action(parent["id"], approved_snapshot)
         if not action:
+            if task_has_unresolved_delivery(tid):
+                return self._fail(409, DELIVERY_CONFLICT_MESSAGE)
             return self._fail(
                 409,
                 "The draft or destination changed after review, or this action "
@@ -1837,15 +1878,9 @@ def _teams_recovery_is_open(action: dict) -> bool:
 class CoworkRetryHandler(tornado.web.RequestHandler):
     """Re-run one unconfirmed structured execution on its existing row.
 
-    Only calendar qualifies, and only because Graph dedupes `/me/events`
-    creates that share a `transactionId` (measured 2026-08-22: the repeat POST
-    returned the same event id with an unchanged createdDateTime). Reusing the
-    SAME action row is what preserves that key, so the retry either creates the
-    meeting that never landed or returns the one that did.
-
-    Email and Teams are deliberately excluded: Teams has no idempotency key at
-    all and a repeat post duplicates, and email has no native key either. For
-    those, an unconfirmed outcome still means "go look before acting".
+    Calendar reuses Graph's native transactionId, email checks Sent Items
+    without exposing a write tool, and recent Teams recovery looks before it
+    writes. Every channel reuses the same immutable action row.
     """
 
     def _fail(self, code, message):
@@ -1881,13 +1916,13 @@ class CoworkRetryHandler(tornado.web.RequestHandler):
                 "never arrived.",
             )
 
-        retried = update_task_action(
-            action["id"],
-            frozenset({"state", "error"}),
-            required_state="execute_unconfirmed",
-            state="executing",
-            error=None,
-        )
+        try:
+            retried = claim_task_action_recovery(action["id"])
+        except ValueError as exc:
+            return self._fail(
+                409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                str(exc),
+            )
         if not retried:
             return self._fail(409, "That action changed before it was retried.")
         try:
@@ -1897,7 +1932,7 @@ class CoworkRetryHandler(tornado.web.RequestHandler):
             logger.exception("could not retry structured WorkIQ action")
             message = (
                 f"Could not restart the action: {exc}. Delivery could not be "
-                "confirmed. Check the calendar before retrying."
+                "confirmed. Check the destination before trying again."
             )
             retried = update_task_action(
                 retried["id"],
@@ -1938,6 +1973,8 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
         task = get_task(tid)
         if not task:
             return self._fail(404, "Task not found")
+        if task_has_unresolved_delivery(tid):
+            return self._fail(409, DELIVERY_CONFLICT_MESSAGE)
 
         action = get_latest_task_action(tid)
         if not action:
@@ -1979,33 +2016,39 @@ class CoworkRefineHandler(tornado.web.RequestHandler):
             if task.get("action_type") == "schedule-meeting"
             else None
         )
-        new_action = create_task_action(
-            tid,
-            action_type=action.get("action_type") or "general",
-            intent=action.get("intent"),
-            notes_snapshot=action.get("notes_snapshot"),
-            redirect_text=instruction,
-            composed_prompt=compose_refine_prompt(
-                instruction,
+        try:
+            new_action = create_task_action(
+                tid,
+                action_type=action.get("action_type") or "general",
+                intent=action.get("intent"),
+                notes_snapshot=action.get("notes_snapshot"),
+                redirect_text=instruction,
+                composed_prompt=compose_refine_prompt(
+                    instruction,
+                    interaction_mode="interaction",
+                    schedule_duration=schedule_duration,
+                ),
+                conversation_id=conversation_id,
+                island_url=action.get("island_url"),
+                parent_action_id=action["id"],
+                destination_kind=action.get("destination_kind"),
+                destination_ref=action.get("destination_ref"),
+                destination_display=action.get("destination_display"),
+                destination_source=action.get("destination_source"),
+                destination_confirmed_at=action.get("destination_confirmed_at"),
+                delivery_channel=action.get("delivery_channel"),
+                answered_interaction=(
+                    None
+                    if schedule_duration is not None
+                    else action.get("answered_interaction")
+                ),
                 interaction_mode="interaction",
-                schedule_duration=schedule_duration,
-            ),
-            conversation_id=conversation_id,
-            island_url=action.get("island_url"),
-            parent_action_id=action["id"],
-            destination_kind=action.get("destination_kind"),
-            destination_ref=action.get("destination_ref"),
-            destination_display=action.get("destination_display"),
-            destination_source=action.get("destination_source"),
-            destination_confirmed_at=action.get("destination_confirmed_at"),
-            delivery_channel=action.get("delivery_channel"),
-            answered_interaction=(
-                None
-                if schedule_duration is not None
-                else action.get("answered_interaction")
-            ),
-            interaction_mode="interaction",
-        )
+            )
+        except ValueError as exc:
+            return self._fail(
+                409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                str(exc),
+            )
 
         try:
             continue_preview(
@@ -2176,6 +2219,9 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 except (json.JSONDecodeError, TypeError):
                     payload = None
                 if not isinstance(payload, dict):
+                    restore_claimed_blocked_question(
+                        action["id"], previous_question, answer_record
+                    )
                     return self._fail(
                         409, "The structured meeting preview is invalid."
                     )
@@ -2184,21 +2230,30 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 # would hand the worker two contradictory instructions; the
                 # earlier steer stays readable on its own action row.
                 fresh_payload["steer"] = steer
-                fresh = create_task_action(
-                    tid,
-                    action_type=task.get("action_type") or "general",
-                    intent=task.get("coaching_text"),
-                    notes_snapshot=task.get("user_notes"),
-                    delivery_channel="calendar",
-                    structured_payload=json.dumps(
-                        fresh_payload, separators=(",", ":"), sort_keys=True
-                    ),
-                    interaction_mode="interaction",
-                    # Say what is being re-checked. A bare spinner here reads
-                    # as though the steer was dropped, so the running card
-                    # renders this back as "Correction: ...".
-                    redirect_text=steer,
-                )
+                try:
+                    fresh = create_task_action(
+                        tid,
+                        action_type=task.get("action_type") or "general",
+                        intent=task.get("coaching_text"),
+                        notes_snapshot=task.get("user_notes"),
+                        delivery_channel="calendar",
+                        structured_payload=json.dumps(
+                            fresh_payload, separators=(",", ":"), sort_keys=True
+                        ),
+                        interaction_mode="interaction",
+                        # Say what is being re-checked. A bare spinner here reads
+                        # as though the steer was dropped, so the running card
+                        # renders this back as "Correction: ...".
+                        redirect_text=steer,
+                    )
+                except ValueError as exc:
+                    restore_claimed_blocked_question(
+                        action["id"], previous_question, answer_record
+                    )
+                    return self._fail(
+                        409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                        str(exc),
+                    )
                 try:
                     preview = STRUCTURED_PREVIEW_FN or start_structured_preview
                     preview(task, fresh)
@@ -2223,6 +2278,39 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             except (json.JSONDecodeError, TypeError):
                 preview_payload = None
             if not isinstance(preview_payload, dict):
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
+                return self._fail(409, "The structured meeting preview is invalid.")
+            payload_attendees = preview_payload.get("attendees")
+            expected_attendees = schedule_attendees(task)
+            payload_emails = [
+                str(person.get("email") or "").strip().lower()
+                for person in payload_attendees or []
+                if isinstance(person, dict)
+                and isinstance(person.get("email"), str)
+                and person["email"].strip()
+            ]
+            expected_emails = sorted(
+                str(person.get("email") or "").strip().lower()
+                for person in expected_attendees
+            )
+            if (
+                preview_payload.get("channel") != "calendar"
+                or not isinstance(preview_payload.get("subject"), str)
+                or not preview_payload["subject"].strip()
+                or not isinstance(preview_payload.get("body"), str)
+                or not preview_payload["body"].strip()
+                or not isinstance(payload_attendees, list)
+                or len(payload_emails) != len(payload_attendees)
+                or len(payload_emails) != len(set(payload_emails))
+                or sorted(payload_emails) != expected_emails
+                or not isinstance(preview_payload.get("duration_minutes"), int)
+                or isinstance(preview_payload.get("duration_minutes"), bool)
+            ):
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
                 return self._fail(409, "The structured meeting preview is invalid.")
             event = {
                 "schema_version": 1,
@@ -2244,6 +2332,9 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
                 != schedule_duration_minutes(task)
                 or not calendar_event_matches_slot(event, selected_slot)
             ):
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
                 return self._fail(
                     409,
                     "That verified meeting time is no longer safe to create. "
@@ -2365,32 +2456,41 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             else:
                 instruction = "\n".join(cleaned_answers.values())
                 child_answer = None
-            new_action = create_task_action(
-                tid,
-                action_type=action.get("action_type") or "general",
-                intent=action.get("intent"),
-                notes_snapshot=action.get("notes_snapshot"),
-                redirect_text=instruction,
-                composed_prompt=compose_refine_prompt(
-                    instruction,
-                    interaction_mode="interaction",
-                    schedule_duration=(
-                        None if selected_slot else schedule_duration
+            try:
+                new_action = create_task_action(
+                    tid,
+                    action_type=action.get("action_type") or "general",
+                    intent=action.get("intent"),
+                    notes_snapshot=action.get("notes_snapshot"),
+                    redirect_text=instruction,
+                    composed_prompt=compose_refine_prompt(
+                        instruction,
+                        interaction_mode="interaction",
+                        schedule_duration=(
+                            None if selected_slot else schedule_duration
+                        ),
                     ),
-                ),
-                conversation_id=action["conversation_id"],
-                island_url=action.get("island_url"),
-                parent_action_id=action["id"],
-                destination_kind=action.get("destination_kind"),
-                destination_ref=action.get("destination_ref"),
-                destination_display=action.get("destination_display"),
-                destination_source=action.get("destination_source"),
-                destination_confirmed_at=action.get("destination_confirmed_at"),
-                delivery_channel=action.get("delivery_channel"),
-                blocked_question="",
-                answered_interaction=child_answer,
-                interaction_mode="interaction",
-            )
+                    conversation_id=action["conversation_id"],
+                    island_url=action.get("island_url"),
+                    parent_action_id=action["id"],
+                    destination_kind=action.get("destination_kind"),
+                    destination_ref=action.get("destination_ref"),
+                    destination_display=action.get("destination_display"),
+                    destination_source=action.get("destination_source"),
+                    destination_confirmed_at=action.get("destination_confirmed_at"),
+                    delivery_channel=action.get("delivery_channel"),
+                    blocked_question="",
+                    answered_interaction=child_answer,
+                    interaction_mode="interaction",
+                )
+            except ValueError as exc:
+                restore_claimed_blocked_question(
+                    action["id"], previous_question, answer_record
+                )
+                return self._fail(
+                    409 if str(exc) == DELIVERY_CONFLICT_MESSAGE else 400,
+                    str(exc),
+                )
             try:
                 continue_preview(
                     tid,

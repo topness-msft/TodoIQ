@@ -16,6 +16,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = PROJECT_ROOT / "scripts" / "workiq-runtime.json"
 DEFAULT_RUNTIME_ROOT = PROJECT_ROOT / "data" / "runtime" / "workiq"
 EULA_URL = "https://github.com/microsoft/work-iq"
+_SETUP_FAILURE = {
+    "ok": False,
+    "error": {
+        "code": "mcp_unavailable",
+        "message": (
+            "Work IQ setup could not be completed. "
+            "Check the local Work IQ installation and try again."
+        ),
+    },
+}
 _SECRET_RE = re.compile(
     r"(?i)(bearer\s+|access[_-]?token\s*[=:]\s*|refresh[_-]?token\s*[=:]\s*|"
     r"cookie\s*[=:]\s*)([^\s,;]+)"
@@ -211,20 +221,30 @@ class WorkIQSetup:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             try:
                 result = self.executor(argv, **kwargs)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return {
-                    "ok": False,
-                    "error": {"code": "mcp_unavailable", "message": redact(exc)},
-                }
+            except (OSError, subprocess.SubprocessError):
+                return dict(_SETUP_FAILURE)
             if result.returncode != 0:
-                return {
-                    "ok": False,
-                    "error": {
-                        "code": "eula_required",
-                        "message": redact(result.stderr or result.stdout or "EULA acceptance failed."),
-                    },
-                }
-            return {"ok": True, "message": "Work IQ EULA accepted. Check readiness again."}
+                return dict(_SETUP_FAILURE)
+            verify_argv = [str(self.entry_point.resolve()), "config", "show"]
+            try:
+                verified = self.executor(verify_argv, **kwargs)
+            except (OSError, subprocess.SubprocessError):
+                return dict(_SETUP_FAILURE)
+            if verified.returncode != 0:
+                return dict(_SETUP_FAILURE)
+            acknowledgments = []
+            for raw_line in str(verified.stdout or "").splitlines():
+                if "=" not in raw_line:
+                    continue
+                key, value = raw_line.split("=", 1)
+                if key.strip() == "I-accept-EULA":
+                    acknowledgments.append(value.strip())
+            if acknowledgments != ["true"]:
+                return dict(_SETUP_FAILURE)
+            return {
+                "ok": True,
+                "message": "Work IQ EULA accepted. Check readiness.",
+            }
         finally:
             self._eula_lock.release()
 

@@ -1988,7 +1988,10 @@ function doAction(taskId, action, status) {
             if (selectedTaskId === data.task.id) renderDetailPane(data.task);
         }
     })
-    .catch(function(err) { console.error('Action failed:', err.message); });
+    .catch(function(err) {
+        window.alert(err.message || 'Action failed');
+        console.error('Action failed:', err.message);
+    });
 }
 
 function deleteTask(taskId) {
@@ -2022,8 +2025,16 @@ function refreshTask(taskId) {
 
 function permanentDeleteTask(taskId) {
     fetch('/api/tasks/' + taskId, { method: 'DELETE' })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
+        .then(function(res) {
+            return res.json().then(function(data) {
+                return {ok: res.ok, data: data};
+            });
+        })
+        .then(function(result) {
+            if (!result.ok) {
+                window.alert(result.data.error || 'Delete failed');
+                return;
+            }
             tasks = tasks.filter(function(t) { return t.id !== taskId; });
             renderTaskList();
             if (selectedTaskId === taskId) clearDetailPane();
@@ -4792,12 +4803,15 @@ function cwWithinTeamsRecovery(a) {
 
 function cwRetryDelivery(taskId) {
     var a = _cwActions[taskId];
-    var keyed = a && (a.delivery_channel === 'calendar'
-        || a.delivery_channel === 'email');
-    if (!window.confirm(keyed
+    var calendar = a && a.delivery_channel === 'calendar';
+    var email = a && a.delivery_channel === 'email';
+    if (!window.confirm(calendar
         ? 'Retry this delivery?\n\nThis is safe to repeat: Riveter sends the '
             + 'same idempotency key, so Microsoft 365 returns what it already '
             + 'created rather than sending a second one.'
+        : email
+        ? 'Check delivery?\n\nRiveter will check Sent Items for the original '
+            + 'correlation header. This does not resend the email.'
         : 'Check the chat and retry?\n\nTeams has no way to mark a message, so '
             + 'Riveter will read the recent messages first and post only if '
             + 'this one is not already there.')) return;
@@ -5122,23 +5136,23 @@ function renderCoworkCard(task) {
         }
 
         if (a && a.state === 'execute_unconfirmed') {
-            // Calendar and email carry a key Riveter stamped on the write, so a
-            // repeat is provably the same one. Teams cannot be stamped at all,
-            // so recovery reads the thread first and is only offered while the
-            // message is recent enough to still be findable.
             var structuredAction = cwIsStructured(a);
-            var keyedChannel = a.delivery_channel === 'calendar'
-                || a.delivery_channel === 'email';
+            var calendarChannel = a.delivery_channel === 'calendar';
+            var emailChannel = a.delivery_channel === 'email';
             var teamsRecoverable = a.delivery_channel === 'teams'
                 && cwWithinTeamsRecovery(a);
-            var canRetry = structuredAction && (keyedChannel || teamsRecoverable);
-            var retryNote = keyedChannel
+            var canRetry = structuredAction
+                && (calendarChannel || emailChannel || teamsRecoverable);
+            var retryNote = calendarChannel
                 ? 'Retrying is safe: Riveter reuses the same key, so this cannot '
                     + 'be sent twice. '
+                : (emailChannel
+                    ? 'Riveter can check Sent Items for the original correlation '
+                        + 'header. This does not resend the email. '
                 : (teamsRecoverable
                     ? 'Riveter will check the chat first and only post if the '
                         + 'message is not already there. '
-                    : 'Check the destination before retrying. ');
+                    : 'Check the destination before retrying. '));
             return cwShell('is-unconfirmed', 'check delivery', task,
                 '<section class="cw-delivery-result is-unconfirmed" data-testid="delivery-unconfirmed">'
                 + '<span class="cw-delivery-mark" aria-hidden="true">!</span><div>'
@@ -5150,15 +5164,17 @@ function renderCoworkCard(task) {
                 + '<div class="cw-draft cw-markdown">' + cwDraftDisplay(a, cwCurrentDraft(a)) + '</div>',
                 (canRetry
                     ? '<button class="cw-btn cw-btn-go" data-testid="cw-retry" '
-                        + 'title="' + (keyedChannel
+                        + 'title="' + (calendarChannel
                             ? 'Safe to repeat: this cannot be delivered twice.'
+                            : emailChannel
+                            ? 'Check Sent Items without resending.'
                             : 'Riveter checks the chat before posting again.')
                         + '" '
                         + 'onclick="cwRetryDelivery(' + task.id + ')">'
-                        + (keyedChannel ? 'Retry safely' : 'Check and retry')
+                        + (calendarChannel ? 'Retry safely'
+                            : emailChannel ? 'Check delivery' : 'Check and retry')
                         + '</button>'
                     : '')
-                + '<button class="cw-btn cw-btn-sec" onclick="cwStart(' + task.id + ')">Start a new draft</button>'
                 + cwCostBadge(a) + cwCumulativeCostBadge(a),
                 a);
         }

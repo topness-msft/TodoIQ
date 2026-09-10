@@ -38,6 +38,7 @@ from src.services.workiq_runtime import (
     ToolError,
     TransportError as WorkIQTransportError,
     WorkIQError,
+    get_runtime,
 )
 
 
@@ -54,6 +55,10 @@ EXECUTE_TOOLS = {
 STRUCTURED_CHANNELS = frozenset(EXECUTE_TOOLS)
 _threads: dict[str, threading.Thread] = {}
 _threads_lock = threading.Lock()
+EMAIL_RECOVERY_UNCONFIRMED_MESSAGE = (
+    "Delivery could not be confirmed from a complete Sent Items check. "
+    "Check Sent Items before trying again."
+)
 
 
 def channel_for_task(task: dict) -> str | None:
@@ -123,11 +128,15 @@ def preview_command(prompt: str) -> list[str]:
 
 def execute_command(prompt: str, channel: str, recover: bool = False) -> list[str]:
     """Build a subprocess command with one channel-specific write primitive."""
+    if channel == "email" and recover:
+        raise ValueError("Email recovery uses the owned Work IQ runtime.")
     tool = EXECUTE_TOOLS.get(channel)
     if not tool:
         raise ValueError(f"Unsupported structured delivery channel: {channel}")
     tools = [tool]
-    if channel == "email" or (channel == "teams" and recover):
+    if (channel == "email" and not recover) or (
+        channel == "teams" and recover
+    ):
         # /sendMail and /reply return 202 with no body, so the only honest way
         # to produce a delivery reference is to read the sent copy back. Teams
         # needs the same read, but only when recovering, so an ordinary post
@@ -1689,46 +1698,49 @@ def execute_prompt(
             )
             marker_extra = f',\n"idempotency_key":"{idempotency_key_value}"'
     elif channel == "email":
-        rendered = plain_text_to_html(payload.get("body"))
-        operation = (
-            "Call workiq-do_action exactly once to send. For reply mode use "
-            "/me/messages/{message_id}/reply. For new mode use /me/sendMail with "
-            "the exact recipients and subject.\n\n"
-            "Send the body as HTML, using this exact rendered content verbatim. "
-            "Do not reformat it, re-wrap it, restyle it, or substitute the plain "
-            'text version. Set the message body to {"contentType":"html",'
-            '"content": <<<the block below>>>}:\n'
-            "-----BEGIN APPROVED HTML BODY-----\n"
-            f"{rendered}\n"
-            "-----END APPROVED HTML BODY-----"
-        )
-        if idempotency_key_value:
-            operation += (
-                "\n\nBefore sending, attach Riveter's correlation header to the "
-                "outgoing message so the sent copy can be identified afterwards. "
-                "Set internetMessageHeaders on the message object to exactly "
-                f'[{{"name":"{CORRELATION_HEADER}",'
-                f'"value":"{idempotency_key_value}"}}]. For reply mode this goes '
-                'in the "Message" property alongside the body; for new mail it '
-                'goes in the "Message" property of /me/sendMail.'
-                "\n\nAfter sending, the send returns 202 with no body, so it "
-                "carries no reference. Do NOT invent one. Instead read "
-                "/me/mailFolders/sentitems/messages"
-                "?$top=5&$select=id,internetMessageId,internetMessageHeaders,"
-                "toRecipients&$orderby=sentDateTime desc with workiq-fetch, find "
-                f'the message whose {CORRELATION_HEADER} header equals '
-                f'"{idempotency_key_value}", and return that message\'s id as '
-                "delivery_ref. If no such message is found, return ok=false: "
-                "never report a delivery reference you did not read back.\n\n"
-                "Also report that sent message's actual toRecipients addresses "
-                'as "recipients". A reply is addressed to its thread, so the '
-                "delivered recipients can differ from the payload; report what "
-                "the sent copy really shows, not what the payload asked for."
+        if recover:
+            raise ValueError("Email recovery uses the owned Work IQ runtime.")
+        else:
+            rendered = plain_text_to_html(payload.get("body"))
+            operation = (
+                "Call workiq-do_action exactly once to send. For reply mode use "
+                "/me/messages/{message_id}/reply. For new mode use /me/sendMail with "
+                "the exact recipients and subject.\n\n"
+                "Send the body as HTML, using this exact rendered content verbatim. "
+                "Do not reformat it, re-wrap it, restyle it, or substitute the plain "
+                'text version. Set the message body to {"contentType":"html",'
+                '"content": <<<the block below>>>}:\n'
+                "-----BEGIN APPROVED HTML BODY-----\n"
+                f"{rendered}\n"
+                "-----END APPROVED HTML BODY-----"
             )
-            marker_extra = (
-                f',\n"idempotency_key":"{idempotency_key_value}"'
-                ',\n"recipients":["actual addresses from the sent message"]'
-            )
+            if idempotency_key_value:
+                operation += (
+                    "\n\nBefore sending, attach Riveter's correlation header to the "
+                    "outgoing message so the sent copy can be identified afterwards. "
+                    "Set internetMessageHeaders on the message object to exactly "
+                    f'[{{"name":"{CORRELATION_HEADER}",'
+                    f'"value":"{idempotency_key_value}"}}]. For reply mode this goes '
+                    'in the "Message" property alongside the body; for new mail it '
+                    'goes in the "Message" property of /me/sendMail.'
+                    "\n\nAfter sending, the send returns 202 with no body, so it "
+                    "carries no reference. Do NOT invent one. Instead read "
+                    "/me/mailFolders/sentitems/messages"
+                    "?$top=5&$select=id,internetMessageId,internetMessageHeaders,"
+                    "toRecipients&$orderby=sentDateTime desc with workiq-fetch, find "
+                    f'the message whose {CORRELATION_HEADER} header equals '
+                    f'"{idempotency_key_value}", and return that message\'s id as '
+                    "delivery_ref. If no such message is found, return ok=false: "
+                    "never report a delivery reference you did not read back.\n\n"
+                    "Also report that sent message's actual toRecipients addresses "
+                    'as "recipients". A reply is addressed to its thread, so the '
+                    "delivered recipients can differ from the payload; report what "
+                    "the sent copy really shows, not what the payload asked for."
+                )
+                marker_extra = (
+                    f',\n"idempotency_key":"{idempotency_key_value}"'
+                    ',\n"recipients":["actual addresses from the sent message"]'
+                )
     elif channel == "teams":
         rendered = plain_text_to_html(payload.get("body"))
         # Graph's chatMessage.body is an itemBody, not a string. "Post the exact
@@ -1798,6 +1810,8 @@ def execute_prompt(
     write_rule = (
         "Post at most once, and only if the message is not already there."
         if channel == "teams" and recover
+        else "Perform no write. This is a read-only delivery check."
+        if channel == "email" and recover
         else "Perform one write only."
     )
     return f"""
@@ -1816,8 +1830,8 @@ Return exactly one result block:
 "delivery_ref":"non-empty external reference"{marker_extra}}}
 {RESULT_END}
 
-If the write fails or its result is ambiguous, return ok=false with an error.
-Never retry a write.
+If the operation fails or its result is ambiguous, return ok=false with an error.
+Never retry a write and never write during an email recovery check.
 """.strip()
 
 
@@ -2346,6 +2360,90 @@ def finish_execute(
         )
 
 
+def finish_email_recovery(
+    action_id: int,
+    *,
+    sent_items: object,
+    expected_idempotency_key: str,
+    expected_recipients: set[str],
+) -> dict | None:
+    """Confirm an email only from one complete, exact transport-owned page."""
+    try:
+        if not isinstance(sent_items, dict) or "@odata.nextLink" in sent_items:
+            raise ValueError("incomplete")
+        messages = sent_items.get("value")
+        if not isinstance(messages, list) or len(messages) >= 20:
+            raise ValueError("incomplete")
+        expected_key = str(expected_idempotency_key or "").strip()
+        expected = {
+            str(value).strip().lower()
+            for value in expected_recipients
+            if str(value).strip()
+        }
+        if not expected_key or not expected:
+            raise ValueError("invalid approval")
+
+        matches = []
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("malformed")
+            message_id = message.get("id")
+            headers = message.get("internetMessageHeaders")
+            recipients = message.get("toRecipients")
+            if (
+                not isinstance(message_id, str)
+                or not message_id.strip()
+                or not isinstance(headers, list)
+                or not isinstance(recipients, list)
+            ):
+                raise ValueError("malformed")
+            correlation_values = []
+            for header in headers:
+                if (
+                    not isinstance(header, dict)
+                    or not isinstance(header.get("name"), str)
+                    or not isinstance(header.get("value"), str)
+                ):
+                    raise ValueError("malformed")
+                if header["name"].strip().lower() == CORRELATION_HEADER:
+                    correlation_values.append(header["value"].strip())
+            normalized_recipients = []
+            for recipient in recipients:
+                address = (
+                    recipient.get("emailAddress")
+                    if isinstance(recipient, dict)
+                    else None
+                )
+                value = address.get("address") if isinstance(address, dict) else None
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("malformed")
+                normalized_recipients.append(value.strip().lower())
+            if len(normalized_recipients) != len(set(normalized_recipients)):
+                raise ValueError("malformed")
+            if expected_key in correlation_values:
+                if correlation_values != [expected_key]:
+                    raise ValueError("ambiguous")
+                matches.append((message_id.strip(), set(normalized_recipients)))
+        if len(matches) != 1 or matches[0][1] != expected:
+            raise ValueError("unconfirmed")
+        return update_task_action(
+            action_id,
+            frozenset({"state", "workiq_delivery_ref", "error"}),
+            required_state="executing",
+            state="executed",
+            workiq_delivery_ref=matches[0][0],
+            error=None,
+        )
+    except (TypeError, ValueError):
+        return update_task_action(
+            action_id,
+            frozenset({"state", "error"}),
+            required_state="executing",
+            state="execute_unconfirmed",
+            error=EMAIL_RECOVERY_UNCONFIRMED_MESSAGE,
+        )
+
+
 def _preview_worker(task: dict, action: dict) -> None:
     payload = json.loads(action["structured_payload"])
     correlation_id = payload["correlation_id"]
@@ -2460,6 +2558,7 @@ def _execute_worker(action: dict, recover: bool = False) -> None:
     # stays findable instead of being sent twice.
     key = idempotency_key(action)
     teams_recovery = recover and payload.get("channel") == "teams"
+    email_recovery = recover and payload.get("channel") == "email"
     # The user approved a specific recipient list; Graph's /reply can deliver
     # somewhere else entirely, so the sent copy is checked against it.
     expected_recipients = (
@@ -2472,6 +2571,15 @@ def _execute_worker(action: dict, recover: bool = False) -> None:
         else None
     ) or None
     try:
+        if email_recovery:
+            sent_items = get_runtime().read_sent_items(timeout=30)
+            finish_email_recovery(
+                action["id"],
+                sent_items=sent_items,
+                expected_idempotency_key=key,
+                expected_recipients=expected_recipients or set(),
+            )
+            return
         result = _run(
             execute_command(
                 execute_prompt(payload, correlation_id, key, recover=recover),
@@ -2490,14 +2598,19 @@ def _execute_worker(action: dict, recover: bool = False) -> None:
             expected_recipients=expected_recipients,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("structured execution failed")
+        if email_recovery:
+            logger.warning("Email recovery could not confirm delivery.")
+        else:
+            logger.exception("structured execution failed")
         update_task_action(
             action["id"],
             frozenset({"state", "error"}),
             required_state="executing",
             state="execute_unconfirmed",
             error=(
-                f"Could not confirm the WorkIQ delivery: {exc}. Check the "
+                EMAIL_RECOVERY_UNCONFIRMED_MESSAGE
+                if email_recovery
+                else f"Could not confirm the WorkIQ delivery: {exc}. Check the "
                 "destination before retrying."
             ),
         )
@@ -2533,10 +2646,8 @@ def start_preview(task: dict, action: dict) -> None:
 def start_execute(action: dict, recover: bool = False) -> None:
     """Launch a single-write structured execution worker.
 
-    ``recover`` re-runs an execution whose outcome was never confirmed. For
-    calendar and email the stamped key makes that inherently safe; for Teams it
-    switches the worker into look-before-you-write mode, which is the only
-    protection available there.
+    ``recover`` re-runs calendar with its native transaction id, checks email
+    read-only in Sent Items, and switches Teams into look-before-write mode.
     """
     _start_thread(
         f"execute:{action['id']}", _execute_worker, dict(action), recover

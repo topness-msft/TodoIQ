@@ -1,5 +1,6 @@
 """Task CRUD and lifecycle operations for TodoNess."""
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,11 @@ from .services import source_locator
 from .services import waiting_activity
 
 logger = logging.getLogger(__name__)
+
+DELIVERY_CONFLICT_MESSAGE = (
+    "This task has an active or unconfirmed delivery. Resolve its delivery "
+    "status before changing, deleting, or starting another action."
+)
 
 # Valid status transitions
 VALID_TRANSITIONS = {
@@ -56,6 +62,45 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
             "thread_readable": source_locator.is_thread_readable(located),
         }
     return task
+
+
+def _has_unresolved_delivery(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    exclude_action_id: int | None = None,
+) -> bool:
+    sql = (
+        "SELECT 1 FROM task_actions WHERE task_id = ? "
+        "AND state IN ('executing','execute_unconfirmed')"
+    )
+    params: list[object] = [task_id]
+    if exclude_action_id is not None:
+        sql += " AND id <> ?"
+        params.append(exclude_action_id)
+    sql += " LIMIT 1"
+    return conn.execute(sql, params).fetchone() is not None
+
+
+def _raise_if_unresolved_delivery(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    exclude_action_id: int | None = None,
+) -> None:
+    if _has_unresolved_delivery(
+        conn, task_id, exclude_action_id=exclude_action_id
+    ):
+        raise ValueError(DELIVERY_CONFLICT_MESSAGE)
+
+
+def task_has_unresolved_delivery(task_id: int) -> bool:
+    """Return whether any historical action can still land externally."""
+    conn = get_connection()
+    try:
+        return _has_unresolved_delivery(conn, task_id)
+    finally:
+        conn.close()
 
 
 def ensure_db():
@@ -291,7 +336,13 @@ def update_task(task_id: int, **fields) -> dict | None:
             key in fields and fields[key] != current[key]
             for key in _COWORK_REVISION_FIELDS
         ):
+            _raise_if_unresolved_delivery(conn, task_id)
             fields["cowork_revision"] = current["cowork_revision"] + 1
+        if (
+            fields.get("status") in {"deleted", "dismissed"}
+            and fields.get("status") != current["status"]
+        ):
+            _raise_if_unresolved_delivery(conn, task_id)
         fields["updated_at"] = _now()
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [task_id]
@@ -335,26 +386,7 @@ def update_task_for_action_type(task_id: int, **fields) -> dict | None:
             for key in _COWORK_REVISION_FIELDS
         )
         if type_changed or input_changed:
-            in_flight = conn.execute(
-                """
-                SELECT state FROM task_actions
-                WHERE task_id = ?
-                  AND cowork_revision = ?
-                  AND action_type = ?
-                  AND state IN ('executing','execute_unconfirmed')
-                ORDER BY id DESC LIMIT 1
-                """,
-                (
-                    task_id,
-                    task.get("cowork_revision", 0),
-                    task.get("action_type"),
-                ),
-            ).fetchone()
-            if in_flight:
-                conn.rollback()
-                raise ValueError(
-                    "Cannot change action type while an approved action may be delivering."
-                )
+            _raise_if_unresolved_delivery(conn, task_id)
             fields["cowork_revision"] = task.get("cowork_revision", 0) + 1
         fields["updated_at"] = _now()
         set_clause = ", ".join(f"{key} = ?" for key in fields)
@@ -389,9 +421,19 @@ def delete_task(task_id: int) -> bool:
     """Delete a task. Returns True if a row was deleted."""
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            conn.rollback()
+            return False
+        _raise_if_unresolved_delivery(conn, task_id)
         cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         conn.commit()
         return cursor.rowcount > 0
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -631,6 +673,7 @@ def create_task_action(task_id: int, **fields) -> dict:
         if not task:
             conn.rollback()
             raise ValueError("Task not found")
+        _raise_if_unresolved_delivery(conn, task_id)
         cols = ["task_id", "action_type", "cowork_revision"]
         vals = [task_id, task["action_type"], task["cowork_revision"]]
         for name in _ACTION_INSERT_FIELDS:
@@ -716,11 +759,20 @@ def create_execution_action(
             FROM task_actions parent
             WHERE parent.id = ?
               AND parent.state = 'ready'
+              AND COALESCE(parent.blocked_question, '') = ''
               AND EXISTS (
                   SELECT 1 FROM tasks current
                   WHERE current.id = parent.task_id
                     AND current.cowork_revision = parent.cowork_revision
                     AND current.action_type = parent.action_type
+                    AND current.status <> 'deleted'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_actions unresolved
+                  WHERE unresolved.task_id = parent.task_id
+                    AND unresolved.state IN (
+                        'executing','execute_unconfirmed'
+                    )
               )
               AND parent.id = (
                   SELECT MAX(latest.id)
@@ -807,11 +859,20 @@ def create_structured_execution_action(
             FROM task_actions parent
             WHERE parent.id = ?
               AND parent.state = 'ready'
+              AND COALESCE(parent.blocked_question, '') = ''
               AND EXISTS (
                   SELECT 1 FROM tasks current
                   WHERE current.id = parent.task_id
                     AND current.cowork_revision = parent.cowork_revision
                     AND current.action_type = parent.action_type
+                    AND current.status <> 'deleted'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_actions unresolved
+                  WHERE unresolved.task_id = parent.task_id
+                    AND unresolved.state IN (
+                        'executing','execute_unconfirmed'
+                    )
               )
               AND parent.id = (
                   SELECT MAX(latest.id)
@@ -1003,14 +1064,115 @@ def update_task_action(
         conn.close()
 
 
+def update_task_action_draft_if_unchanged(
+    action_id: int,
+    *,
+    expected_state: str,
+    expected_draft_edited: str | None,
+    expected_structured_payload: str | None,
+    draft_edited: str,
+    structured_payload: str | None,
+) -> dict | None:
+    """Atomically save one user draft edit against its reviewed row snapshot."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT task_id FROM task_actions WHERE id=?", (action_id,)
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        _raise_if_unresolved_delivery(conn, row["task_id"])
+        cursor = conn.execute(
+            """
+            UPDATE task_actions
+            SET draft_edited = ?,
+                structured_payload = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id = ?
+              AND state = ?
+              AND draft_edited IS ?
+              AND structured_payload IS ?
+            """,
+            (
+                draft_edited,
+                structured_payload,
+                action_id,
+                expected_state,
+                expected_draft_edited,
+                expected_structured_payload,
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM task_actions WHERE id=?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(updated)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def claim_task_action_recovery(action_id: int) -> dict | None:
+    """Claim one unresolved delivery while excluding only that exact row."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT task_id FROM task_actions "
+            "WHERE id = ? AND state = 'execute_unconfirmed'",
+            (action_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        _raise_if_unresolved_delivery(
+            conn, row["task_id"], exclude_action_id=action_id
+        )
+        cursor = conn.execute(
+            "UPDATE task_actions SET state='executing', error=NULL, "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id=? AND state='execute_unconfirmed'",
+            (action_id,),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        claimed = conn.execute(
+            "SELECT * FROM task_actions WHERE id=?", (action_id,)
+        ).fetchone()
+        return _row_to_dict(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def update_calendar_payload_if_question_open(
     action_id: int,
     expected_question: str,
+    expected_structured_payload: str,
     structured_payload: str,
 ) -> dict | None:
     """Atomically edit invite content only while the same chooser is open."""
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT task_id FROM task_actions WHERE id=?", (action_id,)
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        _raise_if_unresolved_delivery(conn, row["task_id"])
         cursor = conn.execute(
             """
             UPDATE task_actions
@@ -1019,16 +1181,26 @@ def update_calendar_payload_if_question_open(
             WHERE id = ?
               AND state = 'previewing'
               AND blocked_question = ?
+              AND structured_payload = ?
             """,
-            (structured_payload, action_id, expected_question),
+            (
+                structured_payload,
+                action_id,
+                expected_question,
+                expected_structured_payload,
+            ),
         )
-        conn.commit()
         if cursor.rowcount == 0:
+            conn.rollback()
             return None
+        conn.commit()
         row = conn.execute(
             "SELECT * FROM task_actions WHERE id = ?", (action_id,)
         ).fetchone()
         return _row_to_dict(row)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -1141,17 +1313,173 @@ def recover_stuck_previews() -> int:
     Without this a browser close or server restart strands the row in
     'previewing' forever and the task can never be previewed again.
     """
+    def durable_calendar_chooser(row: sqlite3.Row) -> bool:
+        if (
+            row["delivery_channel"] != "calendar"
+            or row["action_type"] != "schedule-meeting"
+            or not row["structured_payload"]
+            or not row["blocked_question"]
+            or row["had_interaction"] != 1
+        ):
+            return False
+        try:
+            payload = json.loads(row["structured_payload"])
+            interaction = json.loads(row["blocked_question"])
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if (
+            not isinstance(payload, dict)
+            or payload.get("channel") != "calendar"
+            or not isinstance(payload.get("subject"), str)
+            or not payload["subject"].strip()
+            or not isinstance(payload.get("body"), str)
+            or not payload["body"].strip()
+            or not isinstance(interaction, dict)
+            or str(interaction.get("invocation_id") or "")
+            != f"structured-calendar-{row['id']}"
+        ):
+            return False
+        questions = interaction.get("questions")
+        if (
+            not isinstance(questions, list)
+            or len(questions) != 1
+            or any(
+                not isinstance(question, dict)
+                or not str(question.get("id") or "").strip()
+                or question.get("multi_select") is not False
+                or not isinstance(question.get("options"), list)
+                or not question["options"]
+                or any(
+                    not isinstance(option, dict)
+                    or not str(option.get("value") or "").strip()
+                    for option in question["options"]
+                )
+                for question in questions
+            )
+        ):
+            return False
+        evidence = interaction.get("schedule_evidence")
+        evidence_slots = (
+            evidence.get("slots") if isinstance(evidence, dict) else None
+        )
+        payload_slots = payload.get("slots")
+        option_values = {
+            str(option.get("value") or "").strip()
+            for question in questions
+            for option in question.get("options") or []
+            if isinstance(option, dict)
+        }
+        evidence_values = {
+            str(slot.get("value") or "").strip()
+            for slot in evidence_slots or []
+            if isinstance(slot, dict)
+        }
+        payload_slot_values = {
+            str(
+                slot.get("id")
+                if slot.get("id") is not None
+                else index
+            )
+            for index, slot in enumerate(payload_slots or [])
+            if isinstance(slot, dict)
+        }
+        evidence_by_value = {
+            str(slot.get("value") or "").strip(): slot
+            for slot in evidence_slots or []
+            if isinstance(slot, dict)
+            and str(slot.get("value") or "").strip()
+        }
+        payload_slots_valid = (
+            isinstance(payload_slots, list)
+            and 1 <= len(payload_slots) <= 3
+            and all(
+                isinstance(slot, dict)
+                and str(
+                    slot.get("id")
+                    if slot.get("id") is not None
+                    else index
+                ) in evidence_by_value
+                and all(
+                    isinstance(slot.get(key), str)
+                    and bool(slot[key].strip())
+                    for key in ("start", "end", "timezone")
+                )
+                and isinstance(slot.get("availability"), dict)
+                and all(
+                    slot.get(key) == evidence_by_value[
+                        str(
+                            slot.get("id")
+                            if slot.get("id") is not None
+                            else index
+                        )
+                    ].get(key)
+                    for key in ("start", "end", "timezone", "availability")
+                )
+                for index, slot in enumerate(payload_slots)
+            )
+        )
+        payload_attendees = sorted({
+            str(person.get("email") or "").strip().lower()
+            for person in payload.get("attendees") or []
+            if isinstance(person, dict)
+            and str(person.get("email") or "").strip()
+        })
+        if (
+            not isinstance(evidence, dict)
+            or not payload_slots_valid
+            or not isinstance(evidence_slots, list)
+            or len(option_values) != len(questions[0]["options"])
+            or len(evidence_values) != len(evidence_slots)
+            or len(payload_slot_values) != len(payload_slots)
+            or option_values != evidence_values
+            or payload_slot_values != evidence_values
+            or payload_attendees != evidence.get("attendees")
+            or payload.get("duration_minutes") != evidence.get("duration_minutes")
+        ):
+            return False
+        task = conn.execute(
+            "SELECT * FROM tasks WHERE id=?", (row["task_id"],)
+        ).fetchone()
+        if (
+            not task
+            or row["cowork_revision"] != task["cowork_revision"]
+            or row["action_type"] != task["action_type"]
+        ):
+            return False
+        from .services.cowork_runner import (
+            schedule_attendees,
+            schedule_duration_minutes,
+            schedule_interaction_is_certified,
+        )
+
+        return schedule_interaction_is_certified(
+            interaction,
+            schedule_attendees(dict(task)),
+            schedule_duration_minutes(dict(task)),
+        )
+
     conn = get_connection()
     try:
-        preview_cursor = conn.execute(
-            "UPDATE task_actions SET state = 'failed', "
-            "error = 'Interrupted by a server restart.', "
-            "completed_at = COALESCE("
-            "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')), "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-            "WHERE state = 'previewing' "
-            "AND (blocked_question IS NULL OR had_interaction = 0)"
-        )
+        preview_ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT * FROM task_actions WHERE state='previewing'"
+            ).fetchall()
+            if not durable_calendar_chooser(row)
+        ]
+        preview_count = 0
+        if preview_ids:
+            marks = ",".join("?" for _ in preview_ids)
+            preview_cursor = conn.execute(
+                "UPDATE task_actions SET state = 'failed', "
+                "error = 'Interrupted by a server restart. Start a fresh preview.', "
+                "completed_at = COALESCE("
+                "completed_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                f"WHERE id IN ({marks})",
+                preview_ids,
+            )
+            preview_count = preview_cursor.rowcount
         execution_cursor = conn.execute(
             "UPDATE task_actions SET state = 'execute_unconfirmed', "
             "error = 'Server restarted while sending. Check the destination to "
@@ -1162,6 +1490,6 @@ def recover_stuck_previews() -> int:
             "WHERE state = 'executing'"
         )
         conn.commit()
-        return preview_cursor.rowcount + execution_cursor.rowcount
+        return preview_count + execution_cursor.rowcount
     finally:
         conn.close()

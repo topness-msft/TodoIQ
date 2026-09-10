@@ -5,6 +5,7 @@ import tornado.web
 
 from ..db import get_connection
 from ..models import (
+    DELIVERY_CONFLICT_MESSAGE,
     promote_task, dismiss_task, complete_task, start_task,
     snooze_task, transition_task, get_task, update_task,
 )
@@ -63,7 +64,9 @@ class TaskActionHandler(tornado.web.RequestHandler):
             try:
                 task = action_map[action](tid)
             except ValueError as e:
-                self.set_status(400)
+                self.set_status(
+                    409 if str(e) == DELIVERY_CONFLICT_MESSAGE else 400
+                )
                 self.write(json.dumps({"error": str(e)}))
                 return
         elif action == "snooze":
@@ -72,7 +75,9 @@ class TaskActionHandler(tornado.web.RequestHandler):
             try:
                 task = snooze_task(tid, minutes=duration, until=until)
             except ValueError as e:
-                self.set_status(400)
+                self.set_status(
+                    409 if str(e) == DELIVERY_CONFLICT_MESSAGE else 400
+                )
                 self.write(json.dumps({"error": str(e)}))
                 return
         elif action == "transition":
@@ -84,7 +89,9 @@ class TaskActionHandler(tornado.web.RequestHandler):
             try:
                 task = transition_task(tid, new_status)
             except ValueError as e:
-                self.set_status(400)
+                self.set_status(
+                    409 if str(e) == DELIVERY_CONFLICT_MESSAGE else 400
+                )
                 self.write(json.dumps({"error": str(e)}))
                 return
         else:

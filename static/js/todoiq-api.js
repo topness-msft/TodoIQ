@@ -121,8 +121,9 @@ async function transitionTask(id, status) {
       body: JSON.stringify({ action: 'transition', status })
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Action failed (${res.status})`);
     if (data.task) updateLocalTask(data.task);
-  } catch (e) { toast('Failed'); }
+  } catch (e) { toast(e.message || 'Failed'); }
 }
 
 async function apiAction(id, body) {
@@ -132,6 +133,7 @@ async function apiAction(id, body) {
     body: JSON.stringify(body)
   });
   const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Action failed (${res.status})`);
   if (data.task) updateLocalTask(data.task);
   return data;
 }
@@ -244,12 +246,14 @@ wakeTask = async function(id) {
 // Override: deleteTask
 deleteTask = async function(id) {
   try {
-    await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Delete failed (${res.status})`);
     tasks = tasks.filter(t => t.id !== id);
     if (selectedId === id) closeDetail();
     toast('Deleted');
     refresh();
-  } catch (e) { toast('Failed to delete'); }
+  } catch (e) { toast(e.message || 'Failed to delete'); }
 };
 
 // Override: addTask

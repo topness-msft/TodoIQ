@@ -9,6 +9,11 @@ from enum import Enum
 
 
 ACTION_TOOL = "do_action"
+FETCH_TOOL = "fetch"
+SENT_ITEMS_URL = (
+    "/me/mailFolders/sentitems/messages?$top=20&$select="
+    "id,internetMessageHeaders,toRecipients&$orderby=sentDateTime desc"
+)
 _DURATION_RE = re.compile(r"^PT[1-9]\d*M$")
 _MINT = object()
 
@@ -42,7 +47,9 @@ def discover_read_capabilities(tools: object) -> tuple[str, ...]:
         raise CapabilityError("Work IQ returned duplicate capabilities.")
     if ACTION_TOOL not in names:
         raise CapabilityError("Work IQ does not advertise the required read capabilities.")
-    return (ACTION_TOOL,)
+    return tuple(
+        name for name in (ACTION_TOOL, FETCH_TOOL) if name in names
+    )
 
 
 def _datetime(value: object) -> bool:
