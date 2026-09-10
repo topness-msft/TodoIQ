@@ -14,6 +14,7 @@ from ..db import get_connection
 from ..models import get_last_sync, get_task
 from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
+from ..services.suggestion_checks import QueueFull, SuggestionCheckQueue
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,17 @@ SINGLE_SUGGESTION_CHECK_TIMEOUT = 420
 SUGGESTION_CHECK_BUSY_MESSAGE = (
     "A suggestion check is already running. Try again when it finishes."
 )
+SUGGESTION_CHECK_QUEUE_FULL_MESSAGE = (
+    "The suggestion check queue is full. Try again after a queued check finishes."
+)
+
+
+def _suggestion_queue(application) -> SuggestionCheckQueue:
+    queue = getattr(application, "suggestion_check_queue", None)
+    if queue is None:
+        queue = SuggestionCheckQueue()
+        application.suggestion_check_queue = queue
+    return queue
 
 
 def is_sync_running() -> bool:
@@ -55,12 +67,14 @@ class SyncStatusHandler(tornado.web.RequestHandler):
 
     def get(self):
         last_sync = get_last_sync("full_scan") or get_last_sync("flagged_emails")
+        queue = _suggestion_queue(self.application)
         self.write(json.dumps({
             "last_sync": dict(last_sync) if last_sync else None,
             "sync_running": is_sync_running(),
             "auto_sync_enabled": getattr(self.application, "auto_sync_enabled", True),
             "suggestion_check_running": is_running("suggestion-check"),
             "auto_suggestion_check_enabled": getattr(self.application, "auto_suggestion_check_enabled", True),
+            "suggestion_checks": queue.snapshot(),
         }))
 
     def post(self):
@@ -154,7 +168,25 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                     }))
                     return
 
-            if is_running("suggestion-check"):
+            if targeted:
+                try:
+                    job = _suggestion_queue(self.application).enqueue(task_id)
+                except QueueFull:
+                    self.set_status(429)
+                    self.write(json.dumps({
+                        "ok": False,
+                        "message": SUGGESTION_CHECK_QUEUE_FULL_MESSAGE,
+                    }))
+                    return
+                self.set_status(202)
+                self.write(json.dumps({
+                    "ok": True,
+                    "suggestion_check_job": job,
+                }))
+                return
+
+            queue = _suggestion_queue(self.application)
+            if queue.has_work() or is_running("suggestion-check"):
                 self.set_status(409)
                 self.write(json.dumps({
                     "ok": False,
@@ -162,27 +194,20 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                 }))
                 return
 
-            if targeted:
-                result = run_copilot(
-                    f"/suggestion-check {task_id}",
-                    label="suggestion-check",
-                    timeout=SINGLE_SUGGESTION_CHECK_TIMEOUT,
-                )
-            else:
-                conn = get_connection()
-                try:
-                    row = conn.execute(
-                        "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
-                    ).fetchone()
-                    count = row[0] if row else 0
-                finally:
-                    conn.close()
-                timeout = 120 + (count * 60)  # 2 min base + 1 min per task
-                result = run_copilot(
-                    "/suggestion-check",
-                    label="suggestion-check",
-                    timeout=timeout,
-                )
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
+                ).fetchone()
+                count = row[0] if row else 0
+            finally:
+                conn.close()
+            timeout = 120 + (count * 60)  # 2 min base + 1 min per task
+            result = run_copilot(
+                "/suggestion-check",
+                label="suggestion-check",
+                timeout=timeout,
+            )
 
             if not result["ok"]:
                 if "already running" in result["message"].lower():
@@ -195,27 +220,6 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                     self.set_status(500)
                     self.write(json.dumps(result))
                 return
-
-            if targeted:
-                attempt = {
-                    "task_id": task_id,
-                    "run_id": result["run_id"],
-                    "started_at": result["started_at"],
-                    "state": "running",
-                }
-                self.application.suggestion_check_attempt = attempt
-                result = dict(result)
-                result["suggestion_check_attempt"] = {
-                    "task_id": task_id,
-                    "run_id": result["run_id"],
-                    "started_at": result["started_at"],
-                }
-            elif hasattr(self.application, "suggestion_check_attempt"):
-                # Only a newly accepted explicit run supersedes retained
-                # targeted evidence. Validation, busy, and launch failures do
-                # not erase the last result another poller may still need.
-                delattr(self.application, "suggestion_check_attempt")
-
             self.write(json.dumps(result))
             return
 
@@ -239,46 +243,8 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
         # Plus "completed" key with exit info for error tracking
         result = dict(running)
         result["_completed"] = completed
-
-        attempt = getattr(self.application, "suggestion_check_attempt", None)
-        if attempt:
-            if attempt.get("state") == "finished":
-                metadata = dict(attempt)
-            else:
-                expected_run_id = attempt["run_id"]
-                active = (running.get("_runs") or {}).get("suggestion-check")
-                current_exit = completed.get("suggestion-check")
-                if active and active.get("run_id") == expected_run_id:
-                    metadata = {
-                        "task_id": attempt["task_id"],
-                        "run_id": expected_run_id,
-                        "started_at": attempt["started_at"],
-                        "state": "running",
-                    }
-                elif current_exit and current_exit.get("run_id") == expected_run_id:
-                    completion = dict(current_exit)
-                    metadata = {
-                        "task_id": attempt["task_id"],
-                        "run_id": expected_run_id,
-                        "started_at": attempt["started_at"],
-                        "finished_at": completion["finished_at"],
-                        "state": "finished",
-                        "superseded": False,
-                        "completion": completion,
-                    }
-                    self.application.suggestion_check_attempt = metadata
-                else:
-                    # The exact completion was evicted/lost or another
-                    # same-label run took over. Never borrow that run's result.
-                    metadata = {
-                        "task_id": attempt["task_id"],
-                        "run_id": expected_run_id,
-                        "started_at": attempt["started_at"],
-                        "state": "finished",
-                        "superseded": True,
-                    }
-                    self.application.suggestion_check_attempt = metadata
-
-            result["_suggestion_check_attempt"] = metadata
+        result["_suggestion_check_queue"] = _suggestion_queue(
+            self.application
+        ).snapshot()
 
         self.write(json.dumps(result))

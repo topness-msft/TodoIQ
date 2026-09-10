@@ -1689,6 +1689,15 @@ def execute_prompt(
             "Map the exact subject, body, selected start/end/timezone, and attendees "
             "from the payload to a Microsoft Graph event. Return the created event id."
         )
+        if payload.get("is_online_meeting") is True:
+            if payload.get("online_meeting_provider") != "teamsForBusiness":
+                raise ValueError("Unsupported sealed online meeting provider")
+            operation += (
+                ' Include "isOnlineMeeting":true and '
+                '"onlineMeetingProvider":"teamsForBusiness" on the Graph event '
+                "as specified by the sealed payload. Let Microsoft 365 generate "
+                "the Teams joining details; do not fabricate a link."
+            )
         if idempotency_key_value:
             operation += (
                 f' Set the event property "transactionId" to exactly '

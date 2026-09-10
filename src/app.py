@@ -37,6 +37,7 @@ from .models import (
 )
 from .services.claude_runner import run_copilot
 from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
+from .services.suggestion_checks import SuggestionCheckQueue
 from .services.workspace_settings import (
     get_workspace_settings,
     missing_settings_warning,
@@ -54,6 +55,7 @@ UNSNOOZE_INTERVAL_MS = 60 * 1000  # 60 seconds
 PARSE_CHECK_INTERVAL_MS = 30 * 1000  # 30 seconds
 WAITING_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000  # 4 hours
 SUGGESTION_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000  # 3 hours
+SUGGESTION_QUEUE_PUMP_INTERVAL_MS = 500
 BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000  # 6 hours
 BACKUP_KEEP_DAYS = 7
 
@@ -74,8 +76,12 @@ SUGGESTION_CHECK_BASE_TIMEOUT = 120  # 2 min base
 SUGGESTION_CHECK_PER_TASK_TIMEOUT = 60  # +1 min per task
 
 
-def _check_suggestions():
+def _check_suggestions(queue=None):
     """Called every 3 hours to check if suggested tasks are already resolved."""
+    if queue is not None and queue.has_work():
+        logger.info("Suggestion check: deferred behind targeted queue")
+        return
+
     conn = get_connection()
     try:
         row = conn.execute(
@@ -195,6 +201,8 @@ def make_app() -> tornado.web.Application:
     app.sync_callback = None
     app.auto_suggestion_check_enabled = True
     app.suggestion_check_callback = None
+    app.suggestion_check_queue = SuggestionCheckQueue()
+    app.suggestion_check_queue_callback = None
     return app
 
 
@@ -310,8 +318,22 @@ def start_server(port=8766):
     waiting_callback.start()
     logger.info("Waiting activity checker enabled (every 4 hr)")
 
+    # Targeted suggestion checks are server-owned and continue when no browser
+    # is open. The queue itself is passive in make_app(); only a real server
+    # installs this IOLoop pump.
+    suggestion_queue_cb = tornado.ioloop.PeriodicCallback(
+        app.suggestion_check_queue.pump_once,
+        SUGGESTION_QUEUE_PUMP_INTERVAL_MS,
+    )
+    suggestion_queue_cb.start()
+    app.suggestion_check_queue_callback = suggestion_queue_cb
+    logger.info("Targeted suggestion queue enabled (FIFO, one at a time)")
+
     # Suggestion check every 3 hours
-    suggestion_check_cb = tornado.ioloop.PeriodicCallback(_check_suggestions, SUGGESTION_CHECK_INTERVAL_MS)
+    suggestion_check_cb = tornado.ioloop.PeriodicCallback(
+        lambda: _check_suggestions(app.suggestion_check_queue),
+        SUGGESTION_CHECK_INTERVAL_MS,
+    )
     suggestion_check_cb.start()
     app.suggestion_check_callback = suggestion_check_cb
     app.auto_suggestion_check_enabled = True
@@ -326,6 +348,12 @@ def start_server(port=8766):
     return app, tornado.ioloop.IOLoop.current()
 
 
+def _stop_suggestion_queue(app):
+    callback = getattr(app, "suggestion_check_queue_callback", None)
+    if callback:
+        callback.stop()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
     log_file = os.environ.get("TODONESS_LOG_FILE")
@@ -334,6 +362,7 @@ def main():
     try:
         ioloop.start()
     finally:
+        _stop_suggestion_queue(_app)
         shutdown_runtime()
 
 

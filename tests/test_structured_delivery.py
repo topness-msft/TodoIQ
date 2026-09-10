@@ -603,6 +603,29 @@ class TestCalendarIdempotency(StructuredDeliveryTestBase):
         )
         self.assertNotIn("transactionId", teams_prompt)
 
+    def test_calendar_prompt_maps_sealed_teams_flags_without_changing_legacy_retry(self):
+        legacy = {
+            "schema_version": 1,
+            "channel": "calendar",
+            "subject": "Planning call",
+            "body": "Agree next steps.",
+        }
+        key = "riveter-cal-t1-a2"
+        legacy_prompt = structured_delivery.execute_prompt(legacy, "corr-1", key, recover=True)
+        self.assertNotIn("isOnlineMeeting", legacy_prompt)
+        self.assertNotIn("onlineMeetingProvider", legacy_prompt)
+        teams_event = dict(
+            legacy,
+            is_online_meeting=True,
+            online_meeting_provider="teamsForBusiness",
+        )
+        for recover in (False, True):
+            prompt = structured_delivery.execute_prompt(teams_event, "corr-1", key, recover=recover)
+            self.assertIn('"isOnlineMeeting":true', prompt)
+            self.assertIn('"onlineMeetingProvider":"teamsForBusiness"', prompt)
+            self.assertIn(key, prompt)
+            self.assertIn("transactionId", prompt)
+
     def test_calendar_execution_requires_the_key_to_be_echoed(self):
         _task, action = self._calendar_action()
 
@@ -4578,6 +4601,9 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
             "channel": "calendar",
             "subject": "Project review",
             "body": "Review decisions and next steps.",
+            "is_online_meeting": False,
+            "online_meeting_provider": "skypeForBusiness",
+            "joinUrl": "https://untrusted.example.test/fake-meeting",
             "duration_minutes": 25,
             "attendees": [
                 {"name": "Rima Reyes", "email": "rima@microsoft.com"}
@@ -4647,6 +4673,8 @@ class TestStructuredDeliveryRoutes(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(event, {
             "schema_version": 1,
             "channel": "calendar",
+            "is_online_meeting": True,
+            "online_meeting_provider": "teamsForBusiness",
             "subject": "Project review",
             "body": "Review decisions and next steps.",
             "attendees": [

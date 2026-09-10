@@ -2315,6 +2315,8 @@ class CoworkAnswerHandler(tornado.web.RequestHandler):
             event = {
                 "schema_version": 1,
                 "channel": "calendar",
+                "is_online_meeting": True,
+                "online_meeting_provider": "teamsForBusiness",
                 "subject": preview_payload.get("subject"),
                 "body": preview_payload.get("body") or "",
                 "attendees": preview_payload.get("attendees") or [],

@@ -761,6 +761,18 @@ html, body {
     background: var(--bg-tertiary);
 }
 
+.suggestion-check-feedback {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 7px 16px 8px 50px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--danger);
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
 .section-toggle {
     font-size: 10px;
     color: var(--text-secondary);

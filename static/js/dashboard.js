@@ -78,6 +78,7 @@ function init() {
     setupDropZones();
     startParsePoller();
     fetchSyncStatus();
+    _pollSuggestionCheck();
     fetchWorkIQStatus();
     startSyncWatcher();
     setupKeyboardShortcuts();
@@ -2852,11 +2853,16 @@ function suggestionCheckBadge(task) {
 function renderSuggestionCheckCard(task) {
     if (task.status !== 'suggested') return '';
     var activity = waitingSignal(task).activity;
-    var attempt = _suggestionCheckAttempt;
-    if (attempt && attempt.taskId === task.id
-            && (attempt.state === 'starting' || attempt.state === 'running'
-                || attempt.state === 'finishing' || attempt.state === 'error')) {
-        var checking = attempt.state !== 'error';
+    var attempt = _suggestionJobForTask(task.id);
+    if (attempt && (attempt.state !== 'succeeded' || attempt.refreshError)) {
+        var checking = _suggestionCheckInProgress(attempt);
+        var skipped = attempt.state === 'skipped';
+        var statusText = checking
+            ? (attempt.state === 'queued' ? 'Queued' : 'Checking...')
+            : (skipped ? 'Skipped' : "Couldn't check");
+        var buttonText = checking
+            ? (attempt.state === 'queued' ? 'Queued' : 'Checking...')
+            : (activity ? 'Re-check' : 'Check Now');
         var previous = '';
         if (activity) {
             var previousText = activity.summary || activity.error || '';
@@ -2871,16 +2877,16 @@ function renderSuggestionCheckCard(task) {
             + '<span class="waiting-activity-status '
             + (checking ? '' : 'activity-signal-check_failed')
             + '" data-testid="suggestion-signal">'
-            + (checking ? 'Checking...' : "Couldn't check") + '</span>'
+            + statusText + '</span>'
             + '<button class="btn btn-sm" data-testid="suggestion-check-action" '
             + 'onclick="requestSuggestionCheck(' + task.id + ')" style="margin-left:auto"'
             + (checking ? ' disabled' : '') + '>'
-            + (checking ? 'Checking...' : (activity ? 'Re-check' : 'Check Now'))
+            + buttonText
             + '</button>'
             + '</div>'
             + '<div class="waiting-activity-summary" data-testid="suggestion-check-message">'
             + escapeHtml(attempt.message || (checking
-                ? 'Checking this suggestion...'
+                ? 'Waiting for this suggestion check...'
                 : 'The check did not complete.')) + '</div>'
             + previous
             + '</div>';
@@ -2956,10 +2962,13 @@ function renderSuggestionCheckCard(task) {
 
 var _suggestionCheckPollTimer = null;
 var _suggestionCheckPollInFlight = false;
-var _suggestionCheckAttempt = null;
+var _suggestionCheckJobs = Object.create(null);
 var _suggestionCheckSequence = 0;
-var _suggestionCheckBusyMessage =
-    'A suggestion check is already running. Try again when it finishes.';
+var _suggestionGlobalAttempt = null;
+var _suggestionTerminalHandled = Object.create(null);
+var _suggestionTerminalRefreshInFlight = Object.create(null);
+var _suggestionTerminalRefreshAttempts = Object.create(null);
+var _suggestionTerminalRefreshMaxAttempts = 3;
 
 function _selectedSuggestionTask(taskId) {
     return tasks.find(function(task) { return task.id === taskId; }) || null;
@@ -2969,6 +2978,10 @@ function _renderSuggestionAttemptTask(taskId) {
     if (selectedTaskId !== taskId) return;
     var task = _selectedSuggestionTask(taskId);
     if (task) renderDetailPane(task);
+}
+
+function _suggestionJobForTask(taskId) {
+    return _suggestionCheckJobs[String(taskId)] || null;
 }
 
 function _resetSuggestionCheckHeader(message, keepBusy) {
@@ -2984,68 +2997,58 @@ function _resetSuggestionCheckHeader(message, keepBusy) {
 }
 
 function _showSuggestionHeaderMessage(message) {
-    var btn = document.getElementById('suggestion-check-btn');
-    if (!btn || !btn.parentNode) return;
     var feedback = document.getElementById('suggestion-check-feedback');
-    if (!feedback) {
-        feedback = document.createElement('span');
-        feedback.id = 'suggestion-check-feedback';
-        feedback.style.cssText = 'font-size:11px;color:var(--danger);margin-left:4px;';
-        btn.parentNode.insertBefore(feedback, btn.nextSibling);
-    }
+    if (!feedback) return;
     feedback.textContent = message || '';
     feedback.hidden = !message;
 }
 
-function _suggestionCheckInProgress(attempt) {
-    return Boolean(attempt && ['starting', 'running', 'finishing'].indexOf(
-        attempt.state
+function _suggestionCheckInProgress(job) {
+    return Boolean(job && ['submitting', 'queued', 'running'].indexOf(
+        job.state
     ) !== -1);
 }
 
-function _failSuggestionCheck(message, keepHeaderBusy, expectedAttempt) {
-    if (expectedAttempt && _suggestionCheckAttempt !== expectedAttempt) return;
-    _stopSuggestionCheckPoll();
-    if (_suggestionCheckAttempt) {
-        _suggestionCheckAttempt.state = 'error';
-        _suggestionCheckAttempt.accepted = false;
-        _suggestionCheckAttempt.message = message;
-    }
-    if (_suggestionCheckAttempt && _suggestionCheckAttempt.taskId != null) {
-        _renderSuggestionAttemptTask(_suggestionCheckAttempt.taskId);
+function _failSuggestionCheck(message, keepHeaderBusy, expectedJob) {
+    if (expectedJob && expectedJob.taskId != null) {
+        if (_suggestionJobForTask(expectedJob.taskId) !== expectedJob) return;
+        expectedJob.state = 'failed';
+        expectedJob.error = message;
+        expectedJob.message = message;
+        _renderSuggestionAttemptTask(expectedJob.taskId);
     } else {
         _showSuggestionHeaderMessage(message);
+        if (!expectedJob || _suggestionGlobalAttempt === expectedJob) {
+            _suggestionGlobalAttempt = null;
+        }
     }
     _resetSuggestionCheckHeader(message, Boolean(keepHeaderBusy));
 }
 
 function requestSuggestionCheck(taskId) {
     var targeted = Number.isInteger(taskId);
-    if (_suggestionCheckInProgress(_suggestionCheckAttempt)) {
-        _showSuggestionHeaderMessage(_suggestionCheckBusyMessage);
-        return;
-    }
-
     _showSuggestionHeaderMessage('');
-    var task = targeted ? _selectedSuggestionTask(taskId) : null;
-    var priorActivity = task ? waitingSignal(task).activity : null;
-    var requestAttempt = {
+    var requestJob = {
         token: ++_suggestionCheckSequence,
         taskId: targeted ? taskId : null,
-        priorCheckedAt: priorActivity ? priorActivity.checked_at : null,
+        jobId: null,
         runId: null,
         startedAt: null,
-        state: 'starting',
-        accepted: false,
+        state: 'submitting',
         message: targeted
-            ? 'Checking this suggestion...'
+            ? 'Adding this suggestion to the check queue...'
             : 'Checking suggestions...'
     };
-    _suggestionCheckAttempt = requestAttempt;
     if (targeted) {
+        var current = _suggestionJobForTask(taskId);
+        if (_suggestionCheckInProgress(current)) return;
+        _suggestionCheckJobs[String(taskId)] = requestJob;
         _renderSuggestionAttemptTask(taskId);
+    } else {
+        if (_suggestionGlobalAttempt) return;
+        _suggestionGlobalAttempt = requestJob;
+        _resetSuggestionCheckHeader('Checking suggestions...', true);
     }
-    _resetSuggestionCheckHeader('Checking suggestions...', true);
 
     var requestBody = { suggestion_check: true };
     if (targeted) requestBody.task_id = taskId;
@@ -3061,30 +3064,46 @@ function requestSuggestionCheck(taskId) {
         });
     })
     .then(function(result) {
-        if (_suggestionCheckAttempt !== requestAttempt) return;
+        if (targeted) {
+            if (_suggestionJobForTask(taskId) !== requestJob) return;
+        } else if (_suggestionGlobalAttempt !== requestJob) {
+            return;
+        }
         var data = result.data;
         if (!result.response.ok || !data.ok) {
             var message = data.message || data.error
                 || 'Could not start the suggestion check. Try again.';
-            var busy = result.response.status === 409;
-            _failSuggestionCheck(message, busy, requestAttempt);
-            return;
-        }
-        var metadata = data.suggestion_check_attempt || {};
-        requestAttempt.runId = metadata.run_id || data.run_id || null;
-        requestAttempt.startedAt = metadata.started_at || data.started_at || null;
-        if (!requestAttempt.runId || !requestAttempt.startedAt) {
             _failSuggestionCheck(
-                'Could not identify the started suggestion check. Try again.',
-                false,
-                requestAttempt
+                message,
+                !targeted && result.response.status === 409,
+                requestJob
             );
             return;
         }
-        requestAttempt.state = 'running';
-        requestAttempt.accepted = true;
         if (targeted) {
+            var metadata = data.suggestion_check_job || {};
+            if (!metadata.job_id || metadata.task_id !== taskId) {
+                _failSuggestionCheck(
+                    'Could not identify the queued suggestion check. Try again.',
+                    false,
+                    requestJob
+                );
+                return;
+            }
+            _mergeSuggestionJob(requestJob, metadata);
             _renderSuggestionAttemptTask(taskId);
+        } else {
+            requestJob.runId = data.run_id || null;
+            requestJob.startedAt = data.started_at || null;
+            if (!requestJob.runId || !requestJob.startedAt) {
+                _failSuggestionCheck(
+                    'Could not identify the started suggestion check. Try again.',
+                    false,
+                    requestJob
+                );
+                return;
+            }
+            requestJob.state = 'running';
         }
         _startSuggestionCheckPoll();
     })
@@ -3093,7 +3112,7 @@ function requestSuggestionCheck(taskId) {
         _failSuggestionCheck(
             'Could not start the suggestion check. Try again.',
             false,
-            requestAttempt
+            requestJob
         );
     });
 }
@@ -3101,31 +3120,6 @@ function requestSuggestionCheck(taskId) {
 function _startSuggestionCheckPoll() {
     if (_suggestionCheckPollTimer) return;
     _suggestionCheckPollTimer = setInterval(_pollSuggestionCheck, 5000);
-}
-
-function _suggestionTimestamp(value) {
-    var parsed = value ? Date.parse(value) : NaN;
-    return Number.isFinite(parsed) ? parsed : null;
-}
-
-function _suggestionResultBelongsToAttempt(task, attempt, metadata) {
-    if (!task || task.status !== 'suggested') return false;
-    var activity = waitingSignal(task).activity;
-    if (!activity || activity.producer !== 'suggestion-check') return false;
-
-    var checkedAt = _suggestionTimestamp(activity.checked_at);
-    var startedAt = _suggestionTimestamp(metadata.started_at || attempt.startedAt);
-    var finishedAt = _suggestionTimestamp(metadata.finished_at);
-    var priorCheckedAt = _suggestionTimestamp(attempt.priorCheckedAt);
-    if (checkedAt === null || startedAt === null || finishedAt === null) return false;
-    if (checkedAt < startedAt || checkedAt > finishedAt) return false;
-    if (priorCheckedAt !== null && checkedAt <= priorCheckedAt) return false;
-
-    if (activity.check_state === 'failed' || activity.check_state === 'check_failed') {
-        return true;
-    }
-    return activity.check_state === 'ok'
-        && ['likely_resolved', 'still_pending', 'unclear'].indexOf(activity.status) !== -1;
 }
 
 function _storeSuggestionTask(task) {
@@ -3136,196 +3130,219 @@ function _storeSuggestionTask(task) {
     if (selectedTaskId === task.id) renderDetailPane(task);
 }
 
-function _suggestionCompletionForAttempt(data, metadata, attempt) {
-    var retained = metadata && metadata.completion;
-    var latest = (data._completed || {})['suggestion-check'];
-    if (retained && retained.run_id === attempt.runId) return retained;
-    if (latest && latest.run_id === attempt.runId) return latest;
-    return null;
+function _mergeSuggestionJob(target, source) {
+    target.jobId = source.job_id || target.jobId;
+    target.runId = source.run_id || null;
+    target.startedAt = source.started_at || null;
+    target.finishedAt = source.finished_at || null;
+    target.queuePosition = source.queue_position;
+    target.state = source.state || target.state;
+    target.error = source.error || null;
+    if (target.state === 'queued') {
+        target.message = 'Queued in this server session'
+            + (target.queuePosition ? ' \u00B7 position ' + target.queuePosition : '')
+            + '.';
+    } else if (target.state === 'running') {
+        target.message = 'Checking this suggestion...';
+    } else if (target.state === 'skipped') {
+        target.message = source.error
+            || 'This task is no longer suggested, so it was skipped.';
+    } else if (target.state === 'failed') {
+        target.message = source.error
+            || 'The suggestion check did not complete.';
+    }
+    return target;
 }
 
-function _otherSuggestionRunActive(data, attempt) {
-    var active = (data._runs || {})['suggestion-check'];
-    return Boolean(active && active.run_id !== attempt.runId);
-}
-
-function _finishTargetedSuggestionCheck(data, metadata, expectedAttempt) {
-    var attempt = expectedAttempt || _suggestionCheckAttempt;
-    if (!attempt || attempt.taskId == null
-            || _suggestionCheckAttempt !== attempt) return Promise.resolve();
-    var completed = _suggestionCompletionForAttempt(data, metadata, attempt);
-    var keepHeaderBusy = _otherSuggestionRunActive(data, attempt);
-
-    if (metadata.run_id !== attempt.runId || metadata.superseded || !completed) {
-        _failSuggestionCheck(
-            'The check finished without updating this suggestion. Try again.',
-            Boolean(data['suggestion-check']),
-            attempt
-        );
+function _refreshSuggestionTaskForJob(job) {
+    if (!job || !job.jobId || _suggestionTerminalHandled[job.jobId]) {
         return Promise.resolve();
     }
-    if (completed.error || (completed.exit_code != null && completed.exit_code !== 0)) {
-        _failSuggestionCheck(
-            completed.error || ('The suggestion check ended with code '
-                + completed.exit_code + '.'),
-            keepHeaderBusy,
-            attempt
-        );
+    if (_suggestionTerminalRefreshInFlight[job.jobId]) {
+        return _suggestionTerminalRefreshInFlight[job.jobId];
+    }
+    var attempts = _suggestionTerminalRefreshAttempts[job.jobId] || 0;
+    if (attempts >= _suggestionTerminalRefreshMaxAttempts) {
         return Promise.resolve();
     }
-
-    attempt.state = 'finishing';
-    attempt.message = 'Finishing this suggestion check...';
-    _renderSuggestionAttemptTask(attempt.taskId);
-    return fetch('/api/tasks/' + attempt.taskId)
+    _suggestionTerminalRefreshAttempts[job.jobId] = attempts + 1;
+    var refresh = fetch('/api/tasks/' + job.taskId)
         .then(function(res) {
+            if (res.status === 404 && job.state === 'skipped') {
+                return { removed: true };
+            }
             if (!res.ok) throw new Error('Could not load the checked suggestion.');
             return res.json();
         })
         .then(function(payload) {
-            if (_suggestionCheckAttempt !== attempt) return;
-            var latest = payload.task;
-            if (!_suggestionResultBelongsToAttempt(latest, attempt, metadata)) {
-                _failSuggestionCheck(
-                    'The check finished without updating this suggestion. Try again.',
-                    keepHeaderBusy,
-                    attempt
-                );
+            var removed = payload && payload.removed;
+            if (!removed && (!payload || !payload.task)) {
+                throw new Error('Could not load the checked suggestion.');
+            }
+            if (_suggestionJobForTask(job.taskId) !== job) {
+                _suggestionTerminalHandled[job.jobId] = true;
                 return;
             }
-            _suggestionCheckAttempt = null;
-            _resetSuggestionCheckHeader(null, keepHeaderBusy);
-            if (keepHeaderBusy) _startSuggestionCheckPoll();
-            _storeSuggestionTask(latest);
+            job.refreshError = null;
+            if (removed) {
+                tasks = tasks.filter(function(task) {
+                    return task.id !== job.taskId;
+                });
+                renderTaskList();
+                if (selectedTaskId === job.taskId) clearDetailPane();
+                _suggestionTerminalHandled[job.jobId] = true;
+                return;
+            }
+            _storeSuggestionTask(payload.task);
+            _suggestionTerminalHandled[job.jobId] = true;
         })
-        .catch(function(error) {
-            if (_suggestionCheckAttempt !== attempt) return;
-            _failSuggestionCheck(
-                error.message || 'Could not load the checked suggestion.',
-                keepHeaderBusy,
-                attempt
-            );
+        .catch(function() {
+            if (_suggestionJobForTask(job.taskId) !== job) return;
+            var exhausted = _suggestionTerminalRefreshAttempts[job.jobId]
+                >= _suggestionTerminalRefreshMaxAttempts;
+            job.refreshError = exhausted
+                ? 'The check completed, but this suggestion could not be refreshed. Re-check to try again.'
+                : 'The check completed, but this suggestion could not be refreshed. Retrying...';
+            job.message = job.refreshError;
+            _renderSuggestionAttemptTask(job.taskId);
+        })
+        .finally(function() {
+            delete _suggestionTerminalRefreshInFlight[job.jobId];
         });
+    _suggestionTerminalRefreshInFlight[job.jobId] = refresh;
+    return refresh;
+}
+
+function _suggestionRefreshNeeded(job) {
+    if (!job || !job.jobId || _suggestionTerminalHandled[job.jobId]) return false;
+    if (['succeeded', 'failed', 'skipped'].indexOf(job.state) === -1) return false;
+    return Boolean(_suggestionTerminalRefreshInFlight[job.jobId])
+        || (_suggestionTerminalRefreshAttempts[job.jobId] || 0)
+            < _suggestionTerminalRefreshMaxAttempts;
 }
 
 function _finishGlobalSuggestionCheck(data, attempt) {
-    if (!attempt || attempt.taskId != null
-            || _suggestionCheckAttempt !== attempt) return Promise.resolve();
-    var completed = _suggestionCompletionForAttempt(data, null, attempt);
-    var keepHeaderBusy = _otherSuggestionRunActive(data, attempt);
+    if (!attempt || _suggestionGlobalAttempt !== attempt) return Promise.resolve();
+    var completed = (data._completed || {})['suggestion-check'];
     if (!completed) {
         _failSuggestionCheck(
             'The suggestion check finished without a readable result. Try again.',
-            keepHeaderBusy,
+            false,
+            attempt
+        );
+        return Promise.resolve();
+    }
+    if (completed.run_id !== attempt.runId) {
+        _failSuggestionCheck(
+            'The suggestion check result could not be matched to its run. Try again.',
+            false,
             attempt
         );
         return Promise.resolve();
     }
     if (completed.error || (completed.exit_code != null && completed.exit_code !== 0)) {
         _failSuggestionCheck(
-            completed.error || ('The suggestion check ended with code '
-                + completed.exit_code + '.'),
-            keepHeaderBusy,
+            completed.error || 'The suggestion check process failed.',
+            false,
             attempt
         );
         return Promise.resolve();
     }
-    _suggestionCheckAttempt = null;
-    _resetSuggestionCheckHeader(null, keepHeaderBusy);
-    if (keepHeaderBusy) _startSuggestionCheckPoll();
+    _suggestionGlobalAttempt = null;
+    _resetSuggestionCheckHeader(null, false);
     return fetchTasks();
+}
+
+function _applySuggestionQueueSnapshot(snapshot) {
+    snapshot = snapshot || {};
+    var refreshNeeded = false;
+    var ordered = (snapshot.terminal || [])
+        .concat(snapshot.pending || [])
+        .concat(snapshot.active ? [snapshot.active] : []);
+    ordered.forEach(function(metadata) {
+        if (!metadata || metadata.task_id == null) return;
+        var key = String(metadata.task_id);
+        var current = _suggestionCheckJobs[key];
+        if (current && _suggestionCheckInProgress(current)
+                && current.jobId !== metadata.job_id) return;
+        if (!current || current.jobId !== metadata.job_id) {
+            current = {
+                token: ++_suggestionCheckSequence,
+                taskId: metadata.task_id,
+                jobId: metadata.job_id
+            };
+            _suggestionCheckJobs[key] = current;
+        }
+        _mergeSuggestionJob(current, metadata);
+        _renderSuggestionAttemptTask(metadata.task_id);
+    });
+    Object.keys(_suggestionCheckJobs).forEach(function(key) {
+        var job = _suggestionCheckJobs[key];
+        if (!_suggestionRefreshNeeded(job)) return;
+        refreshNeeded = true;
+        _refreshSuggestionTaskForJob(job);
+    });
+    return Boolean(snapshot.active || (snapshot.pending || []).length || refreshNeeded);
 }
 
 function _pollSuggestionCheck() {
     if (_suggestionCheckPollInFlight) return Promise.resolve();
     _suggestionCheckPollInFlight = true;
-    var pollAttempt = _suggestionCheckAttempt;
+    var pollGlobal = _suggestionGlobalAttempt;
     return fetch('/api/runner-status')
         .then(function(res) {
             if (!res.ok) throw new Error('Could not read suggestion check status. Try again.');
             return res.json();
         })
         .then(function(data) {
-            if (_suggestionCheckAttempt !== pollAttempt) return;
-            var metadata = data._suggestion_check_attempt || null;
+            var queueActive = _applySuggestionQueueSnapshot(
+                data._suggestion_check_queue
+            );
             var active = (data._runs || {})['suggestion-check'] || null;
-            var attempt = _suggestionCheckAttempt;
-
-            if (!attempt && metadata && metadata.run_id
-                    && active && active.run_id === metadata.run_id) {
-                if (metadata.task_id != null) {
-                    var task = _selectedSuggestionTask(metadata.task_id);
-                    var activity = task ? waitingSignal(task).activity : null;
-                    attempt = {
-                        token: ++_suggestionCheckSequence,
-                        taskId: metadata.task_id,
-                        priorCheckedAt: activity ? activity.checked_at : null,
-                        runId: metadata.run_id,
-                        startedAt: metadata.started_at,
-                        state: 'running',
-                        accepted: true,
-                        message: 'Checking this suggestion...'
-                    };
-                } else {
-                    attempt = {
-                        token: ++_suggestionCheckSequence,
-                        taskId: null,
-                        priorCheckedAt: null,
-                        runId: active.run_id,
-                        startedAt: active.started_at,
-                        state: 'running',
-                        accepted: true,
-                        message: 'Checking suggestions...'
-                    };
-                }
-                _suggestionCheckAttempt = attempt;
-                pollAttempt = attempt;
-            } else if (!attempt && active) {
-                attempt = {
+            var targetedRun = data._suggestion_check_queue
+                && data._suggestion_check_queue.active;
+            if (!_suggestionGlobalAttempt && active && !targetedRun) {
+                _suggestionGlobalAttempt = {
                     token: ++_suggestionCheckSequence,
                     taskId: null,
-                    priorCheckedAt: null,
                     runId: active.run_id,
                     startedAt: active.started_at,
                     state: 'running',
-                    accepted: true,
                     message: 'Checking suggestions...'
                 };
-                _suggestionCheckAttempt = attempt;
-                pollAttempt = attempt;
+                pollGlobal = _suggestionGlobalAttempt;
             }
 
-            if (!attempt) {
-                _stopSuggestionCheckPoll();
-                return;
-            }
-
-            if (active && active.run_id === attempt.runId) {
-                attempt.startedAt = active.started_at || attempt.startedAt;
-                attempt.state = 'running';
-                attempt.accepted = true;
-                _resetSuggestionCheckHeader('Checking suggestions...', true);
-                if (attempt.taskId != null) {
-                    _renderSuggestionAttemptTask(attempt.taskId);
+            if (_suggestionGlobalAttempt) {
+                if (active && active.run_id === _suggestionGlobalAttempt.runId) {
+                    _suggestionGlobalAttempt.state = 'running';
+                } else if (_suggestionGlobalAttempt === pollGlobal) {
+                    _finishGlobalSuggestionCheck(data, _suggestionGlobalAttempt);
                 }
-                return;
             }
 
-            _stopSuggestionCheckPoll();
-            if (attempt.taskId != null && attempt.accepted) {
-                return _finishTargetedSuggestionCheck(data, metadata || {}, attempt);
-            }
-            if (attempt.taskId == null && attempt.accepted) {
-                return _finishGlobalSuggestionCheck(data, attempt);
-            }
+            var busy = queueActive || Boolean(active) || Boolean(_suggestionGlobalAttempt);
+            _resetSuggestionCheckHeader(
+                queueActive ? 'Suggestion checks queued for this server session.'
+                    : 'Checking suggestions...',
+                busy
+            );
+            if (busy) _startSuggestionCheckPoll();
+            else _stopSuggestionCheckPoll();
         })
         .catch(function(error) {
             console.error('Suggestion check status failed:', error);
-            _failSuggestionCheck(
-                error.message || 'Could not read suggestion check status. Try again.',
-                false,
-                pollAttempt
-            );
+            if (pollGlobal) {
+                _failSuggestionCheck(
+                    error.message || 'Could not read suggestion check status. Try again.',
+                    false,
+                    pollGlobal
+                );
+            } else {
+                _showSuggestionHeaderMessage(
+                    error.message || 'Could not read suggestion check status. Try again.'
+                );
+            }
         })
         .finally(function() {
             _suggestionCheckPollInFlight = false;
@@ -3760,10 +3777,13 @@ function updateSyncUI(data) {
     // Suggestion check button state
     var scBtn = document.getElementById('suggestion-check-btn');
     if (scBtn) {
-        if (data.suggestion_check_running) {
+        var queueActive = _applySuggestionQueueSnapshot(data.suggestion_checks);
+        if (data.suggestion_check_running || queueActive) {
             if (!scBtn.classList.contains('syncing')) {
                 scBtn.classList.add('syncing');
-                scBtn.title = 'Checking suggestions...';
+                scBtn.title = queueActive
+                    ? 'Suggestion checks queued for this server session.'
+                    : 'Checking suggestions...';
             }
             _startSuggestionCheckPoll();
         } else if (!_suggestionCheckPollTimer) {
