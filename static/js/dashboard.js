@@ -128,6 +128,7 @@ async function fetchWorkIQStatus() {
 
 function renderWorkIQStatus(status) {
     var state = status.state || 'mcp_unavailable';
+    document.querySelector('.workiq-setup-card').open = state !== 'ready';
     var copy = workIQStateCopy(state);
     var readinessActionable = ![
         'missing_cli', 'version_mismatch', 'ready'
@@ -162,6 +163,7 @@ function renderWorkIQStatus(status) {
 }
 
 function renderWorkIQFailure(message) {
+    document.querySelector('.workiq-setup-card').open = true;
     var error = document.getElementById('workiq-error');
     error.textContent = message || 'Work IQ request failed.';
     error.hidden = false;

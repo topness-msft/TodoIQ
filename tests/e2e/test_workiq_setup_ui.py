@@ -73,6 +73,28 @@ def mock_status(page, state):
 
 
 class TestWorkIQSetupVisuals:
+    def test_pending_readiness_stays_expanded_until_ready(self, page: Page, base_url):
+        mock_status(page, "mcp_unavailable")
+        pending = []
+        page.route("**/api/workiq/readiness", lambda route: pending.append(route))
+        page.goto(base_url + "/")
+        button = page.get_by_test_id("workiq-readiness")
+        card = page.get_by_test_id("workiq-setup-card")
+
+        with page.expect_request("**/api/workiq/readiness"):
+            button.click()
+        expect(button).to_be_disabled()
+        expect(card).to_have_js_property("open", True)
+        expect(page.locator(".workiq-setup-body")).to_be_visible()
+
+        pending[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "status": status_for("ready")}),
+        )
+        expect(card).to_have_js_property("open", False)
+        expect(page.locator(".workiq-setup-body")).to_be_hidden()
+
     def test_status_failure_keeps_readiness_hidden_and_disabled(
         self, page: Page, base_url
     ):
@@ -83,6 +105,8 @@ class TestWorkIQSetupVisuals:
         readiness = page.get_by_test_id("workiq-readiness")
         expect(readiness).to_be_hidden()
         expect(readiness).to_be_disabled()
+        expect(page.get_by_test_id("workiq-error")).to_be_visible()
+        expect(page.get_by_test_id("workiq-setup-card")).to_have_js_property("open", True)
 
     def test_unchecked_runtime_offers_explicit_eula_and_readiness_actions(
         self, page: Page, base_url
@@ -214,6 +238,7 @@ class TestWorkIQSetupVisuals:
                 "data-state", state
             )
             expect(page.get_by_test_id("workiq-state")).to_have_text(badge)
+            expect(card).to_have_js_property("open", state != "ready")
             expect(page.locator("#workiq-message")).to_have_text(help_copy)
             expected_installed = (
                 "not installed" if state == "missing_cli"
@@ -242,7 +267,40 @@ class TestWorkIQSetupVisuals:
             box = card.bounding_box()
             assert box and box["width"] > 0 and box["height"] > 0
             assert box["x"] >= 0 and box["x"] + box["width"] <= 1440
+            if state == "ready":
+                assert box["height"] <= 60
+                expect(page.locator(".workiq-setup-body")).to_be_hidden()
             capture(page, state, "desktop")
+
+    def test_ready_card_can_be_opened_and_reopens_for_errors(self, page: Page, base_url):
+        mock_status(page, "ready")
+        page.goto(base_url + "/")
+        card = page.get_by_test_id("workiq-setup-card")
+        body = page.locator(".workiq-setup-body")
+        summary = card.locator("summary")
+        expect(summary.locator("span").first).to_have_text("Work IQ")
+        expect(card).to_have_js_property("open", False)
+        expect(body).to_be_hidden()
+
+        summary.click()
+        expect(card).to_have_js_property("open", True)
+        expect(body).to_be_visible()
+        summary.click()
+        expect(body).to_be_hidden()
+
+        page.evaluate("renderWorkIQFailure('Could not refresh Work IQ status.')")
+        expect(card).to_have_js_property("open", True)
+        expect(page.get_by_test_id("workiq-error")).to_have_text(
+            "Could not refresh Work IQ status."
+        )
+        capture(page, "ready-to-error", "desktop")
+
+        page.evaluate("renderWorkIQStatus", status_for("ready"))
+        expect(card).to_have_js_property("open", False)
+        expect(body).to_be_hidden()
+        page.evaluate("renderWorkIQStatus", status_for("auth_required"))
+        expect(card).to_have_js_property("open", True)
+        expect(page.get_by_test_id("workiq-readiness")).to_be_visible()
 
     def test_eula_confirmation_failure_and_ready_mobile(self, page: Page, base_url):
         page.set_viewport_size({"width": 375, "height": 720})
@@ -291,6 +349,14 @@ class TestWorkIQSetupVisuals:
             "data-state", "ready"
         )
         expect(checkbox).to_be_hidden()
+        card = page.get_by_test_id("workiq-setup-card")
+        expect(card).to_have_js_property("open", False)
+        expect(page.locator(".workiq-setup-body")).to_be_hidden()
+        card.locator("summary").click()
+        expect(page.locator(".workiq-setup-body")).to_be_visible()
+        card.locator("summary").click()
+        expect(card).to_have_js_property("open", False)
+        assert card.bounding_box()["height"] <= 60
         assert page.evaluate(
             "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
