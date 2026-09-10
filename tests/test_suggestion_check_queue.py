@@ -364,3 +364,15 @@ def test_terminal_history_is_oldest_first_bounded_and_schema_is_safe():
         [snapshot["active"]] if snapshot["active"] else []
     ):
         assert set(job) <= allowed
+
+
+def test_post_sync_manual_recheck_of_successful_suggestion_still_launches():
+    h = Harness()
+    h.add_task(1, waiting_activity=activity())
+    queue = h.queue()
+
+    queue.enqueue(1)
+    queue.pump_once()
+
+    assert h.launches == [1]
+    assert queue.job_for_task(1)["state"] == "running"

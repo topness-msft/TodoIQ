@@ -11,6 +11,7 @@ def test_make_app_constructs_passive_queue_without_periodic_callback():
         application = app_module.make_app()
 
     assert application.suggestion_check_queue is not None
+    assert application.suggestion_check_queue.post_sync_initialized is False
     assert application.suggestion_check_queue_callback is None
     periodic.assert_not_called()
 
@@ -37,8 +38,10 @@ def test_start_server_registers_and_starts_one_queue_pump():
         listen=Mock(),
     )
     callbacks = []
+    initialization_order = []
 
     def periodic_callback(callback, interval):
+        initialization_order.append(("callback", interval))
         item = Mock()
         item.callback = callback
         item.interval = interval
@@ -46,6 +49,9 @@ def test_start_server_registers_and_starts_one_queue_pump():
         return item
 
     connection = Mock()
+    queue.initialize_post_sync.side_effect = (
+        lambda enabled_reader: initialization_order.append(("initialize", enabled_reader))
+    )
     with (
         patch.object(app_module, "get_connection", return_value=connection),
         patch.object(app_module, "init_db"),
@@ -70,6 +76,9 @@ def test_start_server_registers_and_starts_one_queue_pump():
         returned, _ = app_module.start_server(0)
 
     assert returned is application
+    queue.initialize_post_sync.assert_called_once()
+    assert queue.initialize_post_sync.call_args.args[0]() is True
+    assert initialization_order[0][0] == "initialize"
     queue_callbacks = [
         item for item in callbacks
         if item.callback == queue.pump_once

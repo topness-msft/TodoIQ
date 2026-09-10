@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 import logging
 import uuid
 
-from ..models import get_task
+from ..db import get_connection
+from ..models import get_last_sync, get_task
+from . import waiting_activity
 from .claude_runner import get_exit_info, get_status, run_copilot
 
 
@@ -41,6 +43,90 @@ def _activity(task):
     return value if isinstance(value, dict) else None
 
 
+def _latest_full_scan():
+    return get_last_sync("full_scan")
+
+
+def _failed_suggestion_task_ids(connection_factory=get_connection):
+    """Return every current failed suggestion-check row in stable DB order."""
+    conn = connection_factory()
+    try:
+        rows = conn.execute(
+            "SELECT id, waiting_activity FROM tasks "
+            "WHERE status = 'suggested' ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    selected = []
+    for row in rows:
+        task_id = row["id"] if hasattr(row, "keys") else row[0]
+        raw = row["waiting_activity"] if hasattr(row, "keys") else row[1]
+        activity = waiting_activity.normalise(raw)
+        if (
+            activity
+            and activity.get("producer") == LABEL
+            and activity.get("check_state") == waiting_activity.CHECK_FAILED
+        ):
+            selected.append(task_id)
+    return selected
+
+
+def _completion_token(completed):
+    if not isinstance(completed, dict):
+        return None
+    run_id = completed.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        return ("run_id", run_id)
+    return (
+        "unsafe",
+        completed.get("started_at"),
+        completed.get("finished_at"),
+        completed.get("exit_code"),
+        bool(completed.get("error")),
+    )
+
+
+def _valid_uuid(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return True
+
+
+def _utc_second(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(None):
+        return None
+    return parsed.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _marker_id(marker):
+    if not isinstance(marker, dict):
+        return None
+    value = marker.get("id")
+    return value if type(value) is int and value > 0 else None
+
+
+def _is_failed_suggestion(task):
+    activity = _activity(task)
+    return bool(
+        task
+        and task.get("status") == "suggested"
+        and activity
+        and activity.get("producer") == LABEL
+        and activity.get("check_state") == waiting_activity.CHECK_FAILED
+    )
+
+
 class SuggestionCheckQueue:
     """Own targeted suggestion-check ordering and exact-run completion."""
 
@@ -51,6 +137,8 @@ class SuggestionCheckQueue:
         status_reader=get_status,
         completion_reader=get_exit_info,
         task_reader=get_task,
+        full_scan_reader=_latest_full_scan,
+        failed_task_reader=_failed_suggestion_task_ids,
         max_pending=100,
         max_terminal=100,
         clock=_utc_now,
@@ -59,6 +147,8 @@ class SuggestionCheckQueue:
         self._status_reader = status_reader
         self._completion_reader = completion_reader
         self._task_reader = task_reader
+        self._full_scan_reader = full_scan_reader
+        self._failed_task_reader = failed_task_reader
         self._max_pending = max_pending
         self._max_terminal = max_terminal
         self._clock = clock
@@ -68,11 +158,55 @@ class SuggestionCheckQueue:
         self._by_task = {}
         self._terminal = OrderedDict()
         self._last_error = None
+        self._post_sync_initialized = False
+        self._post_sync_enabled = False
+        self._post_sync_auto_enabled = lambda: False
+        self._post_sync_completion_watermark = None
+        self._post_sync_full_scan_watermark = 0
+        self.last_post_sync_recheck = None
+
+    @property
+    def post_sync_initialized(self):
+        return self._post_sync_initialized
+
+    def initialize_post_sync(self, auto_enabled_reader):
+        """Snapshot startup history before any sync can launch."""
+        if self._post_sync_initialized:
+            return
+        self._post_sync_auto_enabled = auto_enabled_reader
+        self._post_sync_initialized = True
+
+        try:
+            completed = self._completion_reader("sync")
+            marker = self._full_scan_reader()
+        except Exception:
+            logger.exception("Post-sync suggestion retry could not initialize")
+            self._last_error = "Could not initialize post-sync suggestion retries."
+            self.last_post_sync_recheck = self._post_sync_report(
+                error=self._last_error
+            )
+            return
+
+        marker_id = _marker_id(marker)
+        if marker is not None and marker_id is None:
+            logger.error("Post-sync suggestion retry found an unsafe startup marker")
+            self._last_error = "Could not initialize post-sync suggestion retries."
+            self.last_post_sync_recheck = self._post_sync_report(
+                error=self._last_error
+            )
+            return
+
+        self._post_sync_completion_watermark = _completion_token(completed)
+        self._post_sync_full_scan_watermark = marker_id or 0
+        self._post_sync_enabled = True
 
     def has_work(self) -> bool:
         return self._active_job_id is not None or bool(self._pending)
 
     def enqueue(self, task_id: int) -> dict:
+        return self._enqueue(task_id)
+
+    def _enqueue(self, task_id: int, *, post_sync_run_id=None) -> dict:
         existing_id = self._by_task.get(task_id)
         if existing_id:
             return self._public_job(existing_id)
@@ -90,6 +224,7 @@ class SuggestionCheckQueue:
             "finished_at": None,
             "error": None,
             "prior_checked_at": None,
+            "_post_sync_run_id": post_sync_run_id,
         }
         self._pending.append(job_id)
         self._by_task[task_id] = job_id
@@ -117,6 +252,10 @@ class SuggestionCheckQueue:
                 self._public_job(job_id) for job_id in self._terminal
             ],
             "last_error": self._last_error,
+            "last_post_sync_recheck": (
+                dict(self.last_post_sync_recheck)
+                if self.last_post_sync_recheck else None
+            ),
         }
 
     def pump_once(self) -> None:
@@ -134,6 +273,7 @@ class SuggestionCheckQueue:
         if self._active_job_id:
             job = self._jobs[self._active_job_id]
             if active_run and active_run.get("run_id") == job["run_id"]:
+                self._observe_post_sync()
                 return
 
             try:
@@ -152,6 +292,8 @@ class SuggestionCheckQueue:
                     "The suggestion check result could not be matched to its run.",
                 )
             self._active_job_id = None
+
+        self._observe_post_sync()
 
         if active_run:
             return
@@ -176,6 +318,16 @@ class SuggestionCheckQueue:
                     "skipped",
                     "This task is no longer suggested, so it was skipped.",
                 )
+                if job["_post_sync_run_id"]:
+                    self._record_post_sync_skip(job)
+                continue
+            if job["_post_sync_run_id"] and not _is_failed_suggestion(task):
+                self._finish(
+                    job,
+                    "skipped",
+                    "This suggestion no longer needs an automatic retry.",
+                )
+                self._record_post_sync_skip(job)
                 continue
 
             previous = _activity(task)
@@ -217,6 +369,167 @@ class SuggestionCheckQueue:
                 return
             self._active_job_id = job_id
             return
+
+    def _observe_post_sync(self):
+        if not self._post_sync_initialized or not self._post_sync_enabled:
+            return
+
+        try:
+            completed = self._completion_reader("sync")
+        except Exception:
+            logger.exception("Post-sync suggestion retry could not read completion")
+            self._last_error = "Could not read the latest sync completion."
+            self.last_post_sync_recheck = self._post_sync_report(
+                error=self._last_error
+            )
+            return
+
+        token = _completion_token(completed)
+        if token is None or token == self._post_sync_completion_watermark:
+            return
+
+        self._post_sync_completion_watermark = token
+        run_id = completed.get("run_id") if isinstance(completed, dict) else None
+        finished_at = (
+            completed.get("finished_at") if isinstance(completed, dict) else None
+        )
+
+        try:
+            marker = self._full_scan_reader()
+        except Exception:
+            logger.exception("Post-sync suggestion retry could not read full-scan marker")
+            self._last_error = "Could not read the latest full-scan marker."
+            self.last_post_sync_recheck = self._post_sync_report(
+                run_id=run_id,
+                finished_at=finished_at,
+                error=self._last_error,
+            )
+            return
+
+        prior_marker_id = self._post_sync_full_scan_watermark
+        marker_id = _marker_id(marker)
+        if marker_id is not None:
+            self._post_sync_full_scan_watermark = max(
+                self._post_sync_full_scan_watermark, marker_id
+            )
+
+        error = self._completion_marker_error(
+            completed, marker, marker_id, prior_marker_id
+        )
+        if error:
+            if error.startswith("Could not"):
+                self._last_error = error
+            self.last_post_sync_recheck = self._post_sync_report(
+                run_id=run_id,
+                finished_at=finished_at,
+                error=error if error.startswith("Could not") else None,
+            )
+            return
+
+        try:
+            enabled = bool(self._post_sync_auto_enabled())
+        except Exception:
+            logger.exception("Post-sync suggestion retry could not read auto-check setting")
+            self._last_error = "Could not read the automatic suggestion-check setting."
+            self.last_post_sync_recheck = self._post_sync_report(
+                run_id=run_id,
+                finished_at=finished_at,
+                error=self._last_error,
+            )
+            return
+
+        if not enabled:
+            self.last_post_sync_recheck = self._post_sync_report(
+                run_id=run_id,
+                finished_at=finished_at,
+            )
+            return
+
+        try:
+            task_ids = self._failed_task_reader()
+        except Exception:
+            logger.exception("Post-sync suggestion retry could not discover failed checks")
+            self._last_error = "Could not discover failed suggestion checks."
+            self.last_post_sync_recheck = self._post_sync_report(
+                run_id=run_id,
+                finished_at=finished_at,
+                error=self._last_error,
+            )
+            return
+
+        counts = {"accepted": 0, "deduped": 0, "overflow": 0}
+        for task_id in task_ids:
+            existing = task_id in self._by_task
+            try:
+                self._enqueue(task_id, post_sync_run_id=run_id)
+            except QueueFull:
+                counts["overflow"] += 1
+                continue
+            counts["deduped" if existing else "accepted"] += 1
+
+        self.last_post_sync_recheck = self._post_sync_report(
+            run_id=run_id,
+            finished_at=finished_at,
+            **counts,
+        )
+        if counts["overflow"]:
+            logger.warning(
+                "Post-sync suggestion retry queue overflowed for %d task(s)",
+                counts["overflow"],
+            )
+
+    def _completion_marker_error(
+        self, completed, marker, marker_id, prior_marker_id
+    ):
+        if not isinstance(completed, dict) or not _valid_uuid(completed.get("run_id")):
+            return "Could not safely identify the completed sync."
+        if completed.get("exit_code") != 0 or completed.get("error"):
+            return "Sync did not complete successfully."
+        if marker is None:
+            return "Could not match the completed sync to a full-scan marker."
+        if marker.get("sync_type") != "full_scan" or marker_id is None:
+            return "Could not safely read the completed sync marker."
+        if marker_id <= prior_marker_id:
+            return "Sync did not produce a new full-scan marker."
+
+        started = _utc_second(completed.get("started_at"))
+        finished = _utc_second(completed.get("finished_at"))
+        synced = _utc_second(marker.get("synced_at"))
+        if started is None or finished is None or synced is None:
+            return "Could not safely correlate the completed sync time."
+        if finished < started or synced < started or synced > finished:
+            return "Sync marker was outside the completed run window."
+        return None
+
+    def _post_sync_report(
+        self,
+        *,
+        run_id=None,
+        finished_at=None,
+        accepted=0,
+        deduped=0,
+        overflow=0,
+        skipped=0,
+        error=None,
+    ):
+        return {
+            "run_id": run_id,
+            "sync_finished_at": finished_at,
+            "processed_at": self._clock(),
+            "accepted": accepted,
+            "deduped": deduped,
+            "overflow": overflow,
+            "skipped": skipped,
+            "error": error,
+        }
+
+    def _record_post_sync_skip(self, job):
+        report = self.last_post_sync_recheck
+        if (
+            report
+            and report.get("run_id") == job.get("_post_sync_run_id")
+        ):
+            report["skipped"] += 1
 
     def _finalize(self, job, completed):
         finished_at = completed.get("finished_at")

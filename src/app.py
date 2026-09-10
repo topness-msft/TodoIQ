@@ -268,6 +268,9 @@ def start_server(port=8766):
         logger.warning(settings_warning)
 
     app = make_app()
+    app.suggestion_check_queue.initialize_post_sync(
+        lambda: app.auto_suggestion_check_enabled
+    )
     app.listen(port, address="127.0.0.1")
     logger.info(f"TodoNess running at http://localhost:{port}")
 

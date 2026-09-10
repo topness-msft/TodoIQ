@@ -2854,6 +2854,12 @@ function renderSuggestionCheckCard(task) {
     if (task.status !== 'suggested') return '';
     var activity = waitingSignal(task).activity;
     var attempt = _suggestionJobForTask(task.id);
+    if (attempt && !_suggestionCheckInProgress(attempt) && !attempt.refreshError
+            && activity && activity.producer === 'suggestion-check'
+            && activity.check_state === 'ok'
+            && Date.parse(activity.checked_at) > Date.parse(attempt.finishedAt)) {
+        attempt = null;
+    }
     if (attempt && (attempt.state !== 'succeeded' || attempt.refreshError)) {
         var checking = _suggestionCheckInProgress(attempt);
         var skipped = attempt.state === 'skipped';
@@ -2963,6 +2969,8 @@ function renderSuggestionCheckCard(task) {
 var _suggestionCheckPollTimer = null;
 var _suggestionCheckPollInFlight = false;
 var _suggestionCheckJobs = Object.create(null);
+var _postSyncRecheckRunId = null;
+var _postSyncRecheckMessage = null;
 var _suggestionCheckSequence = 0;
 var _suggestionGlobalAttempt = null;
 var _suggestionTerminalHandled = Object.create(null);
@@ -3255,6 +3263,26 @@ function _finishGlobalSuggestionCheck(data, attempt) {
 
 function _applySuggestionQueueSnapshot(snapshot) {
     snapshot = snapshot || {};
+    var retryReport = snapshot.last_post_sync_recheck;
+    var retryReportId = retryReport && (retryReport.run_id
+        || (retryReport.error ? 'error:' + retryReport.error : null));
+    if (retryReportId && retryReportId !== _postSyncRecheckRunId) {
+        _postSyncRecheckRunId = retryReportId;
+        var feedback = document.getElementById('suggestion-check-feedback');
+        if (feedback && _postSyncRecheckMessage
+                && feedback.textContent === _postSyncRecheckMessage) {
+            _showSuggestionHeaderMessage('');
+        }
+        _postSyncRecheckMessage = retryReport.error || null;
+        if (!_postSyncRecheckMessage && retryReport.overflow > 0) {
+            _postSyncRecheckMessage = retryReport.overflow
+                + ' failed suggestion checks could not be queued because the queue is full.'
+                + ' They remain flagged for a later pull or manual re-check.';
+        }
+        if (_postSyncRecheckMessage) {
+            _showSuggestionHeaderMessage(_postSyncRecheckMessage);
+        }
+    }
     var refreshNeeded = false;
     var ordered = (snapshot.terminal || [])
         .concat(snapshot.pending || [])
