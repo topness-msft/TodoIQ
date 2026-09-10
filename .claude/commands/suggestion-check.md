@@ -2,34 +2,56 @@
 description: Check suggested tasks for progress — detect if they're resolved or still need action
 ---
 
-Check all "suggested" tasks for recent activity to help the user decide whether to accept or dismiss them.
+Check one requested "suggested" task, or all suggested tasks when no task id is
+provided, for recent activity to help the user decide whether to accept or
+dismiss them.
 
 Today's date is $CURRENT_DATE.
 
-**IMPORTANT:** Call `ask_work_iq` directly to query M365 data. Do NOT use shell commands (`workiq ask ...`) or nested `copilot -p` calls — those will fail.
+**IMPORTANT:** Call the configured Copilot tool alias `workiq-ask` directly to
+query M365 data. Do NOT use shell commands (`workiq ask ...`) or nested
+`copilot -p` calls — those will fail.
 
 ## Step 1: Load suggested tasks
 
-Use the Bash tool to run this Python script to get all suggested tasks, prioritizing unchecked ones first:
+`$ARGUMENTS` is optional. When present it must contain exactly one positive
+digit-only task id. Reject any other value and stop; do not fall back to the
+global query.
+
+Use the Bash tool to run this Python script. A valid id loads only that task.
+With no id, retain the global unchecked-first ordering:
 
 ```bash
 python -c "
 import sqlite3, json
+raw_id = r'''$ARGUMENTS'''.strip()
+if raw_id and (not raw_id.isdigit() or int(raw_id) <= 0):
+    print('Invalid task id: expected one positive integer.')
+    raise SystemExit(2)
 conn = sqlite3.connect('data/claudetodo.db')
 conn.row_factory = sqlite3.Row
-rows = conn.execute(\"\"\"
-    SELECT id, title, description, key_people, source_type, source_id, created_at, waiting_activity, user_notes
-    FROM tasks
-    WHERE status = 'suggested'
-    ORDER BY CASE WHEN waiting_activity IS NULL THEN 0 ELSE 1 END, created_at DESC
-\"\"\").fetchall()
+if raw_id:
+    rows = conn.execute(\"\"\"
+        SELECT id, title, description, key_people, source_type, source_id, created_at, waiting_activity, user_notes
+        FROM tasks
+        WHERE id = ? AND status = 'suggested'
+    \"\"\", (int(raw_id),)).fetchall()
+else:
+    rows = conn.execute(\"\"\"
+        SELECT id, title, description, key_people, source_type, source_id, created_at, waiting_activity, user_notes
+        FROM tasks
+        WHERE status = 'suggested'
+        ORDER BY CASE WHEN waiting_activity IS NULL THEN 0 ELSE 1 END, created_at DESC
+    \"\"\").fetchall()
 for r in rows:
     print(json.dumps({'id': r['id'], 'title': r['title'], 'description': r['description'] or '', 'key_people': r['key_people'] or '', 'source_type': r['source_type'] or 'manual', 'source_id': r['source_id'] or '', 'created_at': r['created_at'], 'waiting_activity': r['waiting_activity'] or '', 'user_notes': r['user_notes'] or ''}))
 conn.close()
 "
 ```
 
-If there are zero tasks, print "No suggested tasks to check." and stop.
+If targeted mode returns zero rows, print "Suggested task not found or no longer
+suggested." and stop. Do not fall back to the global query. If global mode has
+zero rows, print "No suggested tasks to check." and stop.
 
 ## Step 2: Process each task — query, classify, and write immediately
 
@@ -45,7 +67,9 @@ For each task, perform these steps **one at a time**, writing the result to the 
 
 Determine the **query start date**: use `created_at` as the start date — we want to know what happened since the suggestion was created.
 
-Call `ask_work_iq` to query for ALL recent communication with the person across every channel. Do NOT use shell commands, nested `copilot -p` calls, or `workiq ask` CLI — call the `ask_work_iq` tool directly.
+Call `workiq-ask` to query for ALL recent communication with the person across
+every channel. Do NOT use shell commands, nested `copilot -p` calls, or
+`workiq ask` CLI — call the `workiq-ask` tool directly.
 
 Ask WorkIQ:
 
@@ -71,9 +95,9 @@ Review the WorkIQ results against the task's title and description. Classify usi
 
 When in doubt, prefer `unclear` over `likely_resolved` — only classify as resolved when the evidence is clear.
 
-**WorkIQ errors:** If `ask_work_iq` fails, times out, or returns nothing
-readable for a task, **record the failure** — do NOT skip the task and do NOT
-invent a classification.
+**WorkIQ errors:** If `workiq-ask` is unavailable, fails, times out, or returns
+nothing readable for a task, **record the failure with the current timestamp**
+— do NOT skip the task and do NOT invent a classification.
 
 Skipping meant nothing was written, so the badge went on showing the previous
 verdict under its original timestamp: "could not look" was displayed as "looked,
@@ -116,10 +140,13 @@ if error:
 else:
     activity['status'] = classification
     activity['summary'] = summary
-conn.execute('UPDATE tasks SET waiting_activity = ?, updated_at = ? WHERE id = ?', (json.dumps(activity), now, TASK_ID))
+cursor = conn.execute(
+    \"UPDATE tasks SET waiting_activity = ?, updated_at = ? WHERE id = ? AND status = 'suggested'\",
+    (json.dumps(activity), now, TASK_ID),
+)
 conn.commit()
 conn.close()
-print('Updated task #TASK_ID')
+print('Updated task #TASK_ID' if cursor.rowcount else 'Task was not updated because it is no longer suggested')
 "
 ```
 
@@ -143,7 +170,10 @@ import sqlite3
 from datetime import datetime, timezone
 conn = sqlite3.connect('data/claudetodo.db')
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-row = conn.execute('SELECT user_notes FROM tasks WHERE id = ?', (TASK_ID,)).fetchone()
+row = conn.execute(
+    \"SELECT user_notes FROM tasks WHERE id = ? AND status = 'suggested'\",
+    (TASK_ID,),
+).fetchone()
 if row and row[0]:
     lines = row[0].split('\n')
     new_lines = []
@@ -154,7 +184,10 @@ if row and row[0]:
             if line.strip() == q.strip():
                 new_lines.append('  \u2192 ' + a)
                 break
-    conn.execute('UPDATE tasks SET user_notes = ?, updated_at = ? WHERE id = ?', ('\n'.join(new_lines), now, TASK_ID))
+    conn.execute(
+        \"UPDATE tasks SET user_notes = ?, updated_at = ? WHERE id = ? AND status = 'suggested'\",
+        ('\n'.join(new_lines), now, TASK_ID),
+    )
     conn.commit()
 conn.close()
 "

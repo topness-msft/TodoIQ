@@ -11,6 +11,7 @@ import re
 import sqlite3
 import subprocess
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,15 +33,22 @@ _log_files: dict[str, object] = {}
 _start_times: dict[str, float] = {}
 # label -> per-label timeout override (seconds)
 _timeouts: dict[str, float] = {}
-# Recently finished process info: label -> {"exit_code": int, "error": str|None}
+# label -> identity for the currently active process
+_runs: dict[str, dict] = {}
+# Recently finished process info, including immutable run identity/timestamps.
 _exit_info: collections.OrderedDict[str, dict] = collections.OrderedDict()
 _EXIT_INFO_MAX = 20
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _cleanup(label: str) -> None:
     """Close log file handle for a finished process."""
     _start_times.pop(label, None)
     _timeouts.pop(label, None)
+    _runs.pop(label, None)
     fh = _log_files.pop(label, None)
     if fh:
         try:
@@ -105,12 +113,22 @@ def _set_task_error(label: str, error_message: str) -> None:
         conn.close()
 
 
-def _record_exit(label: str, exit_code: int, error: str | None) -> None:
+def _record_exit(label: str, exit_code: int, error: str | None) -> dict:
     """Cache exit info for a recently finished process."""
-    _exit_info[label] = {"exit_code": exit_code, "error": error}
+    run = _runs.get(label) or {}
+    info = {
+        "run_id": run.get("run_id"),
+        "started_at": run.get("started_at"),
+        "finished_at": _utc_now(),
+        "exit_code": exit_code,
+        "error": error,
+    }
+    _exit_info[label] = info
+    _exit_info.move_to_end(label)
     # Keep only the last N entries
     while len(_exit_info) > _EXIT_INFO_MAX:
         _exit_info.popitem(last=False)
+    return dict(info)
 
 
 def _skill_persist(label: str) -> None:
@@ -254,7 +272,7 @@ def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
     Args:
         timeout: Per-process timeout in seconds. Defaults to SUBPROCESS_TIMEOUT (300s).
 
-    Returns {"ok": True/False, "message": ...}.
+    Successful launches also return their UUID run_id and UTC started_at.
     """
     if not copilot_command_enabled(command, label):
         return {"ok": False, "message": DEMO_DISABLED_MESSAGE}
@@ -267,6 +285,8 @@ def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
 
     try:
         fh = open(str(log_path), "w")
+        run_id = str(uuid.uuid4())
+        started_at = _utc_now()
         proc = subprocess.Popen(
             [
                 "copilot", "-p", command,
@@ -285,10 +305,16 @@ def run_copilot(command: str, label: str, timeout: float | None = None) -> dict:
         _processes[label] = proc
         _log_files[label] = fh
         _start_times[label] = time.monotonic()
+        _runs[label] = {"run_id": run_id, "started_at": started_at}
         if timeout is not None:
             _timeouts[label] = timeout
         logger.info(f"[{label}] started: PID {proc.pid} (timeout={timeout or SUBPROCESS_TIMEOUT}s)")
-        return {"ok": True, "message": f"'{label}' started (PID {proc.pid})."}
+        return {
+            "ok": True,
+            "message": f"'{label}' started (PID {proc.pid}).",
+            "run_id": run_id,
+            "started_at": started_at,
+        }
     except FileNotFoundError:
         logger.warning("copilot CLI not found on PATH")
         return {"ok": False, "message": "copilot CLI not found on PATH."}
@@ -304,8 +330,9 @@ def get_exit_info(label: str | None = None) -> dict | None:
     If label is given, return that entry or None.
     """
     if label is None:
-        return dict(_exit_info)
-    return _exit_info.get(label)
+        return {key: dict(value) for key, value in _exit_info.items()}
+    info = _exit_info.get(label)
+    return dict(info) if info else None
 
 
 def get_status() -> dict:
@@ -315,4 +342,10 @@ def get_status() -> dict:
     for label in labels:
         is_running(label)  # side-effect: removes finished
 
-    return {label: True for label in _processes}
+    result = {label: True for label in _processes}
+    result["_runs"] = {
+        label: dict(_runs[label])
+        for label in _processes
+        if label in _runs
+    }
+    return result

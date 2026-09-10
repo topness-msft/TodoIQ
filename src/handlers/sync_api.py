@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # leaving the card showing its previous answer with the previous timestamp,
 # which is the exact confusion the check exists to remove.
 SINGLE_WAITING_CHECK_TIMEOUT = 420
+SINGLE_SUGGESTION_CHECK_TIMEOUT = 420
+SUGGESTION_CHECK_BUSY_MESSAGE = (
+    "A suggestion check is already running. Try again when it finishes."
+)
 
 
 def is_sync_running() -> bool:
@@ -127,18 +131,91 @@ class SyncStatusHandler(tornado.web.RequestHandler):
 
         # On-demand suggestion check
         if body.get("suggestion_check"):
-            conn = get_connection()
-            try:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
-                ).fetchone()
-                count = row[0] if row else 0
-            finally:
-                conn.close()
-            timeout = 120 + (count * 60)  # 2 min base + 1 min per task
-            result = run_copilot("/suggestion-check", label="suggestion-check", timeout=timeout)
-            if not result["ok"] and "already running" not in result["message"].lower():
-                self.set_status(500)
+            targeted = "task_id" in body
+            task_id = None
+            if targeted:
+                raw_id = body["task_id"]
+                if type(raw_id) is not int or raw_id <= 0:
+                    self.set_status(400)
+                    self.write(json.dumps({
+                        "error": "task_id must be a strict positive integer",
+                    }))
+                    return
+                task_id = raw_id
+                task = get_task(task_id)
+                if not task:
+                    self.set_status(404)
+                    self.write(json.dumps({"error": "Not found"}))
+                    return
+                if task["status"] != "suggested":
+                    self.set_status(409)
+                    self.write(json.dumps({
+                        "error": "This task is no longer suggested.",
+                    }))
+                    return
+
+            if is_running("suggestion-check"):
+                self.set_status(409)
+                self.write(json.dumps({
+                    "ok": False,
+                    "message": SUGGESTION_CHECK_BUSY_MESSAGE,
+                }))
+                return
+
+            if targeted:
+                result = run_copilot(
+                    f"/suggestion-check {task_id}",
+                    label="suggestion-check",
+                    timeout=SINGLE_SUGGESTION_CHECK_TIMEOUT,
+                )
+            else:
+                conn = get_connection()
+                try:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
+                    ).fetchone()
+                    count = row[0] if row else 0
+                finally:
+                    conn.close()
+                timeout = 120 + (count * 60)  # 2 min base + 1 min per task
+                result = run_copilot(
+                    "/suggestion-check",
+                    label="suggestion-check",
+                    timeout=timeout,
+                )
+
+            if not result["ok"]:
+                if "already running" in result["message"].lower():
+                    self.set_status(409)
+                    self.write(json.dumps({
+                        "ok": False,
+                        "message": SUGGESTION_CHECK_BUSY_MESSAGE,
+                    }))
+                else:
+                    self.set_status(500)
+                    self.write(json.dumps(result))
+                return
+
+            if targeted:
+                attempt = {
+                    "task_id": task_id,
+                    "run_id": result["run_id"],
+                    "started_at": result["started_at"],
+                    "state": "running",
+                }
+                self.application.suggestion_check_attempt = attempt
+                result = dict(result)
+                result["suggestion_check_attempt"] = {
+                    "task_id": task_id,
+                    "run_id": result["run_id"],
+                    "started_at": result["started_at"],
+                }
+            elif hasattr(self.application, "suggestion_check_attempt"):
+                # Only a newly accepted explicit run supersedes retained
+                # targeted evidence. Validation, busy, and launch failures do
+                # not erase the last result another poller may still need.
+                delattr(self.application, "suggestion_check_attempt")
+
             self.write(json.dumps(result))
             return
 
@@ -157,8 +234,51 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
 
     def get(self):
         running = get_status()
+        completed = get_exit_info()
         # Flat format for backward compat: {label: true, ...}
         # Plus "completed" key with exit info for error tracking
         result = dict(running)
-        result["_completed"] = get_exit_info()
+        result["_completed"] = completed
+
+        attempt = getattr(self.application, "suggestion_check_attempt", None)
+        if attempt:
+            if attempt.get("state") == "finished":
+                metadata = dict(attempt)
+            else:
+                expected_run_id = attempt["run_id"]
+                active = (running.get("_runs") or {}).get("suggestion-check")
+                current_exit = completed.get("suggestion-check")
+                if active and active.get("run_id") == expected_run_id:
+                    metadata = {
+                        "task_id": attempt["task_id"],
+                        "run_id": expected_run_id,
+                        "started_at": attempt["started_at"],
+                        "state": "running",
+                    }
+                elif current_exit and current_exit.get("run_id") == expected_run_id:
+                    completion = dict(current_exit)
+                    metadata = {
+                        "task_id": attempt["task_id"],
+                        "run_id": expected_run_id,
+                        "started_at": attempt["started_at"],
+                        "finished_at": completion["finished_at"],
+                        "state": "finished",
+                        "superseded": False,
+                        "completion": completion,
+                    }
+                    self.application.suggestion_check_attempt = metadata
+                else:
+                    # The exact completion was evicted/lost or another
+                    # same-label run took over. Never borrow that run's result.
+                    metadata = {
+                        "task_id": attempt["task_id"],
+                        "run_id": expected_run_id,
+                        "started_at": attempt["started_at"],
+                        "state": "finished",
+                        "superseded": True,
+                    }
+                    self.application.suggestion_check_attempt = metadata
+
+            result["_suggestion_check_attempt"] = metadata
+
         self.write(json.dumps(result))
