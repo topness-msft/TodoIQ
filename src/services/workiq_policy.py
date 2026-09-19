@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
+from urllib.parse import quote
 
 
 ACTION_TOOL = "do_action"
@@ -17,6 +19,10 @@ SENT_ITEMS_URL = (
 )
 _DURATION_RE = re.compile(r"^PT[1-9]\d*M$")
 _MINT = object()
+SOURCE_ID_LIMIT = 2048
+SOURCE_EMAIL_SELECT = (
+    "id,subject,conversationId,internetMessageId,receivedDateTime,from,bodyPreview,webLink"
+)
 
 
 class CapabilityError(ValueError):
@@ -39,6 +45,109 @@ class CalendarOperation:
 class AskOperation:
     question: str
     _mint: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class SourceReadOperation:
+    kind: str
+    identifiers: tuple[tuple[str, str], ...]
+    locator_source: str
+    _mint: object = field(repr=False, compare=False)
+
+
+def _source_identifier(value: object) -> str:
+    if (
+        not isinstance(value, str) or not value or len(value) > SOURCE_ID_LIMIT
+        or value != value.strip()
+        or any(unicodedata.category(char).startswith("C") for char in value)
+        or any(char in value for char in ("?", "#", "%", "\\"))
+        or value.startswith("/") or "://" in value
+        or any(segment in {".", ".."} for segment in value.split("/"))
+    ):
+        raise CapabilityError("Work IQ source identifier is invalid.")
+    return value
+
+
+def build_source_operation(locator: object) -> SourceReadOperation:
+    """Seal a task snapshot's resolved locator, never a dedup key or read-plan URL."""
+    keys = ("conversation_id", "message_id", "team_id", "channel_id", "event_id")
+    if (
+        not isinstance(locator, dict)
+        or set(locator) - {*keys, "kind", "source", "version", "internet_message_id"}
+        or type(locator.get("version", 1)) is not int
+        or locator.get("version", 1) != 1
+        or locator.get("source") not in {"captured", "derived_from_url"}
+    ):
+        raise CapabilityError("Work IQ requires a resolved source locator.")
+    kind = locator.get("kind")
+    allowed = {
+        "teams_chat": {"conversation_id", "message_id"},
+        "teams_channel": {"team_id", "channel_id", "message_id"},
+        "email": {"message_id"},
+        "meeting": {"conversation_id", "message_id", "event_id"},
+    }
+    if not isinstance(kind, str) or kind not in allowed:
+        raise CapabilityError("Work IQ source kind is not allowed.")
+    ids = {}
+    for key in keys:
+        value = locator.get(key)
+        if value is not None:
+            if key not in allowed[kind]:
+                raise CapabilityError("Work IQ source locator contains mixed identities.")
+            ids[key] = _source_identifier(value)
+    if locator.get("internet_message_id") is not None:
+        if kind != "email":
+            raise CapabilityError("Work IQ source locator contains mixed identities.")
+        _source_identifier(locator["internet_message_id"])
+    required = {
+        "teams_chat": {"conversation_id"},
+        "teams_channel": {"team_id", "channel_id", "message_id"},
+        "email": {"message_id"},
+        "meeting": {"conversation_id"} if ids.get("conversation_id") else {"event_id"},
+    }
+    if not required[kind].issubset(ids):
+        raise CapabilityError("Work IQ source locator is incomplete.")
+    identifiers = tuple(ids.items())
+    provenance = locator["source"]
+    # Bind the mint to its values: dataclasses.replace cannot reuse it for new IDs.
+    return SourceReadOperation(kind, identifiers, provenance, (_MINT, kind, identifiers, provenance))
+
+
+def require_source_operation(operation: object) -> SourceReadOperation:
+    if (
+        not isinstance(operation, SourceReadOperation)
+        or operation._mint != (_MINT, operation.kind, operation.identifiers, operation.locator_source)
+    ):
+        raise CapabilityError("Work IQ source operation was not policy-minted.")
+    return build_source_operation({
+        "kind": operation.kind, "source": operation.locator_source, **dict(operation.identifiers),
+    })
+
+
+def _source_chat_path(conversation_id: str) -> str:
+    return f"/me/chats/{quote(_source_identifier(conversation_id), safe='')}/messages?$top=50"
+
+
+def _source_initial_path(operation: SourceReadOperation) -> str:
+    operation = require_source_operation(operation)
+    ids = dict(operation.identifiers)
+    encoded = {key: quote(value, safe="") for key, value in ids.items()}
+    if operation.kind in {"teams_chat", "meeting"} and ids.get("conversation_id"):
+        return _source_chat_path(ids["conversation_id"])
+    if operation.kind == "teams_channel":
+        return (
+            f"/teams/{encoded['team_id']}/channels/{encoded['channel_id']}"
+            f"/messages/{encoded['message_id']}/replies?$top=50"
+        )
+    if operation.kind == "email":
+        return f"/me/messages/{encoded['message_id']}?$select={SOURCE_EMAIL_SELECT}"
+    return f"/me/events/{encoded['event_id']}?$select=id,subject,start,end,organizer,onlineMeeting"
+
+
+def _source_email_conversation_path(conversation_id: str) -> str:
+    literal = _source_identifier(conversation_id).replace("'", "''")
+    query = quote(f"conversationId eq '{literal}'", safe="")
+    return f"/me/messages?$filter={query}&$select={SOURCE_EMAIL_SELECT}&$top=25"
 
 
 def build_ask_operation(question: object) -> AskOperation:

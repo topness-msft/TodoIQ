@@ -25,10 +25,16 @@ def main():
     parser.add_argument("--scenario", default="ok")
     parser.add_argument("--trace")
     parser.add_argument("--ask-result")
+    parser.add_argument("--source-script")
     args = parser.parse_args()
     call_count = 0
     list_count = 0
     ask_count = 0
+    source_count = 0
+    source_script = None
+    if args.source_script:
+        with open(args.source_script, encoding="utf-8") as handle:
+            source_script = json.load(handle)
 
     if args.scenario == "stderr-secret":
         print(
@@ -88,6 +94,8 @@ def main():
                 tools = [{"name": "do_action", "description": "Structured action"}]
             if args.scenario == "only-ask":
                 tools = [{"name": "ask"}]
+            if args.scenario == "only-fetch":
+                tools = [{"name": "fetch"}]
             if args.scenario == "only-stale-ask":
                 tools = [{"name": "ask_work_iq"}]
             if (
@@ -161,6 +169,24 @@ def main():
                 emit({"jsonrpc": "2.0", "id": response_id, "result": result})
                 continue
             if tool_name == "fetch":
+                arguments = request["params"]["arguments"]
+                if source_script is not None and "/mailFolders/sentitems/" not in arguments["entityUrls"][0]:
+                    step = source_script[min(source_count, len(source_script) - 1)]
+                    source_count += 1
+                    time.sleep(step.get("delay", 0))
+                    if step.get("hang"):
+                        continue
+                    if step.get("protocol"):
+                        sys.stdout.write("not-json\n")
+                        sys.stdout.flush()
+                        continue
+                    if step.get("eof"):
+                        return
+                    if "error" in step:
+                        emit({"jsonrpc": "2.0", "id": response_id, "error": step["error"]})
+                    else:
+                        emit({"jsonrpc": "2.0", "id": response_id, "result": step["result"]})
+                    continue
                 if args.scenario == "fetch-tool-error":
                     emit({
                         "jsonrpc": "2.0", "id": response_id,

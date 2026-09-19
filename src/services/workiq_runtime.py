@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 import os
 import atexit
 import queue
@@ -15,7 +17,9 @@ from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 from .workiq_policy import (
     ACTION_TOOL,
@@ -25,12 +29,19 @@ from .workiq_policy import (
     CalendarAction,
     CalendarOperation,
     AskOperation,
+    SourceReadOperation,
     CapabilityError,
     build_calendar_operation,
     build_ask_operation,
     discover_read_capabilities,
     require_calendar_operation,
     require_ask_operation,
+    build_source_operation,
+    require_source_operation,
+    _source_identifier,
+    _source_initial_path,
+    _source_chat_path,
+    _source_email_conversation_path,
 )
 from .workiq_setup import (
     WorkIQAccountError,
@@ -43,6 +54,9 @@ from .workiq_setup import (
 logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = "2025-06-18"
 ASK_AUTH_COOLDOWN_SECONDS = 60
+SOURCE_AUTH_COOLDOWN_SECONDS = 60
+SOURCE_EXCERPT_LIMIT = 512
+SOURCE_URL_LIMIT = 2048
 ASK_PROBE_QUESTION = (
     "Reply exactly RIVETER_PROTOCOL_PROBE. Do not search or access Microsoft 365 data."
 )
@@ -115,6 +129,51 @@ class InvalidStructuredContentError(WorkIQError):
     code = "invalid_structured_content"
 
 
+class SourceUnreadableError(WorkIQError):
+    code = "source_unreadable"
+
+
+class SourcePartialError(SourceUnreadableError):
+    code = "source_partial"
+
+
+class SourceForbiddenError(SourceUnreadableError):
+    code = "source_forbidden"
+
+
+class SourceNotFoundError(SourceUnreadableError):
+    code = "source_not_found"
+
+
+class SourceHTTPError(WorkIQError):
+    code = "source_http"
+
+
+class _SourceText(HTMLParser):
+    """Extract inert, bounded evidence text; never retain raw HTML in a result."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.ignored = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.ignored += 1
+        elif tag in {"p", "div", "br", "li"} and not self.ignored:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.ignored = max(0, self.ignored - 1)
+        elif tag in {"p", "div", "li"} and not self.ignored:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.ignored:
+            self.parts.append(data)
+
+
 class QueueFullError(WorkIQError):
     code = "queue_full"
 
@@ -138,6 +197,8 @@ class _Operation:
     plan: str = "readiness"
     calendar: CalendarOperation | None = None
     ask: AskOperation | None = None
+    source: SourceReadOperation | None = None
+    # Shared absolute admission deadline for ask and source reads.
     ask_deadline: float | None = None
     state: str = "queued"
     result: dict | None = None
@@ -212,6 +273,9 @@ class WorkIQRuntime:
         self._ask_ready = False
         self._ask_blocker: dict | None = None
         self._ask_retry_after = 0.0
+        self._source_ready = False
+        self._source_blocker: dict | None = None
+        self._source_retry_after = 0.0
         self._request_id = 0
         self._active_operation: _Operation | None = None
         self._active_request_id: int | None = None
@@ -253,6 +317,7 @@ class WorkIQRuntime:
             self._authenticated = False
             self._ask_available = False
             self._ask_ready = False
+            self._source_ready = False
             self._thread = threading.Thread(
                 target=self._worker_main,
                 args=(startup_deadline,),
@@ -323,6 +388,7 @@ class WorkIQRuntime:
             self._error = error.public()
             self._authenticated = False
             self._ask_ready = False
+            self._source_ready = False
             self._stopping.set()
             self._ready_event.set()
             process = self._process
@@ -344,11 +410,12 @@ class WorkIQRuntime:
         *,
         calendar: CalendarOperation | None = None,
         ask: AskOperation | None = None,
+        source: SourceReadOperation | None = None,
     ) -> str:
         ask_deadline = (
-            self._monotonic_clock() + timeout if plan in {"ask", "ask_probe"} else None
+            self._monotonic_clock() + timeout if plan in {"ask", "ask_probe", "source"} else None
         )
-        if plan not in {"readiness", "calendar", "sent_items", "ask_probe", "ask"}:
+        if plan not in {"readiness", "calendar", "sent_items", "ask_probe", "ask", "source"}:
             raise CapabilityError("Riveter has no approved plan for this read.")
         if plan == "calendar":
             calendar = require_calendar_operation(calendar)
@@ -358,12 +425,17 @@ class WorkIQRuntime:
             ask = require_ask_operation(ask)
         elif ask is not None:
             raise CapabilityError("Only an ask plan can carry an ask operation.")
+        if plan == "source":
+            source = require_source_operation(source)
+        elif source is not None:
+            raise CapabilityError("Only a source plan can carry a source operation.")
         return self._enqueue_operation(_Operation(
             job_id=str(uuid.uuid4()),
             timeout=timeout,
             plan=plan,
             calendar=calendar,
             ask=ask,
+            source=source,
             ask_deadline=ask_deadline,
         ))
 
@@ -386,10 +458,16 @@ class WorkIQRuntime:
             with self._lock:
                 self._operations.pop(operation.job_id, None)
                 operation.ask = None
+                operation.source = None
             raise QueueFullError("Work IQ read queue is full.") from exc
         return operation.job_id
 
     def wait(self, job_id: str, timeout: float | None = None) -> dict:
+        return self._wait_operation(job_id, timeout)
+
+    def _wait_operation(
+        self, job_id: str, timeout: float | None = None, *, source_data: bool = False,
+    ) -> dict:
         with self._lock:
             operation = self._operations.get(job_id)
         if operation is None:
@@ -411,8 +489,8 @@ class WorkIQRuntime:
             ):
                 self._expire_ask(operation)
         with self._lock:
-            result = operation.public()
-            if operation.plan in {"ask", "ask_probe"} and operation.result:
+            result = operation.public(include_data=operation.plan != "source" or source_data)
+            if operation.plan in {"ask", "ask_probe", "source"} and operation.result:
                 operation.result.pop("data", None)
             return result
 
@@ -456,6 +534,42 @@ class WorkIQRuntime:
         """Return only transient answer/correlation from a policy-minted ask."""
         deadline = self._monotonic_clock() + timeout
         return self._execute_ask_request(build_ask_operation(question), deadline)
+
+    def read_source(self, locator: dict, *, timeout: float) -> dict:
+        """Read one exact resolved task source; only complete pages yield evidence.
+
+        Source auth is proven by this actual fetch, independently of calendar/ask.
+        Locators must come from source_locator.resolve on a server task snapshot.
+        """
+        deadline = self._monotonic_clock() + timeout
+        source = build_source_operation(locator)
+        with self._lock:
+            self._check_source_cooldown()
+        # Reuse Stage 1's owner-aware admission/start-lock deadline path.
+        self._start_for_ask(deadline)
+        job_id = self._enqueue_operation(_Operation(
+            job_id=str(uuid.uuid4()), timeout=self._ask_time_left(deadline),
+            plan="source", source=source, ask_deadline=deadline,
+        ))
+        try:
+            result = self._wait_operation(job_id, source_data=True)
+            if result.get("state") not in {"succeeded", "failed", "timed_out", "cancelled"}:
+                self.cancel(job_id)
+                raise TimeoutError("Work IQ source read timed out.")
+            if not result.get("ok"):
+                self._raise_public_error(result.get("error"))
+            self._ask_time_left(deadline)
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise SourceUnreadableError("Work IQ source result was unavailable.")
+            return data
+        finally:
+            with self._lock:
+                stored = self._operations.get(job_id)
+                if stored:
+                    stored.source = None
+                    if stored.result:
+                        stored.result.pop("data", None)
 
     def _execute_ask_request(
         self, ask: AskOperation | None, deadline: float
@@ -668,6 +782,7 @@ class WorkIQRuntime:
             self._ready_event.set()
             self._authenticated = False
             self._ask_ready = False
+            self._source_ready = False
             process = self._process
             commands = self._commands
             incoming = self._incoming
@@ -706,6 +821,7 @@ class WorkIQRuntime:
             for operation in owned_operations:
                 operation.calendar = None
                 operation.ask = None
+                operation.source = None
                 if operation.result:
                     operation.result.pop("data", None)
             thread_stopped = not thread or not thread.is_alive()
@@ -732,6 +848,9 @@ class WorkIQRuntime:
             self._ask_ready = False
             self._ask_blocker = None
             self._ask_retry_after = 0.0
+            self._source_ready = False
+            self._source_blocker = None
+            self._source_retry_after = 0.0
 
     def _worker_main(self, startup_deadline: float) -> None:
         try:
@@ -779,6 +898,7 @@ class WorkIQRuntime:
                     self._error = exc.public()
                 self._authenticated = False
                 self._ask_ready = False
+                self._source_ready = False
                 self._ready_event.set()
         except Exception as exc:
             logger.error(
@@ -792,6 +912,7 @@ class WorkIQRuntime:
                     self._error = error.public()
                 self._authenticated = False
                 self._ask_ready = False
+                self._source_ready = False
                 self._ready_event.set()
         finally:
             with self._lock:
@@ -965,6 +1086,10 @@ class WorkIQRuntime:
                 self._run_sent_items(operation)
             elif operation.plan in {"ask_probe", "ask"}:
                 self._run_ask_operation(
+                    operation, legacy_state or (self._state, self._error)
+                )
+            elif operation.plan == "source":
+                self._run_source_operation(
                     operation, legacy_state or (self._state, self._error)
                 )
             else:
@@ -1189,6 +1314,348 @@ class WorkIQRuntime:
             raise InvalidStructuredContentError("Work IQ ask returned invalid content.")
         return {"answer": content[0]["text"], "conversation_id": structured["conversationId"]}
 
+    def _check_source_cooldown(self) -> None:
+        if self._source_blocker and self._monotonic_clock() < self._source_retry_after:
+            self._raise_public_error(self._source_blocker)
+
+    def _run_source_operation(self, operation: _Operation, legacy_state: tuple) -> None:
+        data = None
+        error = None
+        try:
+            data = self._run_source(operation)
+        except (TimeoutError, CancelledError, ProtocolError, TransportError, InvalidResponseError):
+            raise
+        except WorkIQError as exc:
+            error = exc
+            with self._lock:
+                self._source_ready = False
+                if isinstance(exc, (AuthRequiredError, ConsentRequiredError, EulaRequiredError)):
+                    now = self._monotonic_clock()
+                    if self._source_blocker is None or now >= self._source_retry_after:
+                        self._source_blocker = exc.public()
+                        self._source_retry_after = now + SOURCE_AUTH_COOLDOWN_SECONDS
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            self._state, self._error = legacy_state
+            self._finish(
+                operation, "failed" if error else "succeeded", error, result_data=data,
+            )
+            if error is None:
+                self._source_ready = True
+                self._source_blocker = None
+                self._source_retry_after = 0.0
+
+    def _source_fetch(self, operation: _Operation, path: str) -> dict:
+        result = self._rpc(
+            "tools/call", {"name": FETCH_TOOL, "arguments": {"entityUrls": [path]}},
+            self._ask_remaining(operation, operation.ask_deadline),
+            ask_operation=operation,
+        )
+        self._ask_remaining(operation, operation.ask_deadline)
+        data = self._validate_source_envelope(result)
+        row = result["structuredContent"]["results"][0]
+        if "entityUrl" in row and row["entityUrl"] != path:
+            raise SourceUnreadableError("Work IQ source response identity did not match.")
+        return data
+
+    def _run_source(self, operation: _Operation) -> dict:
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            self._check_source_cooldown()
+            if FETCH_TOOL not in self._allowed:
+                raise CapabilityDeniedError("Work IQ does not advertise source reads.")
+            source = require_source_operation(operation.source)
+        ids = dict(source.identifiers)
+        conversation = ids.get("conversation_id")
+        data = self._source_fetch(operation, _source_initial_path(source))
+        if source.kind == "email":
+            self._validate_source_entity(data, ids["message_id"])
+            conversation = self._source_id(data.get("conversationId"))
+            self._validate_source_optional_fields(data, email=True)
+            path = _source_email_conversation_path(conversation)
+            data = self._source_fetch(operation, path)
+        elif source.kind == "meeting" and not conversation:
+            self._validate_source_entity(data, ids["event_id"])
+            self._validate_source_event_fields(data)
+            meeting = data.get("onlineMeeting")
+            if not isinstance(meeting, dict):
+                raise SourceUnreadableError("Work IQ event has no usable meeting chat.")
+            conversation = self._source_meeting_thread(meeting.get("joinUrl"))
+            data = self._source_fetch(operation, _source_chat_path(conversation))
+        return self._project_source_page(source, conversation, data)
+
+    def _validate_source_envelope(self, result: dict) -> dict:
+        content = result.get("content")
+        is_error = result.get("isError", False)
+        meta = result.get("_meta", {})
+        if (
+            not isinstance(content, list) or not isinstance(is_error, bool)
+            or not isinstance(meta, dict)
+            or any(not isinstance(item, dict) or item.get("type") != "text"
+                   or not isinstance(item.get("text"), str) for item in content)
+        ):
+            raise SourceUnreadableError("Work IQ source response was malformed.")
+        if is_error:
+            error = self._ask_remote_error(meta.get("code"))
+            if not isinstance(error, RemoteError):
+                raise error
+            raise ToolError("Work IQ source read failed.")
+        structured = result.get("structuredContent")
+        rows = structured.get("results") if isinstance(structured, dict) else None
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            raise SourceUnreadableError("Work IQ source response was malformed.")
+        status = rows[0].get("statusCode")
+        if type(status) is not int:
+            raise SourceUnreadableError("Work IQ source response was malformed.")
+        if status == 401:
+            raise AuthRequiredError("Work IQ authentication is required.")
+        if status == 403:
+            raise SourceForbiddenError("Work IQ access to this source was denied.")
+        if status == 404:
+            raise SourceNotFoundError("Work IQ could not find this source.")
+        if status != 200:
+            raise SourceHTTPError("Work IQ source read returned a non-success status.")
+        data = rows[0].get("data")
+        if not isinstance(data, dict):
+            raise SourceUnreadableError("Work IQ source response was malformed.")
+        if "headers" in rows[0]:
+            headers = rows[0]["headers"]
+            if not isinstance(headers, dict) or any(
+                not isinstance(key, str) or len(key) > 256
+                or not isinstance(value, str) or len(value) > SOURCE_URL_LIMIT
+                or any(ord(char) < 32 or ord(char) == 127 for char in key + value)
+                for key, value in headers.items()
+            ):
+                raise SourceUnreadableError("Work IQ source headers were malformed.")
+            if any(key.lower() == "link" for key in headers):
+                raise SourcePartialError("Work IQ source returned a partial page.")
+        return data
+
+    @staticmethod
+    def _source_id(value: object) -> str:
+        try:
+            return _source_identifier(value)
+        except CapabilityError:
+            raise SourceUnreadableError("Work IQ source identifier was invalid.") from None
+
+    @staticmethod
+    def _source_timestamp(value: object) -> str:
+        if (
+            not isinstance(value, str) or len(value) > 64
+            or re.fullmatch(
+                r"\d{4}-\d\d-\d\dT[0-2]\d:[0-5]\d:[0-5]\d(?:\.\d{1,7})?(?:Z|[+-][0-2]\d:[0-5]\d)",
+                value,
+            ) is None
+        ):
+            raise SourceUnreadableError("Work IQ source timestamp was invalid.")
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except (ValueError, OverflowError):
+            raise SourceUnreadableError("Work IQ source timestamp was invalid.") from None
+
+    @staticmethod
+    def _source_text(value: object, *, limit: int, html: bool = False) -> str:
+        if not isinstance(value, str) or len(value) > 65536:
+            raise SourceUnreadableError("Work IQ source text was invalid.")
+        if html:
+            parser = _SourceText()
+            parser.feed(value)
+            parser.close()
+            value = "".join(parser.parts)
+        value = "".join(char for char in value if char.isspace() or not unicodedata.category(char).startswith("C"))
+        return " ".join(value.split())[:limit]
+
+    @staticmethod
+    def _source_url(value: object, *, hosts: set[str]):
+        if (
+            not isinstance(value, str) or not value or len(value) > SOURCE_URL_LIMIT
+            or value != value.strip()
+            or any(char.isspace() or unicodedata.category(char).startswith("C") for char in value)
+            or "\\" in value
+        ):
+            raise SourceUnreadableError("Work IQ source link was invalid.")
+        try:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme != "https" or parsed.hostname not in hosts
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in {None, 443}
+            ):
+                raise ValueError
+        except ValueError:
+            raise SourceUnreadableError("Work IQ source link was invalid.") from None
+        return parsed
+
+    def _source_meeting_thread(self, value: object) -> str:
+        parsed = self._source_url(value, hosts={"teams.microsoft.com"})
+        match = re.fullmatch(r"/l/meetup-join/([^/]+)/0", parsed.path)
+        if not match or parsed.fragment:
+            raise SourceUnreadableError("Work IQ event has no usable meeting chat.")
+        thread = unquote(match.group(1))
+        if re.fullmatch(r"19:meeting_[A-Za-z0-9_-]+@thread\.v2", thread) is None:
+            raise SourceUnreadableError("Work IQ event has no usable meeting chat.")
+        return self._source_id(thread)
+
+    def _source_complete(self, data: dict) -> None:
+        if "@odata.nextLink" in data:
+            self._source_url(data["@odata.nextLink"], hosts={"graph.microsoft.com"})
+            raise SourcePartialError("Work IQ source returned a partial page.")
+
+    def _validate_source_entity(self, data: dict, expected_id: str) -> None:
+        self._source_complete(data)
+        if "value" in data or self._source_id(data.get("id")) != expected_id:
+            raise SourceUnreadableError("Work IQ source bootstrap identity did not match.")
+        if data.get("subject") is not None:
+            self._source_text(data["subject"], limit=SOURCE_EXCERPT_LIMIT)
+
+    def _validate_source_event_fields(self, data: dict) -> None:
+        for key in ("start", "end"):
+            if key not in data:
+                continue
+            value = data[key]
+            if (
+                not isinstance(value, dict)
+                or not isinstance(value.get("dateTime"), str)
+                or len(value["dateTime"]) > 64
+                or not isinstance(value.get("timeZone"), str)
+                or not value["timeZone"].strip() or len(value["timeZone"]) > 256
+                or any(unicodedata.category(char).startswith("C") for char in value["timeZone"])
+                or re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?", value["dateTime"]) is None
+            ):
+                raise SourceUnreadableError("Work IQ source event time was invalid.")
+            try:
+                datetime.fromisoformat(value["dateTime"])
+            except ValueError:
+                raise SourceUnreadableError("Work IQ source event time was invalid.") from None
+        if "organizer" in data:
+            self._source_sender(data["organizer"], email=True)
+
+    def _source_sender(self, value: object, *, email: bool) -> dict:
+        sender = {"id": None, "display_name": None, "address": None, "address_kind": None}
+        if value is None:
+            return sender
+        if not isinstance(value, dict):
+            raise SourceUnreadableError("Work IQ source sender was invalid.")
+        if email:
+            person = value.get("emailAddress")
+            name_key = "name"
+        else:
+            identities = [value[key] for key in ("user", "application", "device") if value.get(key) is not None]
+            if len(identities) != 1:
+                raise SourceUnreadableError("Work IQ source sender was invalid.")
+            person = identities[0]
+            name_key = "displayName"
+        if not isinstance(person, dict):
+            raise SourceUnreadableError("Work IQ source sender was invalid.")
+        if person.get("id") is not None:
+            sender["id"] = self._source_id(person["id"])
+        if person.get(name_key) is not None:
+            sender["display_name"] = self._source_text(person[name_key], limit=256)
+        if person.get("address") is not None:
+            address = person["address"]
+            if (
+                not isinstance(address, str) or len(address) > 320
+                or any(unicodedata.category(char).startswith("C") for char in address)
+            ):
+                raise SourceUnreadableError("Work IQ source sender was invalid.")
+            if address.startswith("/"):
+                legacy_dn = re.fullmatch(
+                    r"/o=([^/\\=<>]+)/ou=([^/\\=<>]+)/cn=Recipients/cn=([^/\\=<>]+)",
+                    address, re.IGNORECASE,
+                )
+                if not legacy_dn or any(value != value.strip() for value in legacy_dn.groups()):
+                    raise SourceUnreadableError("Work IQ source sender was invalid.")
+                # A legacy Exchange DN is not an SMTP address or person authority.
+                sender["address_kind"] = "exchange_dn"
+            else:
+                if re.fullmatch(r"[^@\s<>]+@[^@\s<>]+", address) is None:
+                    raise SourceUnreadableError("Work IQ source sender was invalid.")
+                sender["address"] = address
+                sender["address_kind"] = "smtp"
+        return sender
+
+    def _validate_source_optional_fields(self, item: dict, *, email: bool) -> None:
+        if item.get("subject") is not None:
+            self._source_text(item["subject"], limit=SOURCE_EXCERPT_LIMIT)
+        if item.get("internetMessageId") is not None:
+            self._source_id(item["internetMessageId"])
+        for key in ("createdDateTime", "receivedDateTime", "sentDateTime", "lastModifiedDateTime", "deletedDateTime"):
+            if item.get(key) is not None:
+                self._source_timestamp(item[key])
+        if "from" in item:
+            self._source_sender(item["from"], email=email)
+        if "bodyPreview" in item:
+            self._source_text(item["bodyPreview"], limit=SOURCE_EXCERPT_LIMIT)
+        link_key = "webLink" if email else "webUrl"
+        if item.get(link_key) is not None:
+            self._source_url(item[link_key], hosts=(
+                {"outlook.office.com", "outlook.office365.com", "outlook.live.com"}
+                if email else {"teams.microsoft.com"}
+            ))
+
+    def _project_source_page(
+        self, source: SourceReadOperation, conversation: str | None, data: dict,
+    ) -> dict:
+        self._source_complete(data)
+        values = data.get("value")
+        email = source.kind == "email"
+        if not isinstance(values, list) or len(values) > (25 if email else 50) or "id" in data:
+            raise SourceUnreadableError("Work IQ source collection was invalid.")
+        ids = dict(source.identifiers)
+        items = []
+        seen = set()
+        for item in values:
+            if not isinstance(item, dict):
+                raise SourceUnreadableError("Work IQ source item was invalid.")
+            item_id = self._source_id(item.get("id"))
+            if item_id in seen:
+                raise SourceUnreadableError("Work IQ source contained duplicate items.")
+            seen.add(item_id)
+            foreign_fields = (
+                ("chatId", "channelIdentity", "replyToId") if email
+                else ("conversationId",) if source.kind == "teams_channel"
+                else ("conversationId", "channelIdentity")
+            )
+            if any(item.get(key) is not None for key in foreign_fields):
+                raise SourceUnreadableError("Work IQ source message identity did not match.")
+            if email:
+                if self._source_id(item.get("conversationId")) != conversation:
+                    raise SourceUnreadableError("Work IQ source message identity did not match.")
+            elif source.kind == "teams_channel":
+                if item.get("chatId") is not None:
+                    raise SourceUnreadableError("Work IQ source message identity did not match.")
+                if item.get("replyToId") is not None and item["replyToId"] != ids["message_id"]:
+                    raise SourceUnreadableError("Work IQ source message identity did not match.")
+                if item.get("channelIdentity") is not None:
+                    channel = item["channelIdentity"]
+                    if not isinstance(channel, dict) or channel.get("teamId") != ids["team_id"] or channel.get("channelId") != ids["channel_id"]:
+                        raise SourceUnreadableError("Work IQ source message identity did not match.")
+            elif item.get("chatId") is not None and item["chatId"] != conversation:
+                raise SourceUnreadableError("Work IQ source message identity did not match.")
+            self._validate_source_optional_fields(item, email=email)
+            occurred = self._source_timestamp(item.get("receivedDateTime" if email else "createdDateTime"))
+            if email:
+                excerpt = self._source_text(item.get("bodyPreview"), limit=SOURCE_EXCERPT_LIMIT)
+            else:
+                body = item.get("body")
+                if not isinstance(body, dict) or body.get("contentType") not in {"html", "text"}:
+                    raise SourceUnreadableError("Work IQ source body was invalid.")
+                excerpt = self._source_text(body.get("content"), limit=SOURCE_EXCERPT_LIMIT, html=body["contentType"] == "html")
+            items.append({
+                "source_item_id": item_id, "occurred_at": occurred,
+                "sender": self._source_sender(item.get("from"), email=email),
+                "excerpt": excerpt, "web_url": item.get("webLink" if email else "webUrl"),
+            })
+        if conversation is not None:
+            ids["conversation_id"] = conversation
+        items.sort(key=lambda item: (datetime.fromisoformat(item["occurred_at"].replace("Z", "+00:00")), item["source_item_id"]))
+        return {
+            "source_kind": source.kind, "locator_source": source.locator_source,
+            "source_identity": ids, "conversation_id": conversation,
+            "complete": True, "items": items,
+        }
+
     def _run_readiness(self, operation: _Operation) -> None:
         if ACTION_TOOL not in self._allowed:
             raise CapabilityDeniedError(
@@ -1364,7 +1831,7 @@ class WorkIQRuntime:
             if message["id"] != request_id:
                 raise ProtocolError("Work IQ MCP response correlation failed.")
             if "error" in message:
-                if active and active.plan in {"ask", "ask_probe"}:
+                if active and active.plan in {"ask", "ask_probe", "source"}:
                     error = message["error"]
                     raise self._ask_remote_error(
                         error.get("code") if isinstance(error, dict) else None
@@ -1691,6 +2158,11 @@ class WorkIQRuntime:
             "tool": ToolError,
             "action_http": ActionHTTPError,
             "invalid_structured_content": InvalidStructuredContentError,
+            "source_unreadable": SourceUnreadableError,
+            "source_partial": SourcePartialError,
+            "source_forbidden": SourceForbiddenError,
+            "source_not_found": SourceNotFoundError,
+            "source_http": SourceHTTPError,
             "timeout": TimeoutError,
             "cancelled": CancelledError,
         }
@@ -1719,12 +2191,14 @@ class WorkIQRuntime:
                 self._authenticated = authenticated
                 if not authenticated:
                     self._ask_ready = False
+                    self._source_ready = False
             if self._active_operation is operation:
                 self._active_operation = None
                 self._active_request_id = None
             operation.state = state
             operation.calendar = None
             operation.ask = None
+            operation.source = None
             operation.result = {
                 "ok": error is None,
                 **({"error": error.public()} if error else {}),
@@ -1755,6 +2229,7 @@ class WorkIQRuntime:
             target_process = process or self._process
             if target_process is self._process:
                 self._ask_ready = False
+                self._source_ready = False
                 self._authenticated = False
             target_incoming = incoming or self._incoming
             target_reader = (
