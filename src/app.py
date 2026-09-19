@@ -69,7 +69,7 @@ def _periodic_sync():
 
 def _check_waiting():
     """Called every 4 hours to check activity on waiting tasks."""
-    result = run_copilot("/waiting-check", label="waiting-check")
+    result = checks.get_waiting_checks().launch(skip_empty=True)
     logger.info(f"Waiting check: {result['message']}")
 
 

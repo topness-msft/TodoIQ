@@ -23,6 +23,8 @@ SOURCE_ID_LIMIT = 2048
 SOURCE_EMAIL_SELECT = (
     "id,subject,conversationId,internetMessageId,receivedDateTime,from,bodyPreview,webLink"
 )
+RECOVERY_CHATS_URL = "/me/chats?$select=id,topic,chatType,webUrl&$top=50"
+RECOVERY_SELF_URL = "/me?$select=id,mail,userPrincipalName"
 
 
 class CapabilityError(ValueError):
@@ -53,6 +55,55 @@ class SourceReadOperation:
     identifiers: tuple[tuple[str, str], ...]
     locator_source: str
     _mint: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class RecoveryReadOperation:
+    target_id: str | None
+    target_email: str | None
+    topic: str | None
+    _mint: object = field(repr=False, compare=False)
+
+
+def _recovery_email(value: object) -> str:
+    if (
+        not isinstance(value, str) or len(value) > 320 or value.startswith("/")
+        or re.fullmatch(r"[^@\s<>/\\]+@[^@\s<>/\\]+", value) is None
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise CapabilityError("Work IQ recovery requires a verified email.")
+    return value.lower()
+
+
+def build_recovery_operation(target: object, *, topic: str | None = None) -> RecoveryReadOperation:
+    """Seal only captured person identity and optional exact captured chat topic."""
+    if not isinstance(target, dict) or set(target) - {"id", "email"}:
+        raise CapabilityError("Work IQ recovery target is invalid.")
+    identifier = _source_identifier(target["id"]) if target.get("id") is not None else None
+    email = _recovery_email(target["email"]) if target.get("email") is not None else None
+    if not identifier and not email:
+        raise CapabilityError("Work IQ recovery requires a verified person.")
+    if topic is not None and (
+        not isinstance(topic, str) or not topic.strip() or len(topic) > 512
+        or any(unicodedata.category(char).startswith("C") for char in topic)
+    ):
+        raise CapabilityError("Work IQ recovery topic is invalid.")
+    return RecoveryReadOperation(identifier, email, topic, (_MINT, identifier, email, topic))
+
+
+def require_recovery_operation(operation: object) -> RecoveryReadOperation:
+    if (
+        not isinstance(operation, RecoveryReadOperation)
+        or operation._mint != (_MINT, operation.target_id, operation.target_email, operation.topic)
+    ):
+        raise CapabilityError("Work IQ recovery operation was not policy-minted.")
+    return build_recovery_operation(
+        {"id": operation.target_id, "email": operation.target_email}, topic=operation.topic,
+    )
+
+
+def _recovery_members_path(candidate_id: str) -> str:
+    return f"/me/chats/{quote(_source_identifier(candidate_id), safe='')}/members"
 
 
 def _source_identifier(value: object) -> str:

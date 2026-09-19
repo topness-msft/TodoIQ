@@ -257,7 +257,7 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
     def test_runner_status_merges_migrated_suggestion_with_all_legacy_labels(
         self, get_status, get_exit_info, get_checks
     ):
-        labels = ["sync", "parse", "waiting-check", "skill:prepare:123"]
+        labels = ["sync", "parse", "skill:prepare:123"]
         legacy = {name: {"run_id": name, "started_at": START_A} for name in labels}
         done = {name: {"run_id": name + "-old"} for name in labels}
         get_status.return_value = {**dict.fromkeys(labels, True), "_runs": legacy}
@@ -397,10 +397,11 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         assert first["_suggestion_check_queue"] == second["_suggestion_check_queue"]
         assert first["_suggestion_check_queue"]["pending"][0]["job_id"] == job["job_id"]
 
+    @patch("src.handlers.sync_api.checks.get_checks")
     @patch("src.handlers.sync_api.get_exit_info")
     @patch("src.handlers.sync_api.get_status")
     def test_runner_status_keeps_flat_runner_data_beside_queue_snapshot(
-        self, get_status, get_exit_info
+        self, get_status, get_exit_info, get_checks
     ):
         get_status.return_value = {
             "suggestion-check": True,
@@ -420,6 +421,8 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
                 "error": None,
             },
         }
+        get_checks.return_value.status.return_value = get_status.return_value
+        get_checks.return_value.completion.return_value = get_exit_info.return_value["suggestion-check"]
 
         payload = json.loads(self.fetch("/api/runner-status").body)
 

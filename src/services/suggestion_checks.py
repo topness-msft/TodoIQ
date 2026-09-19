@@ -22,14 +22,7 @@ VALID_RESULTS = {"likely_resolved", "still_pending", "unclear"}
 def _check_status():
     # Polling materializes legacy sync exits even when no browser is connected.
     legacy = get_status()
-    direct = checks.get_checks().status()
-    result = {key: value for key, value in legacy.items() if key != LABEL}
-    result.update({key: value for key, value in direct.items() if key != "_runs"})
-    result["_runs"] = {
-        **{label: run for label, run in legacy.get("_runs", {}).items() if label != LABEL},
-        **direct.get("_runs", {}),
-    }
-    return result
+    return checks.merged_status(legacy)
 
 
 def _completion(label):

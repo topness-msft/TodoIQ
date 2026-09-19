@@ -42,6 +42,8 @@ from .workiq_policy import (
     _source_initial_path,
     _source_chat_path,
     _source_email_conversation_path,
+    RecoveryReadOperation, build_recovery_operation, require_recovery_operation,
+    RECOVERY_CHATS_URL, RECOVERY_SELF_URL, _recovery_members_path, _recovery_email,
 )
 from .workiq_setup import (
     WorkIQAccountError,
@@ -198,6 +200,7 @@ class _Operation:
     calendar: CalendarOperation | None = None
     ask: AskOperation | None = None
     source: SourceReadOperation | None = None
+    recovery: RecoveryReadOperation | None = None
     # Shared absolute admission deadline for ask and source reads.
     ask_deadline: float | None = None
     state: str = "queued"
@@ -411,11 +414,12 @@ class WorkIQRuntime:
         calendar: CalendarOperation | None = None,
         ask: AskOperation | None = None,
         source: SourceReadOperation | None = None,
+        recovery: RecoveryReadOperation | None = None,
     ) -> str:
         ask_deadline = (
-            self._monotonic_clock() + timeout if plan in {"ask", "ask_probe", "source"} else None
+            self._monotonic_clock() + timeout if plan in {"ask", "ask_probe", "source", "recovery"} else None
         )
-        if plan not in {"readiness", "calendar", "sent_items", "ask_probe", "ask", "source"}:
+        if plan not in {"readiness", "calendar", "sent_items", "ask_probe", "ask", "source", "recovery"}:
             raise CapabilityError("Riveter has no approved plan for this read.")
         if plan == "calendar":
             calendar = require_calendar_operation(calendar)
@@ -429,6 +433,10 @@ class WorkIQRuntime:
             source = require_source_operation(source)
         elif source is not None:
             raise CapabilityError("Only a source plan can carry a source operation.")
+        if plan == "recovery":
+            recovery = require_recovery_operation(recovery)
+        elif recovery is not None:
+            raise CapabilityError("Only recovery can carry a recovery operation.")
         return self._enqueue_operation(_Operation(
             job_id=str(uuid.uuid4()),
             timeout=timeout,
@@ -436,6 +444,7 @@ class WorkIQRuntime:
             calendar=calendar,
             ask=ask,
             source=source,
+            recovery=recovery,
             ask_deadline=ask_deadline,
         ))
 
@@ -459,6 +468,7 @@ class WorkIQRuntime:
                 self._operations.pop(operation.job_id, None)
                 operation.ask = None
                 operation.source = None
+                operation.recovery = None
             raise QueueFullError("Work IQ read queue is full.") from exc
         return operation.job_id
 
@@ -489,8 +499,8 @@ class WorkIQRuntime:
             ):
                 self._expire_ask(operation)
         with self._lock:
-            result = operation.public(include_data=operation.plan != "source" or source_data)
-            if operation.plan in {"ask", "ask_probe", "source"} and operation.result:
+            result = operation.public(include_data=operation.plan not in {"source", "recovery"} or source_data)
+            if operation.plan in {"ask", "ask_probe", "source", "recovery"} and operation.result:
                 operation.result.pop("data", None)
             return result
 
@@ -543,13 +553,25 @@ class WorkIQRuntime:
         """
         deadline = self._monotonic_clock() + timeout
         source = build_source_operation(locator)
+        return self._read_sealed_source(source, deadline)
+
+    def recover_chat(self, target: dict, *, timeout: float, topic: str | None = None) -> dict:
+        """Recover one verified recent chat, never an alias for the saved locator."""
+        deadline = self._monotonic_clock() + timeout
+        recovery = build_recovery_operation(target, topic=topic)
+        return self._read_sealed_source(recovery, deadline)
+
+    def _read_sealed_source(self, sealed, deadline):
+        recovery = isinstance(sealed, RecoveryReadOperation)
         with self._lock:
             self._check_source_cooldown()
         # Reuse Stage 1's owner-aware admission/start-lock deadline path.
         self._start_for_ask(deadline)
         job_id = self._enqueue_operation(_Operation(
             job_id=str(uuid.uuid4()), timeout=self._ask_time_left(deadline),
-            plan="source", source=source, ask_deadline=deadline,
+            plan="recovery" if recovery else "source",
+            source=None if recovery else sealed, recovery=sealed if recovery else None,
+            ask_deadline=deadline,
         ))
         try:
             result = self._wait_operation(job_id, source_data=True)
@@ -568,6 +590,7 @@ class WorkIQRuntime:
                 stored = self._operations.get(job_id)
                 if stored:
                     stored.source = None
+                    stored.recovery = None
                     if stored.result:
                         stored.result.pop("data", None)
 
@@ -822,6 +845,7 @@ class WorkIQRuntime:
                 operation.calendar = None
                 operation.ask = None
                 operation.source = None
+                operation.recovery = None
                 if operation.result:
                     operation.result.pop("data", None)
             thread_stopped = not thread or not thread.is_alive()
@@ -1088,7 +1112,7 @@ class WorkIQRuntime:
                 self._run_ask_operation(
                     operation, legacy_state or (self._state, self._error)
                 )
-            elif operation.plan == "source":
+            elif operation.plan in {"source", "recovery"}:
                 self._run_source_operation(
                     operation, legacy_state or (self._state, self._error)
                 )
@@ -1322,7 +1346,7 @@ class WorkIQRuntime:
         data = None
         error = None
         try:
-            data = self._run_source(operation)
+            data = self._run_recovery(operation) if operation.plan == "recovery" else self._run_source(operation)
         except (TimeoutError, CancelledError, ProtocolError, TransportError, InvalidResponseError):
             raise
         except WorkIQError as exc:
@@ -1383,6 +1407,93 @@ class WorkIQRuntime:
             conversation = self._source_meeting_thread(meeting.get("joinUrl"))
             data = self._source_fetch(operation, _source_chat_path(conversation))
         return self._project_source_page(source, conversation, data)
+
+    def _recovery_page(self, data):
+        self._source_complete(data)
+        values = data.get("value")
+        if not isinstance(values, list) or len(values) > 50 or "id" in data:
+            raise SourceUnreadableError("Work IQ recovery page was invalid.")
+        if any(not isinstance(item, dict) for item in values):
+            raise SourceUnreadableError("Work IQ recovery item was invalid.")
+        return values
+
+    @staticmethod
+    def _recovery_address(value):
+        if value is None:
+            return None
+        try:
+            return _recovery_email(value)
+        except CapabilityError:
+            raise SourceUnreadableError("Work IQ recovery identity was invalid.") from None
+
+    def _run_recovery(self, operation: _Operation) -> dict:
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            self._check_source_cooldown()
+            if FETCH_TOOL not in self._allowed:
+                raise CapabilityDeniedError("Work IQ does not advertise source reads.")
+            recovery = require_recovery_operation(operation.recovery)
+        listed = self._recovery_page(self._source_fetch(operation, RECOVERY_CHATS_URL))
+        candidates = []
+        seen = set()
+        for chat in listed:
+            identifier = self._source_id(chat.get("id"))
+            topic, kind = chat.get("topic"), chat.get("chatType")
+            if identifier in seen or kind not in ("oneOnOne", "group", "meeting"):
+                raise SourceUnreadableError("Work IQ recovery chat was invalid.")
+            seen.add(identifier)
+            if topic is not None and (
+                not isinstance(topic, str) or len(topic) > 512
+                or any(unicodedata.category(char).startswith("C") for char in topic)
+            ):
+                raise SourceUnreadableError("Work IQ recovery topic was invalid.")
+            if chat.get("webUrl") is not None:
+                self._source_url(chat["webUrl"], hosts={"teams.microsoft.com"})
+            if kind == "oneOnOne" or (recovery.topic is not None and recovery.topic == topic):
+                candidates.append((identifier, kind))
+        if not candidates:
+            raise SourceUnreadableError("Work IQ could not verify a recent chat.")
+        profile = self._source_fetch(operation, RECOVERY_SELF_URL)
+        self._source_complete(profile)
+        self_id = self._source_id(profile.get("id"))
+        self_addresses = {
+            self._recovery_address(profile.get(key)) for key in ("mail", "userPrincipalName")
+        } - {None}
+        if "value" in profile or recovery.target_id == self_id or recovery.target_email in self_addresses:
+            raise SourceUnreadableError("Work IQ recovery self identity was invalid.")
+        matches = []
+        for candidate, kind in candidates:
+            members = self._recovery_page(self._source_fetch(operation, _recovery_members_path(candidate)))
+            selves, targets, identities = [], [], set()
+            for index, member in enumerate(members):
+                member_id = self._source_id(member["userId"]) if member.get("userId") is not None else None
+                address = self._recovery_address(member.get("email"))
+                if (not member_id and not address) or (member_id, address) in identities:
+                    raise SourceUnreadableError("Work IQ recovery member was unverifiable.")
+                identities.add((member_id, address))
+                if member_id == self_id or address in self_addresses:
+                    selves.append(index)
+                if (recovery.target_id and member_id == recovery.target_id) or (
+                    recovery.target_email and address == recovery.target_email
+                ):
+                    targets.append(index)
+            if (
+                len(selves) == len(targets) == 1 and selves[0] != targets[0]
+                and (kind != "oneOnOne" or len(members) == 2)
+            ):
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise SourceUnreadableError("Work IQ could not uniquely verify a recent chat.")
+        # Only the exact provider-listed and membership-proven ID reaches a source plan.
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            operation.source = build_source_operation({
+                "kind": "teams_chat", "source": "captured", "conversation_id": matches[0],
+            })
+        result = self._run_source(operation)
+        result["locator_source"] = "recovered"
+        result["recovery_kind"] = "recent_chat_membership"
+        return result
 
     def _validate_source_envelope(self, result: dict) -> dict:
         content = result.get("content")
@@ -2199,6 +2310,7 @@ class WorkIQRuntime:
             operation.calendar = None
             operation.ask = None
             operation.source = None
+            operation.recovery = None
             operation.result = {
                 "ok": error is None,
                 **({"error": error.public()} if error else {}),

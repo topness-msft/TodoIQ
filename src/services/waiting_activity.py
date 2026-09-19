@@ -142,7 +142,7 @@ def normalise(raw):
     scope = data.get("source_scope")
     scope = SCOPE_THREAD if scope == SCOPE_THREAD else SCOPE_PERSON
 
-    return {
+    result = {
         "version": SCHEMA_VERSION,
         "check_state": check_state,
         "status": status,
@@ -157,6 +157,15 @@ def normalise(raw):
         "evidence": _clean_evidence(data.get("evidence")),
         "previous": previous,
     }
+    if scope == SCOPE_THREAD and data.get("recovery_kind") == "recent_chat_membership":
+        # This identifies the evidence read, not an alias/repair of the saved source.
+        result["recovery_kind"] = "recent_chat_membership"
+    if result["producer"] == PRODUCER_WAITING_CHECK:
+        if data.get("presence_unverified") is True:
+            result["presence_unverified"] = True
+        if data.get("presence_verified_available") is True:
+            result["presence_verified_available"] = True
+    return result
 
 
 def signal_for(task_status, activity):

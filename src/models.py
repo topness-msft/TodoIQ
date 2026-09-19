@@ -321,11 +321,15 @@ def list_tasks(
 
 def write_suggestion_check(snapshot: dict, activity: dict, user_notes: str | None) -> bool:
     """Commit only check output, if every captured mutable input still matches."""
+    notes_changed = user_notes != snapshot["user_notes"]
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        update = "UPDATE tasks SET waiting_activity=?, user_notes=?, updated_at=?"
+        if notes_changed:
+            update += ", cowork_revision=cowork_revision+1"
         cursor = conn.execute(
-            """UPDATE tasks SET waiting_activity=?, user_notes=?, updated_at=?
-               WHERE id=? AND status='suggested'
+            update + """ WHERE id=? AND status='suggested'
                  AND title IS ? AND description IS ? AND key_people IS ?
                  AND source_type IS ? AND source_id IS ? AND user_notes IS ?
                  AND waiting_activity IS ?""",
@@ -336,6 +340,58 @@ def write_suggestion_check(snapshot: dict, activity: dict, user_notes: str | Non
                 snapshot["waiting_activity"],
             ),
         )
+        if cursor.rowcount == 1 and notes_changed:
+            # Check only a CAS-matched write, while still holding the delivery
+            # claim lock. A conflict rolls back the entire tentative update.
+            _raise_if_unresolved_delivery(conn, snapshot["id"])
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def write_waiting_check(snapshot: dict, activity: dict, user_notes: str | None, *, check_deadline=None) -> bool:
+    """Atomically record a check and notes, never overwrite an edited snapshot."""
+    notes_changed = user_notes != snapshot["user_notes"]
+    prior = waiting_activity.normalise(snapshot["waiting_activity"])
+    finding = prior.get("previous") if prior and prior["check_state"] == "failed" else prior
+    unsnooze = (
+        snapshot["status"] == "snoozed" and finding
+        and finding.get("status") == "out_of_office"
+        and activity["check_state"] == "ok" and activity.get("status") != "out_of_office"
+        and activity.get("presence_verified_available") is True
+    )
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if check_deadline:
+            check_deadline()
+        update = (
+            "UPDATE tasks SET waiting_activity=?, user_notes=?, updated_at=?, status='waiting', snoozed_until=NULL"
+            if unsnooze else "UPDATE tasks SET waiting_activity=?, user_notes=?, updated_at=?"
+        )
+        if notes_changed:
+            update += ", cowork_revision=cowork_revision+1"
+        cursor = conn.execute(
+            update + """ WHERE id=? AND status IS ? AND title IS ? AND description IS ?
+                 AND key_people IS ? AND source_type IS ? AND source_id IS ?
+                 AND source_locator IS ? AND source_url IS ? AND user_notes IS ?
+                 AND waiting_activity IS ? AND snoozed_until IS ? AND created_at IS ?""",
+            (
+                json.dumps(activity), user_notes, _now(),
+                snapshot["id"], snapshot["status"], snapshot["title"], snapshot["description"],
+                snapshot["key_people"], snapshot["source_type"], snapshot["source_id"],
+                snapshot["source_locator"], snapshot["source_url"], snapshot["user_notes"],
+                snapshot["waiting_activity"], snapshot["snoozed_until"], snapshot["created_at"],
+            ),
+        )
+        if cursor.rowcount == 1 and notes_changed:
+            _raise_if_unresolved_delivery(conn, snapshot["id"])
+        if check_deadline:
+            check_deadline()
         conn.commit()
         return cursor.rowcount == 1
     except Exception:

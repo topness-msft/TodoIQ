@@ -1,4 +1,4 @@
-"""Sync triggers and merged legacy CLI / direct suggestion workflow status."""
+"""Sync triggers and merged legacy CLI / two direct check workflow statuses."""
 
 import json
 import logging
@@ -104,16 +104,14 @@ class SyncStatusHandler(tornado.web.RequestHandler):
         # With a task_id this checks that ONE task. The Check Now button on a
         # card used to pass an id that was thrown away, so clicking it re-ran
         # every waiting task - one WorkIQ subprocess each - which is a poor
-        # answer to "retry this one". The label stays "waiting-check" either
-        # way, so claude_runner's single-flight guard still prevents a per-task
-        # run and a global run from writing the same rows at once.
+        # answer to "retry this one". The direct waiting worker keeps the same
+        # single-flight label for targeted and global runs.
         if body.get("waiting_check"):
             raw_id = body.get("task_id")
             if raw_id is None:
-                result = run_copilot("/waiting-check", label="waiting-check")
+                result = checks.get_waiting_checks().launch()
             else:
-                # The command string reaches a subprocess, so the id may be
-                # nothing but digits.
+                # Preserve the existing numeric-string input contract.
                 try:
                     task_id = int(str(raw_id).strip())
                 except (TypeError, ValueError):
@@ -126,11 +124,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                     self.set_status(404)
                     self.write(json.dumps({"error": "Not found"}))
                     return
-                result = run_copilot(
-                    f"/waiting-check {task_id}",
-                    label="waiting-check",
-                    timeout=SINGLE_WAITING_CHECK_TIMEOUT,
-                )
+                result = checks.get_waiting_checks().launch(task_id)
             if not result["ok"] and "already running" not in result["message"].lower():
                 self.set_status(500)
             self.write(json.dumps(result))
@@ -211,7 +205,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
 
 
 class RunnerStatusHandler(tornado.web.RequestHandler):
-    """GET /api/runner-status — legacy labels plus the direct suggestion run."""
+    """GET /api/runner-status — legacy labels plus both direct check runs."""
 
     def set_default_headers(self):
         self.set_header("Content-Type", "application/json")
@@ -221,14 +215,8 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
         completed = get_exit_info()
         # Flat format for backward compat: {label: true, ...}
         # Plus "completed" key with exit info for error tracking
-        result = dict(running)
-        direct = checks.get_checks().status()
-        result.update({key: value for key, value in direct.items() if key != "_runs"})
-        result["_runs"] = {**running.get("_runs", {}), **direct.get("_runs", {})}
-        result["_completed"] = dict(completed)
-        completion = checks.get_checks().completion()
-        if completion:
-            result["_completed"]["suggestion-check"] = completion
+        result = checks.merged_status(running)
+        result["_completed"] = checks.merged_completions(completed)
         result["_suggestion_check_queue"] = _suggestion_queue(
             self.application
         ).snapshot()

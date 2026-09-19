@@ -192,7 +192,8 @@ def test_success_atomically_writes_whitelisted_activity_and_unanswered_note_answ
         "checked_at": activity["checked_at"], "status": "still_pending", "summary": "Synthetic result",
     }
     assert run["started_at"] <= activity["checked_at"] <= run["finished_at"]
-    for field in before.keys() - {"waiting_activity", "user_notes", "updated_at"}:
+    assert after["cowork_revision"] == before["cowork_revision"] + 1
+    for field in before.keys() - {"waiting_activity", "user_notes", "updated_at", "cowork_revision"}:
         assert before[field] == after[field], field
     assert "MODEL-PRIVATE" not in json.dumps(after)
 
@@ -573,9 +574,9 @@ def test_queue_status_poll_preserves_legacy_labels_and_direct_suggestion_authori
     status = SuggestionCheckQueue()._status_reader()
     reader.assert_called_once_with()
     expected = {
-        **{label: True for label in labels if label != "suggestion-check"},
+        **{label: True for label in labels if label not in {"suggestion-check", "waiting-check"}},
         "_runs": {label: metadata for label, metadata in original["_runs"].items()
-                  if label != "suggestion-check"},
+                  if label not in {"suggestion-check", "waiting-check"}},
     }
     if direct_active:
         expected["suggestion-check"] = True
