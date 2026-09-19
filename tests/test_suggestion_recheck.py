@@ -163,15 +163,14 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
     @patch("src.handlers.sync_api.is_running", return_value=False)
-    @patch("src.handlers.sync_api.get_connection")
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.handlers.sync_api.checks.get_checks")
     def test_global_check_keeps_existing_budget(
-        self, run_copilot, get_connection, _is_running, _demo_mode
+        self, get_checks, run_copilot, _is_running, _demo_mode
     ):
-        conn = Mock()
-        conn.execute.return_value.fetchone.return_value = (3,)
-        get_connection.return_value = conn
-        run_copilot.return_value = {
+        worker = get_checks.return_value
+        worker.status.return_value = {"_runs": {}}
+        worker.launch.return_value = {
             "ok": True,
             "message": "started",
             "run_id": RUN_B,
@@ -182,26 +181,38 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         assert response.code == 200
         payload = json.loads(response.body)
         assert "suggestion_check_job" not in payload
-        run_copilot.assert_called_once_with(
-            "/suggestion-check",
-            label="suggestion-check",
-            timeout=300,
-        )
-        conn.close.assert_called_once_with()
+        assert payload["run_id"] == RUN_B
+        assert payload["started_at"] == START_B
+        worker.launch.assert_called_once_with()
+        run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=True)
+    @patch("src.handlers.sync_api.checks.get_checks")
     @patch("src.handlers.sync_api.get_task")
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
     def test_targeted_request_queues_while_global_is_running(
-        self, run_copilot, get_task, _is_running, _demo_mode
+        self, run_copilot, get_task, get_checks, _demo_mode
     ):
         get_task.return_value = {"id": 2693, "status": "suggested"}
+        get_checks.return_value.status.return_value = {"suggestion-check": True}
 
         response = self.post({"suggestion_check": True, "task_id": 2693})
 
         assert response.code == 202
         assert json.loads(response.body)["suggestion_check_job"]["state"] == "queued"
+        run_copilot.assert_not_called()
+
+    @patch("src.handlers.sync_api.demo_mode", return_value=False)
+    @patch("src.handlers.sync_api.checks.get_checks")
+    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    def test_global_request_is_refused_while_direct_global_is_running(
+        self, run_copilot, get_checks, _demo_mode
+    ):
+        get_checks.return_value.status.return_value = {"suggestion-check": True}
+        response = self.post({"suggestion_check": True})
+        assert response.code == 409
+        assert json.loads(response.body) == {"ok": False, "message": BUSY_MESSAGE}
+        get_checks.return_value.launch.assert_not_called()
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
@@ -220,15 +231,13 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
     @patch("src.handlers.sync_api.is_running", return_value=False)
-    @patch("src.handlers.sync_api.get_connection")
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.handlers.sync_api.checks.get_checks")
     def test_raced_global_already_running_result_is_one_valid_409_response(
-        self, run_copilot, get_connection, _is_running, _demo_mode
+        self, get_checks, run_copilot, _is_running, _demo_mode
     ):
-        conn = Mock()
-        conn.execute.return_value.fetchone.return_value = (1,)
-        get_connection.return_value = conn
-        run_copilot.return_value = {
+        get_checks.return_value.status.return_value = {"_runs": {}}
+        get_checks.return_value.launch.return_value = {
             "ok": False,
             "message": "'suggestion-check' already running.",
         }
@@ -240,6 +249,47 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
             "ok": False,
             "message": BUSY_MESSAGE,
         }
+        run_copilot.assert_not_called()
+
+    @patch("src.handlers.sync_api.checks.get_checks")
+    @patch("src.handlers.sync_api.get_exit_info")
+    @patch("src.handlers.sync_api.get_status")
+    def test_runner_status_merges_migrated_suggestion_with_all_legacy_labels(
+        self, get_status, get_exit_info, get_checks
+    ):
+        labels = ["sync", "parse", "waiting-check", "skill:prepare:123"]
+        legacy = {name: {"run_id": name, "started_at": START_A} for name in labels}
+        done = {name: {"run_id": name + "-old"} for name in labels}
+        get_status.return_value = {**dict.fromkeys(labels, True), "_runs": legacy}
+        get_exit_info.return_value = done
+        direct = {"run_id": RUN_B, "started_at": START_B}
+        get_checks.return_value.status.return_value = {
+            "suggestion-check": True, "_runs": {"suggestion-check": direct},
+        }
+        get_checks.return_value.completion.return_value = {
+            "run_id": RUN_A, "finished_at": FINISH_A, "exit_code": 0,
+        }
+        payload = json.loads(self.fetch("/api/runner-status").body)
+        assert payload["_runs"] == {**legacy, "suggestion-check": direct}
+        assert payload["_completed"] == {
+            **done, "suggestion-check": get_checks.return_value.completion.return_value,
+        }
+        assert all(payload[label] is True for label in [*labels, "suggestion-check"])
+        assert "_suggestion_check_queue" in payload
+
+    @patch("src.handlers.sync_api.get_last_sync", return_value=None)
+    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.checks.get_checks")
+    def test_sync_status_uses_in_app_suggestion_without_changing_public_shape(
+        self, get_checks, _running, _sync
+    ):
+        get_checks.return_value.status.return_value = {"suggestion-check": True}
+        payload = json.loads(self.fetch("/api/sync-status").body)
+        assert set(payload) == {
+            "last_sync", "sync_running", "auto_sync_enabled", "suggestion_check_running",
+            "auto_suggestion_check_enabled", "suggestion_checks",
+        }
+        assert payload["suggestion_check_running"] is True
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
     @patch("src.handlers.sync_api.is_running", return_value=False)

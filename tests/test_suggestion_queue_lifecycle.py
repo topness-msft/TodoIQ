@@ -97,3 +97,16 @@ def test_queue_callback_stops_during_server_shutdown():
         suggestion_check_queue_callback=callback
     ))
     callback.stop.assert_called_once_with()
+
+
+def test_periodic_global_launches_direct_batch_without_cli():
+    with (
+        patch.object(app_module, "run_copilot", side_effect=AssertionError("CLI forbidden")),
+        patch.object(app_module, "checks") as checks,
+    ):
+        app_module._check_suggestions()
+    checks.get_checks.return_value.launch.assert_called_once_with(skip_empty=True)
+
+
+def test_start_server_registers_three_hour_suggestion_callback():
+    assert app_module.SUGGESTION_CHECK_INTERVAL_MS == 3 * 60 * 60 * 1000

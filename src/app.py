@@ -38,6 +38,7 @@ from .models import (
 from .services.claude_runner import run_copilot
 from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
 from .services.suggestion_checks import SuggestionCheckQueue
+from .services import checks
 from .services.workspace_settings import (
     get_workspace_settings,
     missing_settings_warning,
@@ -72,31 +73,13 @@ def _check_waiting():
     logger.info(f"Waiting check: {result['message']}")
 
 
-SUGGESTION_CHECK_BASE_TIMEOUT = 120  # 2 min base
-SUGGESTION_CHECK_PER_TASK_TIMEOUT = 60  # +1 min per task
-
-
 def _check_suggestions(queue=None):
     """Called every 3 hours to check if suggested tasks are already resolved."""
     if queue is not None and queue.has_work():
         logger.info("Suggestion check: deferred behind targeted queue")
         return
 
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
-        ).fetchone()
-        count = row[0] if row else 0
-    finally:
-        conn.close()
-
-    if not count:
-        logger.info("Suggestion check: skipped (no suggested tasks)")
-        return
-
-    timeout = SUGGESTION_CHECK_BASE_TIMEOUT + (count * SUGGESTION_CHECK_PER_TASK_TIMEOUT)
-    result = run_copilot("/suggestion-check", label="suggestion-check", timeout=timeout)
+    result = checks.get_checks().launch(skip_empty=True)
     logger.info(f"Suggestion check: {result['message']}")
 
 

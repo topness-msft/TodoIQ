@@ -8,7 +8,8 @@ import uuid
 from ..db import get_connection
 from ..models import get_last_sync, get_task
 from . import waiting_activity
-from .claude_runner import get_exit_info, get_status, run_copilot
+from .claude_runner import get_exit_info, get_status
+from . import checks
 
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,26 @@ logger = logging.getLogger(__name__)
 LABEL = "suggestion-check"
 TIMEOUT_SECONDS = 420
 VALID_RESULTS = {"likely_resolved", "still_pending", "unclear"}
+
+
+def _check_status():
+    # Polling materializes legacy sync exits even when no browser is connected.
+    legacy = get_status()
+    direct = checks.get_checks().status()
+    result = {key: value for key, value in legacy.items() if key != LABEL}
+    result.update({key: value for key, value in direct.items() if key != "_runs"})
+    result["_runs"] = {
+        **{label: run for label, run in legacy.get("_runs", {}).items() if label != LABEL},
+        **direct.get("_runs", {}),
+    }
+    return result
+
+
+def _completion(label):
+    # Full-scan correlation is still owned by legacy sync until Stage 3.
+    if label == LABEL:
+        return checks.get_checks().completion()
+    return get_exit_info(label)
 
 
 class QueueFull(Exception):
@@ -133,9 +154,9 @@ class SuggestionCheckQueue:
     def __init__(
         self,
         *,
-        launcher=run_copilot,
-        status_reader=get_status,
-        completion_reader=get_exit_info,
+        launcher=checks.launch_suggestion,
+        status_reader=_check_status,
+        completion_reader=_completion,
         task_reader=get_task,
         full_scan_reader=_latest_full_scan,
         failed_task_reader=_failed_suggestion_task_ids,
@@ -180,7 +201,7 @@ class SuggestionCheckQueue:
             completed = self._completion_reader("sync")
             marker = self._full_scan_reader()
         except Exception:
-            logger.exception("Post-sync suggestion retry could not initialize")
+            logger.error("Post-sync suggestion retry could not initialize")
             self._last_error = "Could not initialize post-sync suggestion retries."
             self.last_post_sync_recheck = self._post_sync_report(
                 error=self._last_error
@@ -263,7 +284,7 @@ class SuggestionCheckQueue:
         try:
             running = self._status_reader() or {}
         except Exception:
-            logger.exception("Suggestion check queue could not read runner status")
+            logger.error("Suggestion check queue could not read runner status")
             self._last_error = "Could not read suggestion check status."
             return
 
@@ -279,7 +300,7 @@ class SuggestionCheckQueue:
             try:
                 completed = self._completion_reader(LABEL)
             except Exception:
-                logger.exception("Suggestion check queue could not read completion")
+                logger.error("Suggestion check queue could not read completion")
                 self._last_error = "Could not read suggestion check completion."
                 return
 
@@ -304,7 +325,7 @@ class SuggestionCheckQueue:
             try:
                 task = self._task_reader(job["task_id"])
             except Exception:
-                logger.exception("Suggestion check queue could not revalidate task")
+                logger.error("Suggestion check queue could not revalidate task")
                 self._finish(
                     job,
                     "failed",
@@ -341,7 +362,7 @@ class SuggestionCheckQueue:
                     timeout=TIMEOUT_SECONDS,
                 )
             except Exception:
-                logger.exception("Suggestion check queue launch raised")
+                logger.error("Suggestion check queue launch raised")
                 result = {"ok": False, "message": "launch failed"}
 
             if not result.get("ok"):
@@ -377,7 +398,7 @@ class SuggestionCheckQueue:
         try:
             completed = self._completion_reader("sync")
         except Exception:
-            logger.exception("Post-sync suggestion retry could not read completion")
+            logger.error("Post-sync suggestion retry could not read completion")
             self._last_error = "Could not read the latest sync completion."
             self.last_post_sync_recheck = self._post_sync_report(
                 error=self._last_error
@@ -397,7 +418,7 @@ class SuggestionCheckQueue:
         try:
             marker = self._full_scan_reader()
         except Exception:
-            logger.exception("Post-sync suggestion retry could not read full-scan marker")
+            logger.error("Post-sync suggestion retry could not read full-scan marker")
             self._last_error = "Could not read the latest full-scan marker."
             self.last_post_sync_recheck = self._post_sync_report(
                 run_id=run_id,
@@ -429,7 +450,7 @@ class SuggestionCheckQueue:
         try:
             enabled = bool(self._post_sync_auto_enabled())
         except Exception:
-            logger.exception("Post-sync suggestion retry could not read auto-check setting")
+            logger.error("Post-sync suggestion retry could not read auto-check setting")
             self._last_error = "Could not read the automatic suggestion-check setting."
             self.last_post_sync_recheck = self._post_sync_report(
                 run_id=run_id,
@@ -448,7 +469,7 @@ class SuggestionCheckQueue:
         try:
             task_ids = self._failed_task_reader()
         except Exception:
-            logger.exception("Post-sync suggestion retry could not discover failed checks")
+            logger.error("Post-sync suggestion retry could not discover failed checks")
             self._last_error = "Could not discover failed suggestion checks."
             self.last_post_sync_recheck = self._post_sync_report(
                 run_id=run_id,
@@ -533,6 +554,11 @@ class SuggestionCheckQueue:
 
     def _finalize(self, job, completed):
         finished_at = completed.get("finished_at")
+        if completed.get("outcome") == "skipped":
+            self._finish(
+                job, "skipped", "The suggestion changed during its check.", finished_at
+            )
+            return
         if completed.get("exit_code") != 0 or completed.get("error"):
             code = completed.get("exit_code")
             message = (
@@ -546,7 +572,7 @@ class SuggestionCheckQueue:
         try:
             task = self._task_reader(job["task_id"])
         except Exception:
-            logger.exception("Suggestion check queue could not read result task")
+            logger.error("Suggestion check queue could not read result task")
             self._finish(
                 job,
                 "failed",

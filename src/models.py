@@ -319,6 +319,32 @@ def list_tasks(
         conn.close()
 
 
+def write_suggestion_check(snapshot: dict, activity: dict, user_notes: str | None) -> bool:
+    """Commit only check output, if every captured mutable input still matches."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """UPDATE tasks SET waiting_activity=?, user_notes=?, updated_at=?
+               WHERE id=? AND status='suggested'
+                 AND title IS ? AND description IS ? AND key_people IS ?
+                 AND source_type IS ? AND source_id IS ? AND user_notes IS ?
+                 AND waiting_activity IS ?""",
+            (
+                json.dumps(activity), user_notes, _now(), snapshot["id"],
+                snapshot["title"], snapshot["description"], snapshot["key_people"],
+                snapshot["source_type"], snapshot["source_id"], snapshot["user_notes"],
+                snapshot["waiting_activity"],
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def update_task(task_id: int, **fields) -> dict | None:
     """Update arbitrary fields on a task. Returns updated task or None."""
     if not fields:

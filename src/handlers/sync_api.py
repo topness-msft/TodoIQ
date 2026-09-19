@@ -1,20 +1,14 @@
-"""Sync status and trigger handler.
-
-Launches `copilot -p /todo-refresh` via the shared claude_runner.
-Used by the 30-min PeriodicCallback in app.py and by the dashboard's
-manual sync button.
-"""
+"""Sync triggers and merged legacy CLI / direct suggestion workflow status."""
 
 import json
 import logging
-import sqlite3
 import tornado.web
 
-from ..db import get_connection
 from ..models import get_last_sync, get_task
 from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 from ..services.suggestion_checks import QueueFull, SuggestionCheckQueue
+from ..services import checks
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +24,6 @@ logger = logging.getLogger(__name__)
 # leaving the card showing its previous answer with the previous timestamp,
 # which is the exact confusion the check exists to remove.
 SINGLE_WAITING_CHECK_TIMEOUT = 420
-SINGLE_SUGGESTION_CHECK_TIMEOUT = 420
 SUGGESTION_CHECK_BUSY_MESSAGE = (
     "A suggestion check is already running. Try again when it finishes."
 )
@@ -72,7 +65,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
             "last_sync": dict(last_sync) if last_sync else None,
             "sync_running": is_sync_running(),
             "auto_sync_enabled": getattr(self.application, "auto_sync_enabled", True),
-            "suggestion_check_running": is_running("suggestion-check"),
+            "suggestion_check_running": bool(checks.get_checks().status().get("suggestion-check")),
             "auto_suggestion_check_enabled": getattr(self.application, "auto_suggestion_check_enabled", True),
             "suggestion_checks": queue.snapshot(),
         }))
@@ -186,7 +179,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                 return
 
             queue = _suggestion_queue(self.application)
-            if queue.has_work() or is_running("suggestion-check"):
+            if queue.has_work() or checks.get_checks().status().get("suggestion-check"):
                 self.set_status(409)
                 self.write(json.dumps({
                     "ok": False,
@@ -194,20 +187,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
                 }))
                 return
 
-            conn = get_connection()
-            try:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM tasks WHERE status = 'suggested'"
-                ).fetchone()
-                count = row[0] if row else 0
-            finally:
-                conn.close()
-            timeout = 120 + (count * 60)  # 2 min base + 1 min per task
-            result = run_copilot(
-                "/suggestion-check",
-                label="suggestion-check",
-                timeout=timeout,
-            )
+            result = checks.get_checks().launch()
 
             if not result["ok"]:
                 if "already running" in result["message"].lower():
@@ -231,7 +211,7 @@ class SyncStatusHandler(tornado.web.RequestHandler):
 
 
 class RunnerStatusHandler(tornado.web.RequestHandler):
-    """GET /api/runner-status — status of all tracked claude subprocesses."""
+    """GET /api/runner-status — legacy labels plus the direct suggestion run."""
 
     def set_default_headers(self):
         self.set_header("Content-Type", "application/json")
@@ -242,7 +222,13 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
         # Flat format for backward compat: {label: true, ...}
         # Plus "completed" key with exit info for error tracking
         result = dict(running)
-        result["_completed"] = completed
+        direct = checks.get_checks().status()
+        result.update({key: value for key, value in direct.items() if key != "_runs"})
+        result["_runs"] = {**running.get("_runs", {}), **direct.get("_runs", {})}
+        result["_completed"] = dict(completed)
+        completion = checks.get_checks().completion()
+        if completion:
+            result["_completed"]["suggestion-check"] = completion
         result["_suggestion_check_queue"] = _suggestion_queue(
             self.application
         ).snapshot()
