@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 
@@ -23,9 +24,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", default="ok")
     parser.add_argument("--trace")
+    parser.add_argument("--ask-result")
     args = parser.parse_args()
     call_count = 0
     list_count = 0
+    ask_count = 0
 
     if args.scenario == "stderr-secret":
         print(
@@ -77,9 +80,16 @@ def main():
             if args.scenario == "hang-list":
                 continue
             tools = [
-                {"name": "ask_work_iq", "description": "Read-only question"},
+                {"name": "ask", "description": "Read-only question"},
                 {"name": "do_action", "description": "Structured action"},
+                {"name": "fetch", "description": "Structured entity read"},
             ]
+            if args.scenario == "only-action":
+                tools = [{"name": "do_action", "description": "Structured action"}]
+            if args.scenario == "only-ask":
+                tools = [{"name": "ask"}]
+            if args.scenario == "only-stale-ask":
+                tools = [{"name": "ask_work_iq"}]
             if (
                 args.scenario == "missing-capability"
                 or (
@@ -113,6 +123,79 @@ def main():
             if args.scenario == "server-ping":
                 emit({"jsonrpc": "2.0", "id": 9001, "method": "ping", "params": {}})
             tool_name = (request.get("params") or {}).get("name")
+            if tool_name == "ask":
+                ask_count += 1
+                if args.scenario == "ask-hang":
+                    continue
+                if args.scenario == "ask-protocol":
+                    sys.stdout.write("not-json\n")
+                    sys.stdout.flush()
+                    continue
+                if args.scenario == "ask-eof":
+                    return
+                if args.scenario == "ask-slow":
+                    time.sleep(0.15)
+                code = {
+                    "ask-auth-once": "auth_required",
+                    "ask-consent-once": "consent_required",
+                    "ask-eula-once": "eula_required",
+                }.get(args.scenario)
+                if code and ask_count == 1:
+                    result = {
+                        "content": [{"type": "text", "text": "private-error@example.test"}],
+                        "isError": True,
+                        "_meta": {"code": code},
+                    }
+                elif args.ask_result:
+                    result = json.loads(args.ask_result)
+                else:
+                    result = {
+                        "content": [{"type": "text", "text": "private-answer"}],
+                        "structuredContent": {
+                            "answer": "private-answer",
+                            "conversationId": "private-conversation",
+                            "account": "private-account@example.test",
+                            "extra": "private-extra",
+                        },
+                    }
+                emit({"jsonrpc": "2.0", "id": response_id, "result": result})
+                continue
+            if tool_name == "fetch":
+                if args.scenario == "fetch-tool-error":
+                    emit({
+                        "jsonrpc": "2.0", "id": response_id,
+                        "result": {"content": [], "isError": True},
+                    })
+                    continue
+                if args.scenario == "fetch-no-structured":
+                    structured = None
+                elif args.scenario == "fetch-http":
+                    structured = {"results": [{"statusCode": 503, "data": {}}]}
+                elif args.scenario == "fetch-no-results":
+                    structured = {"results": {}}
+                elif args.scenario == "fetch-private":
+                    structured = {"results": [{
+                        "statusCode": 200,
+                        "data": {"value": [{
+                            "id": "AAMk-private-message",
+                            "internetMessageHeaders": [{
+                                "name": "X-Riveter-Correlation-Id",
+                                "value": "private-correlation-key",
+                            }],
+                            "toRecipients": [{
+                                "emailAddress": {"address": "private@example.test"},
+                            }],
+                        }]},
+                    }]}
+                else:
+                    structured = {"results": [{
+                        "statusCode": 200, "data": {"value": []},
+                    }]}
+                result = {"content": [], "isError": False}
+                if structured is not None:
+                    result["structuredContent"] = structured
+                emit({"jsonrpc": "2.0", "id": response_id, "result": result})
+                continue
             if tool_name == "do_action":
                 readiness_error = {
                     "readiness-eula": (

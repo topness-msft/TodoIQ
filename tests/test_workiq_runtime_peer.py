@@ -1,4 +1,5 @@
 import json
+import copy
 import subprocess
 import sys
 import threading
@@ -11,6 +12,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from src.services.workiq_policy import CalendarAction, build_calendar_operation
+from src.services import workiq_policy as policy
+from src.services import workiq_runtime as runtime_module
 from src.services.workiq_runtime import (
     ActionHTTPError,
     AuthRequiredError,
@@ -55,13 +58,722 @@ def wait_until(predicate, timeout=2):
     return False
 
 
+ASK_RESULT = {
+    "content": [{"type": "text", "text": "private-answer"}],
+    "structuredContent": {
+        "answer": "private-answer",
+        "conversationId": "private-conversation",
+        "account": "private-account@example.test",
+        "extra": "private-extra",
+    },
+}
+ASK_DATA = {"answer": "private-answer", "conversation_id": "private-conversation"}
+ASK_QUESTION = "private-question@example.test"
+ASK_PROBE = (
+    "Reply exactly RIVETER_PROTOCOL_PROBE. Do not search or access Microsoft 365 data."
+)
+
+
+def ask_trace(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def assert_ask_scrubbed(runtime):
+    serialized = json.dumps(runtime.snapshot()) + repr([
+        (operation.ask, operation.result, vars(operation))
+        for operation in runtime._operations.values()
+    ])
+    for value in [
+        ASK_QUESTION, "private-answer", "private-conversation",
+        "private-account@example.test", "private-extra", "private-error@example.test",
+    ]:
+        assert value not in serialized
+    assert all(operation.ask is None for operation in runtime._operations.values())
+
+
+@pytest.mark.parametrize("explicit_false", [False, True])
+@pytest.mark.parametrize("structured_answer", [False, True])
+def test_ask_exact_wire_and_transient_consume_once(
+    tmp_path, explicit_false, structured_answer
+):
+    trace = tmp_path / "ask.jsonl"
+    envelope = copy.deepcopy(ASK_RESULT)
+    if explicit_false:
+        envelope["isError"] = False
+    if not structured_answer:
+        envelope["structuredContent"].pop("answer")
+    runtime = WorkIQRuntime(command=lambda: [
+        *command_for("ok", trace), "--ask-result", json.dumps(envelope)
+    ])
+    try:
+        assert runtime.probe_ask(timeout=2) == {"ok": True}
+        assert runtime.execute_ask(ASK_QUESTION, timeout=2) == ASK_DATA
+        job = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=2)
+        assert runtime.wait(job, 3)["data"] == ASK_DATA
+        assert "data" not in runtime.wait(job, 0)
+        assert runtime.execute_ask(ASK_QUESTION, timeout=2) == ASK_DATA
+        calls = [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"]
+        assert calls == [
+            {"name": "ask", "arguments": {"question": question}}
+            for question in [ASK_PROBE, ASK_QUESTION, ASK_QUESTION, ASK_QUESTION]
+        ]
+        assert sum(m["method"] == "initialize" for m in ask_trace(trace)) == 1
+        assert runtime.snapshot()["allowed_capabilities"] == ["do_action", "fetch"]
+        assert runtime.snapshot()["authenticated"] is False
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def malformed_ask_results():
+    cases = []
+    for content in [None, [], {}, [{"type": "text", "text": " "}],
+                    [{"type": "image", "text": "private-answer"}],
+                    [{"type": "text", "text": 7}],
+                    [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]]:
+        cases.append(({**ASK_RESULT, "content": content}, "invalid_structured_content"))
+    cases.append(({"structuredContent": ASK_RESULT["structuredContent"]}, "invalid_structured_content"))
+    for value in [None, 0, "false", []]:
+        cases.append(({**ASK_RESULT, "isError": value}, "invalid_structured_content"))
+    cases.append(({**ASK_RESULT, "isError": True}, "tool"))
+    for structured in [None, [], {}, {"conversationId": ""}, {"conversationId": " "},
+                       {"conversationId": 7}, {"conversationId": "x", "answer": None},
+                       {"conversationId": "x", "answer": "contradictory"}]:
+        cases.append(({**ASK_RESULT, "structuredContent": structured}, "invalid_structured_content"))
+    cases.append(({"content": ASK_RESULT["content"]}, "invalid_structured_content"))
+    for meta in [None, [], "bad"]:
+        cases.append(({**ASK_RESULT, "_meta": meta}, "invalid_structured_content"))
+    return cases
+
+
+@pytest.mark.parametrize(("envelope", "code"), malformed_ask_results())
+def test_ask_malformed_envelopes_preserve_calendar_readiness(tmp_path, envelope, code):
+    runtime = WorkIQRuntime(command=lambda: [
+        *command_for("ok"), "--ask-result", json.dumps(envelope)
+    ])
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        result = runtime.probe_ask(timeout=2)
+        assert result["ok"] is False
+        assert result["error"]["code"] == code
+        assert runtime.snapshot()["authenticated"] is True
+        assert runtime.snapshot()["state"] == "ready"
+        calendar = build_calendar_operation(CalendarAction.GET_SCHEDULE, SCHEDULE_BODY)
+        assert runtime.execute_calendar(calendar, timeout=2) == {"value": []}
+        assert runtime.read_sent_items(timeout=2) == {"value": []}
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_only_survives_legacy_probe_without_restart(tmp_path):
+    trace = tmp_path / "ask.jsonl"
+    runtime = WorkIQRuntime(command=lambda: command_for("only-ask", trace))
+    try:
+        assert runtime.start()["state"] == "ready"
+        assert runtime.snapshot()["allowed_capabilities"] == []
+        assert runtime.probe(timeout=2)["error"]["code"] == "capability_denied"
+        before = runtime.snapshot()
+        assert runtime.probe_ask(timeout=2) == {"ok": True}
+        assert runtime.execute_ask(ASK_QUESTION, timeout=2) == ASK_DATA
+        assert runtime.snapshot()["authenticated"] is False
+        assert runtime.snapshot()["state"] == before["state"]
+        assert runtime.snapshot()["error"] == before["error"]
+        assert sum(m["method"] == "initialize" for m in ask_trace(trace)) == 1
+        assert all(m["params"]["name"] == "ask" for m in ask_trace(trace)
+                   if m["method"] == "tools/call")
+    finally:
+        runtime.shutdown()
+
+
+def test_calendar_only_ask_denial_does_not_revoke_readiness(tmp_path):
+    trace = tmp_path / "calendar.jsonl"
+    runtime = WorkIQRuntime(command=lambda: command_for("only-action", trace))
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        before = len(ask_trace(trace))
+        assert runtime.probe_ask(timeout=2)["error"]["code"] == "capability_denied"
+        with pytest.raises(runtime_module.CapabilityDeniedError):
+            runtime.execute_ask(ASK_QUESTION, timeout=2)
+        assert len(ask_trace(trace)) == before
+        assert runtime.snapshot()["authenticated"] is True
+        assert runtime.snapshot()["state"] == "ready"
+        calendar = build_calendar_operation(CalendarAction.GET_SCHEDULE, SCHEDULE_BODY)
+        assert runtime.execute_calendar(calendar, timeout=2) == {"value": []}
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_stale_ask_alias_never_becomes_capability():
+    runtime = WorkIQRuntime(command=lambda: command_for("only-stale-ask"))
+    try:
+        assert runtime.start()["error"]["code"] == "capability_denied"
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "code"),
+    [("ask-auth-once", "auth_required"), ("ask-consent-once", "consent_required"),
+     ("ask-eula-once", "eula_required")],
+)
+def test_ask_cooldown_boundary_and_one_serialized_recovery(tmp_path, scenario, code):
+    trace = tmp_path / "cooldown.jsonl"
+    now = [100.0]
+    runtime = WorkIQRuntime(
+        command=lambda: command_for(scenario, trace), monotonic_clock=lambda: now[0]
+    )
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        assert runtime.probe_ask(timeout=2)["error"]["code"] == code
+        before = ask_trace(trace)
+        for elapsed in [0.0, 59.999]:
+            now[0] = 100.0 + elapsed
+            assert runtime.probe_ask(timeout=2)["error"]["code"] == code
+            with pytest.raises(runtime_module.WorkIQError) as error:
+                runtime.execute_ask(ASK_QUESTION, timeout=2)
+            assert error.value.code == code
+            job = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=2)
+            assert runtime.wait(job, 3)["error"]["code"] == code
+            assert ask_trace(trace) == before
+        assert runtime.snapshot()["authenticated"] is True
+        assert runtime.snapshot()["state"] == "ready"
+        now[0] = 160.0
+        jobs = [runtime.submit("ask", ask=policy.build_ask_operation(q), timeout=2)
+                for q in [ASK_QUESTION, "second-private-question"]]
+        assert [runtime.wait(job, 3)["data"] for job in jobs] == [ASK_DATA, ASK_DATA]
+        calls = [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"]
+        assert calls[1:] == [
+            {"name": "ask", "arguments": {"question": q}}
+            for q in [ASK_PROBE, ASK_PROBE, ASK_QUESTION, "second-private-question"]
+        ]
+        assert sum(m["method"] == "initialize" for m in ask_trace(trace)) == 1
+        assert [h["job_id"] for h in runtime.snapshot()["history"]][-2:] == jobs
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("rpc_error", [False, True])
+def test_ask_free_text_is_not_authentication_evidence(tmp_path, monkeypatch, rpc_error):
+    trace = tmp_path / "text.jsonl"
+    envelope = {
+        "content": [{"type": "text", "text": "sign in is required private-error@example.test"}],
+        "isError": True,
+    }
+    runtime = WorkIQRuntime(command=lambda: [
+        *command_for("ok", trace), "--ask-result", json.dumps(envelope)
+    ])
+    try:
+        runtime.start()
+        if rpc_error:
+            original = runtime._parse_message
+            def inject(raw):
+                message = original(raw)
+                if "result" in message:
+                    message.pop("result")
+                    message["error"] = {"code": -32000, "message": envelope["content"][0]["text"]}
+                return message
+            monkeypatch.setattr(runtime, "_parse_message", inject)
+        for _ in range(2):
+            result = runtime.probe_ask(timeout=2)
+            assert result["error"]["code"] == ("remote" if rpc_error else "tool")
+        assert sum(m["method"] == "tools/call" for m in ask_trace(trace)) == 2
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_submit_requires_minted_plan_and_rejects_cross_payloads():
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"))
+    try:
+        runtime.start()
+        calendar = build_calendar_operation(CalendarAction.GET_SCHEDULE, SCHEDULE_BODY)
+        for kwargs in [
+            {"plan": "ask"}, {"plan": "ask", "ask": {"question": ASK_QUESTION}},
+            {"plan": "ask", "ask": policy.AskOperation(ASK_QUESTION, object())},
+            {"plan": "ask", "ask": policy.build_ask_operation(ASK_QUESTION), "calendar": calendar},
+            {"plan": "readiness", "ask": policy.build_ask_operation(ASK_QUESTION)},
+            {"plan": "ask_probe", "ask": policy.build_ask_operation(ASK_QUESTION)},
+            {"plan": "ask_work_iq"},
+        ]:
+            with pytest.raises(policy.CapabilityError):
+                runtime.submit(**kwargs)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_probe_and_business_share_one_timeout_budget(tmp_path):
+    trace = tmp_path / "budget.jsonl"
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ask-slow", trace), terminate_grace=0.05
+    )
+    notifications = []
+    send_notification = runtime._send_notification
+
+    def record_notification(method, params):
+        notifications.append(method)
+        return send_notification(method, params)
+
+    runtime._send_notification = record_notification
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=0.23)
+        assert runtime.snapshot()["authenticated"] is False
+        assert runtime.snapshot()["state"] == "faulted"
+        assert_ask_scrubbed(runtime)
+        assert "notifications/cancelled" in notifications
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_ask_rechecks_budget_and_cancellation_after_probe(tmp_path, monkeypatch, cancel):
+    trace = tmp_path / "gate.jsonl"
+    now = [100.0]
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok", trace),
+        monotonic_clock=lambda: now[0], terminate_grace=0.05,
+    )
+    original = runtime._rpc
+    def intercept(method, params, timeout, **kwargs):
+        result = original(method, params, timeout, **kwargs)
+        if method == "tools/call" and params["name"] == "ask":
+            if cancel:
+                runtime.cancel(runtime.snapshot()["active_job_id"])
+            else:
+                now[0] += 2.0
+        return result
+    monkeypatch.setattr(runtime, "_rpc", intercept)
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        with pytest.raises(runtime_module.CancelledError if cancel else WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=2)
+        calls = [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"]
+        assert [c["name"] for c in calls] == ["do_action", "ask"]
+        assert calls[-1]["arguments"] == {"question": ASK_PROBE}
+        assert runtime.snapshot()["authenticated"] is False
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_cancel_between_budget_check_and_send_emits_no_business_call(
+    tmp_path, monkeypatch
+):
+    trace = tmp_path / "cancel-send.jsonl"
+    runtime = WorkIQRuntime(command=lambda: command_for("ok", trace))
+    original = runtime._rpc
+    terminate = runtime._terminate_child
+
+    def intercept(method, params, timeout, **kwargs):
+        if method == "tools/call" and params.get("arguments") == {"question": ASK_QUESTION}:
+            # Keep the child alive briefly, as another thread terminating it can do.
+            monkeypatch.setattr(runtime, "_terminate_child", lambda *a, **k: None)
+            runtime.cancel(runtime.snapshot()["active_job_id"])
+            monkeypatch.setattr(runtime, "_terminate_child", terminate)
+        return original(method, params, timeout, **kwargs)
+
+    monkeypatch.setattr(runtime, "_rpc", intercept)
+    try:
+        with pytest.raises(runtime_module.CancelledError):
+            runtime.execute_ask(ASK_QUESTION, timeout=2)
+        assert wait_until(lambda: runtime._thread is None)
+        calls = [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"]
+        assert calls == [{"name": "ask", "arguments": {"question": ASK_PROBE}}]
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_facade_scrubs_success_racing_caller_timeout(monkeypatch):
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"))
+
+    def expired_wait(job_id, timeout):
+        assert runtime._operations[job_id].event.wait(2)
+        return {"state": "running"}
+
+    monkeypatch.setattr(runtime, "wait", expired_wait)
+    try:
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=2)
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("end", ["queued_cancel", "active_cancel", "timeout", "shutdown"])
+def test_ask_terminal_paths_scrub_active_and_queued_private_fields(tmp_path, end):
+    trace = tmp_path / "terminal.jsonl"
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ask-hang", trace), terminate_grace=0.1
+    )
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        first = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION),
+                               timeout=0.3 if end == "timeout" else 10)
+        assert wait_until(lambda: any(m["method"] == "tools/call"
+                                     and m["params"]["name"] == "ask"
+                                     for m in ask_trace(trace)))
+        second = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=2)
+        if end == "queued_cancel":
+            process = runtime._process
+            assert runtime.cancel(second)
+            assert runtime.wait(second, 0)["state"] == "cancelled"
+            assert runtime._operations[second].ask is None
+            assert process.poll() is None
+            assert runtime.snapshot()["authenticated"] is True
+            runtime.cancel(first)
+        elif end == "active_cancel":
+            assert runtime.cancel(first)
+        elif end == "shutdown":
+            runtime.shutdown()
+        results = [runtime.wait(job, 3) for job in [first, second]]
+        assert all(result["state"] in {"cancelled", "failed", "timed_out"} for result in results)
+        assert results[0]["error"]["code"] == ("timeout" if end == "timeout" else "cancelled")
+        assert runtime.snapshot()["authenticated"] is False
+        assert_ask_scrubbed(runtime)
+        assert wait_until(lambda: runtime._incoming.empty())
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize(("scenario", "code"), [("ask-protocol", "protocol"), ("ask-eof", "transport")])
+def test_fatal_ask_child_failure_revokes_calendar(tmp_path, scenario, code):
+    runtime = WorkIQRuntime(command=lambda: command_for(scenario), terminate_grace=0.1)
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        with pytest.raises(runtime_module.WorkIQError) as error:
+            runtime.execute_ask(ASK_QUESTION, timeout=2)
+        assert error.value.code == code
+        assert runtime.snapshot()["authenticated"] is False
+        assert runtime.snapshot()["state"] == "faulted"
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_mixed_ask_calendar_fetch_queue_uses_exact_fifo_dispatch(tmp_path):
+    trace = tmp_path / "mixed.jsonl"
+    runtime = WorkIQRuntime(command=lambda: command_for("ok", trace))
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        assert runtime.probe_ask(timeout=2)["ok"]
+        calendar = build_calendar_operation(CalendarAction.GET_SCHEDULE, SCHEDULE_BODY)
+        jobs = [
+            runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=2),
+            runtime.submit("calendar", calendar=calendar, timeout=2),
+            runtime.submit("sent_items", timeout=2),
+            runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=2),
+        ]
+        assert [runtime.wait(job, 3)["data"] for job in jobs] == [
+            ASK_DATA, {"value": []}, {"value": []}, ASK_DATA
+        ]
+        calls = [m["params"]["name"] for m in ask_trace(trace) if m["method"] == "tools/call"]
+        assert calls == ["do_action", "ask", "ask", "do_action", "fetch", "ask"]
+        assert [h["job_id"] for h in runtime.snapshot()["history"]][-4:] == jobs
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_cold_start_consumes_caller_deadline(tmp_path):
+    trace = tmp_path / "cold-budget.jsonl"
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("hang-initialize", trace),
+        startup_timeout=0.30, terminate_grace=0.01,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=0.05)
+        assert time.monotonic() - started < 0.20
+        assert not any(m["method"] == "tools/call" for m in ask_trace(trace))
+        assert runtime.snapshot()["authenticated"] is False
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_start_lock_waiter_expires_without_changing_owner_state():
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"), terminate_grace=0.01)
+    results = []
+    runtime._start_lock.acquire()
+    caller = threading.Thread(target=lambda: results.append(runtime.probe_ask(timeout=0.05)))
+    caller.start()
+    try:
+        try:
+            caller.join(0.20)
+            assert not caller.is_alive()
+            assert results[0]["error"]["code"] == "timeout"
+            assert runtime.snapshot()["state"] == "stopped"
+            assert not runtime._stopping.is_set()
+            assert runtime._process is None
+        finally:
+            runtime._start_lock.release()
+            caller.join(2)
+        assert runtime.start()["state"] == "ready"
+        assert runtime.probe_ask(timeout=2)["ok"]
+    finally:
+        runtime.shutdown()
+
+
+def test_generic_ask_expires_during_independently_owned_startup(tmp_path):
+    trace = tmp_path / "joining-startup.jsonl"
+    launch_entered = threading.Event()
+    release_launch = threading.Event()
+    owner_results = []
+
+    def gated_process_factory(argv, **kwargs):
+        launch_entered.set()
+        release_launch.wait(2)
+        return subprocess.Popen(argv, **kwargs)
+
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok", trace),
+        process_factory=gated_process_factory, startup_timeout=2, terminate_grace=0.01,
+    )
+    owner = threading.Thread(target=lambda: owner_results.append(runtime.start()))
+    owner.start()
+    try:
+        assert launch_entered.wait(1)
+        job = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=0.04)
+        result = runtime.wait(job, 0.10)
+        assert result["state"] == "timed_out"
+        assert result["error"]["code"] == "timeout"
+        assert runtime.snapshot()["state"] == "starting"
+        assert not runtime._stopping.is_set()
+        assert_ask_scrubbed(runtime)
+        release_launch.set()
+        owner.join(2)
+        assert owner_results[0]["state"] == "ready"
+        assert runtime.probe(timeout=2)["ok"]
+        assert not any(m.get("params", {}).get("name") == "ask" for m in ask_trace(trace))
+    finally:
+        release_launch.set()
+        owner.join(2)
+        runtime.shutdown()
+
+
+def test_expired_startup_owner_cannot_abort_a_different_healthy_child():
+    runtime = WorkIQRuntime(command=lambda: command_for("ok"), terminate_grace=0.01)
+    stale_owner = threading.Thread()
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        process = runtime._process
+        before = runtime.snapshot()
+        runtime._abort_ask_startup(stale_owner)
+        assert runtime.snapshot() == before
+        assert runtime._process is process and process.poll() is None
+        assert not runtime._stopping.is_set()
+        assert runtime.execute_ask(ASK_QUESTION, timeout=2) == ASK_DATA
+        assert runtime.snapshot()["authenticated"] is True
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("wait_while_queued", [False, True])
+def test_generic_ask_deadline_includes_fifo_and_expires_only_that_job(
+    tmp_path, wait_while_queued
+):
+    trace = tmp_path / "fifo-budget.jsonl"
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ask-slow", trace), terminate_grace=0.01
+    )
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        assert runtime.probe_ask(timeout=2)["ok"]
+        first = runtime.submit(
+            "ask", ask=policy.build_ask_operation("first synthetic read"), timeout=2
+        )
+        assert wait_until(lambda: runtime.snapshot()["active_job_id"] == first)
+        second = runtime.submit(
+            "ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=0.04
+        )
+        process = runtime._process
+        assert runtime.wait(second, 0)["state"] == "queued"
+        assert runtime._operations[second].ask is not None
+        if not wait_while_queued:
+            assert runtime.wait(first, 2)["data"] == ASK_DATA
+        result = runtime.wait(second)
+        assert result["state"] == "timed_out"
+        assert result["error"]["code"] == "timeout"
+        assert runtime._process is process and process.poll() is None
+        assert runtime.snapshot()["authenticated"] is True
+        if wait_while_queued:
+            assert runtime.wait(first, 2)["data"] == ASK_DATA
+        assert runtime.snapshot()["state"] == "ready"
+        assert not any(
+            m.get("params", {}).get("arguments") == {"question": ASK_QUESTION}
+            for m in ask_trace(trace)
+        )
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_facade_queue_time_is_not_extra_business_budget():
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ask-slow"), terminate_grace=0.01
+    )
+    try:
+        assert runtime.probe_ask(timeout=2)["ok"]
+        first = runtime.submit(
+            "ask", ask=policy.build_ask_operation("first synthetic read"), timeout=2
+        )
+        assert wait_until(lambda: runtime.snapshot()["active_job_id"] == first)
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=0.20)
+        runtime.wait(first, 1)
+        assert runtime.snapshot()["state"] == "faulted"
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("delay_at", ["startup", "queue"])
+def test_ask_absolute_deadline_uses_fake_clock_remaining_rpc_durations(
+    monkeypatch, delay_at
+):
+    now = [100.0]
+    budgets = []
+
+    def process_factory(argv, **kwargs):
+        process = subprocess.Popen(argv, **kwargs)
+        if delay_at == "startup":
+            now[0] += 3
+        return process
+
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok"), process_factory=process_factory,
+        monotonic_clock=lambda: now[0], terminate_grace=0.01,
+    )
+    rpc = runtime._rpc
+
+    def record_budget(method, params, timeout, **kwargs):
+        result = rpc(method, params, timeout, **kwargs)
+        if method == "tools/call" and params["name"] == "ask":
+            budgets.append(timeout)
+            if len(budgets) == 1:
+                now[0] += 2
+        return result
+
+    monkeypatch.setattr(runtime, "_rpc", record_budget)
+    try:
+        if delay_at == "startup":
+            assert runtime.execute_ask(ASK_QUESTION, timeout=10) == ASK_DATA
+        else:
+            runtime.start()
+            with runtime._lock:
+                job = runtime.submit(
+                    "ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=10
+                )
+                now[0] += 3
+            assert runtime.wait(job, 2)["data"] == ASK_DATA
+        assert budgets == [7.0, 5.0]
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_queue_delay_and_probe_exhaustion_emit_no_business_call(tmp_path, monkeypatch):
+    trace = tmp_path / "queue-probe-budget.jsonl"
+    now = [100.0]
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok", trace),
+        monotonic_clock=lambda: now[0], terminate_grace=0.01,
+    )
+    rpc = runtime._rpc
+
+    def consume_probe_budget(method, params, timeout, **kwargs):
+        result = rpc(method, params, timeout, **kwargs)
+        if method == "tools/call" and params["name"] == "ask":
+            now[0] += 2
+        return result
+
+    monkeypatch.setattr(runtime, "_rpc", consume_probe_budget)
+    try:
+        runtime.start()
+        with runtime._lock:
+            job = runtime.submit("ask", ask=policy.build_ask_operation(ASK_QUESTION), timeout=5)
+            now[0] += 3
+        result = runtime.wait(job, 2)
+        assert result["state"] == "timed_out"
+        assert result["error"]["code"] == "timeout"
+        assert [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"] == [
+            {"name": "ask", "arguments": {"question": ASK_PROBE}}
+        ]
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_answer_expiring_during_validation_cannot_publish_success(monkeypatch):
+    now = [100.0]
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok"),
+        monotonic_clock=lambda: now[0], terminate_grace=0.01,
+    )
+    validate = runtime._validate_ask_result
+    validations = []
+
+    def late_answer(result):
+        data = validate(result)
+        validations.append(True)
+        if len(validations) == 2:
+            now[0] = 105.0
+        return data
+
+    monkeypatch.setattr(runtime, "_validate_ask_result", late_answer)
+    try:
+        assert runtime.probe(timeout=2)["ok"]
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=5)
+        assert runtime.snapshot()["authenticated"] is False
+        assert runtime.snapshot()["state"] == "faulted"
+        assert runtime.snapshot()["history"][-1]["state"] == "timed_out"
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
+def test_ask_deadline_is_rechecked_at_wire_send(tmp_path, monkeypatch):
+    trace = tmp_path / "send-deadline.jsonl"
+    now = [100.0]
+    runtime = WorkIQRuntime(
+        command=lambda: command_for("ok", trace),
+        monotonic_clock=lambda: now[0], terminate_grace=0.01,
+    )
+    rpc = runtime._rpc
+
+    def expire_before_send(method, params, timeout, **kwargs):
+        if params.get("arguments") == {"question": ASK_QUESTION}:
+            now[0] = 105.0
+        return rpc(method, params, timeout, **kwargs)
+
+    monkeypatch.setattr(runtime, "_rpc", expire_before_send)
+    try:
+        with pytest.raises(WorkIQTimeoutError):
+            runtime.execute_ask(ASK_QUESTION, timeout=5)
+        assert [m["params"] for m in ask_trace(trace) if m["method"] == "tools/call"] == [
+            {"name": "ask", "arguments": {"question": ASK_PROBE}}
+        ]
+        assert_ask_scrubbed(runtime)
+    finally:
+        runtime.shutdown()
+
+
 def test_start_initializes_then_notifies_then_lists_tools_before_ready(tmp_path):
     trace = tmp_path / "trace.jsonl"
     runtime = WorkIQRuntime(command=lambda: command_for("ok", trace))
     try:
         snapshot = runtime.start()
         assert snapshot["state"] == "ready"
-        assert snapshot["allowed_capabilities"] == ["do_action"]
+        assert snapshot["allowed_capabilities"] == ["do_action", "fetch"]
         messages = [json.loads(line) for line in trace.read_text().splitlines()]
         assert [message["method"] for message in messages[:3]] == [
             "initialize",
@@ -841,7 +1553,7 @@ def test_transient_missing_capability_retries_tools_list_once(tmp_path):
         snapshot = runtime.start()
 
         assert snapshot["state"] == "ready"
-        assert snapshot["allowed_capabilities"] == ["do_action"]
+        assert snapshot["allowed_capabilities"] == ["do_action", "fetch"]
         methods = [
             json.loads(line)["method"] for line in trace.read_text().splitlines()
         ]

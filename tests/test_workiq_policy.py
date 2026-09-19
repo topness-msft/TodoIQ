@@ -1,4 +1,8 @@
+from dataclasses import FrozenInstanceError, fields
+
 import pytest
+
+from src.services import workiq_policy as policy
 
 from src.services.workiq_policy import (
     CalendarAction,
@@ -21,7 +25,7 @@ def test_policy_allows_only_exact_runtime_discovered_action_tool():
     assert discover_read_capabilities(tools) == ("do_action",)
 
 
-def test_policy_does_not_require_or_expose_ask():
+def test_policy_discovers_actual_ask_without_the_stale_alias():
     tools = [
         {"name": "retrieve"},
         {"name": "fetch"},
@@ -29,7 +33,43 @@ def test_policy_does_not_require_or_expose_ask():
         {"name": "accept_eula"},
     ]
     tools.append({"name": "do_action"})
-    assert discover_read_capabilities(tools) == ("do_action",)
+    assert discover_read_capabilities(tools) == ("do_action", "fetch", "ask")
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (["ask"], ("ask",)),
+        (["fetch"], ("fetch",)),
+        (["ask", "fetch", "do_action"], ("do_action", "fetch", "ask")),
+    ],
+)
+def test_policy_discovers_independent_owned_reads(names, expected):
+    assert discover_read_capabilities([{"name": name} for name in names]) == expected
+
+
+def test_ask_policy_mints_frozen_question_only_operation():
+    question = "  private-question@example.test  "
+    operation = policy.build_ask_operation(question)
+    assert operation.question == question
+    assert {field.name for field in fields(operation)} == {"question", "_mint"}
+    assert policy.require_ask_operation(operation).question == question
+    with pytest.raises(FrozenInstanceError):
+        operation.question = "replacement"
+    with pytest.raises(CapabilityError):
+        policy.require_ask_operation(policy.AskOperation(question, object()))
+    with pytest.raises(CapabilityError):
+        policy.require_ask_operation({"question": question})
+    with pytest.raises(TypeError):
+        policy.build_ask_operation(question, fileUrls=["private"])
+    with pytest.raises(TypeError):
+        policy.build_ask_operation()
+
+
+@pytest.mark.parametrize("question", [None, "", " \n ", 7, {}, [], True])
+def test_ask_policy_rejects_invalid_questions(question):
+    with pytest.raises(CapabilityError):
+        policy.build_ask_operation(question)
 
 
 @pytest.mark.parametrize(
@@ -39,6 +79,9 @@ def test_policy_does_not_require_or_expose_ask():
         [{"name": "do_action"}, {"name": "do_action"}],
         [{"name": 7}],
         [{"name": "ask_work_iq"}],
+        [{"name": "ask"}, {"name": "ask"}],
+        [{"name": "ask"}, None],
+        {},
     ],
 )
 def test_policy_fails_closed_without_one_valid_action_tool(tools):

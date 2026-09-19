@@ -19,14 +19,18 @@ from typing import Callable
 
 from .workiq_policy import (
     ACTION_TOOL,
+    ASK_TOOL,
     FETCH_TOOL,
     SENT_ITEMS_URL,
     CalendarAction,
     CalendarOperation,
+    AskOperation,
     CapabilityError,
     build_calendar_operation,
+    build_ask_operation,
     discover_read_capabilities,
     require_calendar_operation,
+    require_ask_operation,
 )
 from .workiq_setup import (
     WorkIQAccountError,
@@ -38,6 +42,10 @@ from .workiq_setup import (
 
 logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = "2025-06-18"
+ASK_AUTH_COOLDOWN_SECONDS = 60
+ASK_PROBE_QUESTION = (
+    "Reply exactly RIVETER_PROTOCOL_PROBE. Do not search or access Microsoft 365 data."
+)
 
 
 class WorkIQError(Exception):
@@ -129,6 +137,8 @@ class _Operation:
     timeout: float
     plan: str = "readiness"
     calendar: CalendarOperation | None = None
+    ask: AskOperation | None = None
+    ask_deadline: float | None = None
     state: str = "queued"
     result: dict | None = None
     event: threading.Event = field(default_factory=threading.Event)
@@ -162,6 +172,7 @@ class WorkIQRuntime:
         terminate_grace: float = 5,
         required_server_version: str = "1.0.0",
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ):
         self._command = command or (lambda: get_setup().runtime_command())
         self._process_factory = process_factory
@@ -173,6 +184,7 @@ class WorkIQRuntime:
         self._terminate_grace = terminate_grace
         self._required_server_version = required_server_version
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic_clock = monotonic_clock or time.monotonic
 
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
@@ -196,6 +208,10 @@ class WorkIQRuntime:
         self._protocol_version: str | None = None
         self._server_info: dict | None = None
         self._authenticated = False
+        self._ask_available = False
+        self._ask_ready = False
+        self._ask_blocker: dict | None = None
+        self._ask_retry_after = 0.0
         self._request_id = 0
         self._active_operation: _Operation | None = None
         self._active_request_id: int | None = None
@@ -204,8 +220,11 @@ class WorkIQRuntime:
         with self._start_lock:
             return self._start_serialized()
 
-    def _start_serialized(self) -> dict:
-        startup_deadline = time.monotonic() + self._startup_timeout
+    def _start_serialized(self, *, ask_deadline: float | None = None) -> dict:
+        startup_budget = self._startup_timeout
+        if ask_deadline is not None:
+            startup_budget = min(startup_budget, self._ask_time_left(ask_deadline))
+        startup_deadline = time.monotonic() + startup_budget
         with self._lock:
             if self._thread and self._thread.is_alive():
                 if self._state != "faulted":
@@ -232,6 +251,8 @@ class WorkIQRuntime:
             self._error = None
             self._allowed = ()
             self._authenticated = False
+            self._ask_available = False
+            self._ask_ready = False
             self._thread = threading.Thread(
                 target=self._worker_main,
                 args=(startup_deadline,),
@@ -239,8 +260,17 @@ class WorkIQRuntime:
                 name="workiq-mcp-worker",
             )
             self._thread.start()
+            owner = self._thread
         remaining = max(0.0, startup_deadline - time.monotonic())
-        if not self._ready_event.wait(remaining):
+        if ask_deadline is not None:
+            remaining = min(remaining, max(0.0, ask_deadline - self._monotonic_clock()))
+        ready = self._ready_event.wait(remaining)
+        if ask_deadline is not None and (
+            not ready or self._monotonic_clock() >= ask_deadline
+        ):
+            self._abort_ask_startup(owner)
+            raise TimeoutError("Work IQ ask timed out during startup.")
+        if not ready:
             timeout_error = TimeoutError("Work IQ MCP startup timed out.")
             with self._lock:
                 self._state = "faulted"
@@ -253,36 +283,109 @@ class WorkIQRuntime:
                 thread.join(self._terminate_grace + 1)
         return self.snapshot()
 
+    def _start_for_ask(self, deadline: float) -> None:
+        if not self._start_lock.acquire(timeout=self._ask_time_left(deadline)):
+            raise TimeoutError("Work IQ ask timed out waiting for startup.")
+        try:
+            self._ask_time_left(deadline)
+            with self._lock:
+                existing = self._thread
+                running = existing and existing.is_alive()
+            if running:
+                # A waiter never owns abort, including a legacy caller's startup.
+                if not self._ready_event.wait(self._ask_time_left(deadline)):
+                    raise TimeoutError("Work IQ ask timed out waiting for startup.")
+                self._ask_time_left(deadline)
+                with self._lock:
+                    if (
+                        self._thread is existing
+                        and existing.is_alive()
+                        and self._process is not None
+                        and not self._stopping.is_set()
+                    ):
+                        return
+                    self._raise_public_error(
+                        self._error or TransportError("Work IQ MCP is not running.").public()
+                    )
+            snapshot = self._start_serialized(ask_deadline=deadline)
+            if snapshot["state"] not in {"ready", "busy"}:
+                self._raise_public_error(snapshot.get("error"))
+            self._ask_time_left(deadline)
+        finally:
+            self._start_lock.release()
+
+    def _abort_ask_startup(self, owner: threading.Thread) -> None:
+        with self._lock:
+            if self._thread is not owner:
+                return
+            error = TimeoutError("Work IQ ask timed out during startup.")
+            self._state = "faulted"
+            self._error = error.public()
+            self._authenticated = False
+            self._ask_ready = False
+            self._stopping.set()
+            self._ready_event.set()
+            process = self._process
+            incoming = self._incoming
+            reader = self._reader_thread
+            stderr = self._stderr_thread
+        if process is not None:
+            self._terminate_child(
+                process=process, incoming=incoming,
+                reader_thread=reader, stderr_thread=stderr,
+            )
+        if owner is not threading.current_thread():
+            owner.join(self._terminate_grace)
+
     def submit(
         self,
         plan: str = "readiness",
         timeout: float = 45,
         *,
         calendar: CalendarOperation | None = None,
+        ask: AskOperation | None = None,
     ) -> str:
-        if plan not in {"readiness", "calendar", "sent_items"}:
+        ask_deadline = (
+            self._monotonic_clock() + timeout if plan in {"ask", "ask_probe"} else None
+        )
+        if plan not in {"readiness", "calendar", "sent_items", "ask_probe", "ask"}:
             raise CapabilityError("Riveter has no approved plan for this read.")
         if plan == "calendar":
             calendar = require_calendar_operation(calendar)
         elif calendar is not None:
             raise CapabilityError("Readiness cannot carry a calendar operation.")
+        if plan == "ask":
+            ask = require_ask_operation(ask)
+        elif ask is not None:
+            raise CapabilityError("Only an ask plan can carry an ask operation.")
+        return self._enqueue_operation(_Operation(
+            job_id=str(uuid.uuid4()),
+            timeout=timeout,
+            plan=plan,
+            calendar=calendar,
+            ask=ask,
+            ask_deadline=ask_deadline,
+        ))
+
+    def _enqueue_operation(self, operation: _Operation) -> str:
         with self._lock:
             if self._stopping.is_set():
                 raise RuntimeStoppingError("Work IQ MCP is stopping.")
             if not self._thread or not self._thread.is_alive():
                 raise TransportError("Work IQ MCP is not running.")
-            operation = _Operation(
-                job_id=str(uuid.uuid4()),
-                timeout=timeout,
-                plan=plan,
-                calendar=calendar,
-            )
             self._operations[operation.job_id] = operation
+            if (
+                operation.ask_deadline is not None
+                and self._monotonic_clock() >= operation.ask_deadline
+            ):
+                self._finish(operation, "timed_out", TimeoutError("Work IQ ask timed out in queue."))
+                return operation.job_id
         try:
             self._commands.put_nowait(operation)
         except queue.Full as exc:
             with self._lock:
                 self._operations.pop(operation.job_id, None)
+                operation.ask = None
             raise QueueFullError("Work IQ read queue is full.") from exc
         return operation.job_id
 
@@ -296,8 +399,98 @@ class WorkIQRuntime:
                 "ok": False,
                 "error": {"code": "not_found", "message": "Unknown Work IQ job."},
             }
-        operation.event.wait(timeout)
-        return operation.public()
+        if operation.ask_deadline is None:
+            operation.event.wait(timeout)
+        else:
+            remaining = max(0.0, operation.ask_deadline - self._monotonic_clock())
+            deadline_wait = timeout is None or remaining <= timeout
+            duration = remaining if timeout is None else min(remaining, max(0.0, timeout))
+            completed = operation.event.wait(duration)
+            if not completed and (
+                deadline_wait or self._monotonic_clock() >= operation.ask_deadline
+            ):
+                self._expire_ask(operation)
+        with self._lock:
+            result = operation.public()
+            if operation.plan in {"ask", "ask_probe"} and operation.result:
+                operation.result.pop("data", None)
+            return result
+
+    def _expire_ask(self, operation: _Operation) -> None:
+        with self._lock:
+            if operation.event.is_set():
+                return
+            error = TimeoutError("Work IQ ask timed out.")
+            if operation.state == "queued":
+                self._finish(operation, "timed_out", error)
+                return
+            operation.cancel_requested.set()
+            process = self._process
+            incoming = self._incoming
+            reader = self._reader_thread
+            stderr = self._stderr_thread
+            if self._active_operation is operation and self._active_request_id is not None:
+                self._send_notification(
+                    "notifications/cancelled",
+                    {"requestId": self._active_request_id, "reason": "Riveter deadline exceeded"},
+                )
+            self._finish(
+                operation, "timed_out", error,
+                runtime_state="faulted", runtime_error=error, authenticated=False,
+            )
+        if process is not None:
+            self._terminate_child(
+                allow_grace=True, process=process, incoming=incoming,
+                reader_thread=reader, stderr_thread=stderr,
+            )
+
+    def probe_ask(self, timeout: float = 45) -> dict:
+        """Prove ask readiness without changing legacy calendar readiness."""
+        try:
+            self._execute_ask_request(None, self._monotonic_clock() + timeout)
+            return {"ok": True}
+        except WorkIQError as exc:
+            return {"ok": False, "error": exc.public()}
+
+    def execute_ask(self, question: str, *, timeout: float) -> dict:
+        """Return only transient answer/correlation from a policy-minted ask."""
+        deadline = self._monotonic_clock() + timeout
+        return self._execute_ask_request(build_ask_operation(question), deadline)
+
+    def _execute_ask_request(
+        self, ask: AskOperation | None, deadline: float
+    ) -> dict:
+        with self._lock:
+            self._check_ask_cooldown()
+        self._start_for_ask(deadline)
+        job_id = self._enqueue_operation(_Operation(
+            job_id=str(uuid.uuid4()),
+            timeout=self._ask_time_left(deadline),
+            plan="ask" if ask is not None else "ask_probe",
+            ask=ask,
+            ask_deadline=deadline,
+        ))
+        result = self.wait(job_id, timeout=None)
+        try:
+            if result.get("state") not in {"succeeded", "failed", "timed_out", "cancelled"}:
+                self.cancel(job_id)
+                raise TimeoutError("Work IQ ask timed out.")
+            if not result.get("ok"):
+                self._raise_public_error(result.get("error"))
+            if ask is None:
+                return {}
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise InvalidStructuredContentError("Work IQ ask returned invalid content.")
+            return dict(data)
+        finally:
+            # Completion can race the caller's timeout before cancel observes it.
+            with self._lock:
+                stored = self._operations.get(job_id)
+                if stored:
+                    stored.ask = None
+                    if stored.result:
+                        stored.result.pop("data", None)
 
     def probe(self, timeout: float = 45) -> dict:
         snapshot = self.start()
@@ -474,6 +667,7 @@ class WorkIQRuntime:
             self._state = "stopping"
             self._ready_event.set()
             self._authenticated = False
+            self._ask_ready = False
             process = self._process
             commands = self._commands
             incoming = self._incoming
@@ -511,6 +705,7 @@ class WorkIQRuntime:
         with self._lock:
             for operation in owned_operations:
                 operation.calendar = None
+                operation.ask = None
                 if operation.result:
                     operation.result.pop("data", None)
             thread_stopped = not thread or not thread.is_alive()
@@ -533,6 +728,10 @@ class WorkIQRuntime:
             self._server_info = None
             self._allowed = ()
             self._authenticated = False
+            self._ask_available = False
+            self._ask_ready = False
+            self._ask_blocker = None
+            self._ask_retry_after = 0.0
 
     def _worker_main(self, startup_deadline: float) -> None:
         try:
@@ -551,13 +750,23 @@ class WorkIQRuntime:
                     continue
                 if operation is None:
                     break
-                if operation.event.is_set() or operation.cancel_requested.is_set():
-                    continue
                 with self._lock:
+                    if operation.event.is_set() or operation.cancel_requested.is_set():
+                        continue
+                    if (
+                        operation.ask_deadline is not None
+                        and self._monotonic_clock() >= operation.ask_deadline
+                    ):
+                        self._finish(
+                            operation, "timed_out",
+                            TimeoutError("Work IQ ask timed out in queue."),
+                        )
+                        continue
+                    legacy_state = (self._state, self._error)
                     self._active_operation = operation
                     operation.state = "running"
                     self._state = "busy"
-                fatal = self._run_operation(operation)
+                fatal = self._run_operation(operation, legacy_state=legacy_state)
                 with self._lock:
                     self._active_operation = None
                     self._active_request_id = None
@@ -569,6 +778,7 @@ class WorkIQRuntime:
                     self._state = "faulted"
                     self._error = exc.public()
                 self._authenticated = False
+                self._ask_ready = False
                 self._ready_event.set()
         except Exception as exc:
             logger.error(
@@ -581,6 +791,7 @@ class WorkIQRuntime:
                     self._state = "faulted"
                     self._error = error.public()
                 self._authenticated = False
+                self._ask_ready = False
                 self._ready_event.set()
         finally:
             with self._lock:
@@ -739,17 +950,37 @@ class WorkIQRuntime:
         if capability_error is not None:
             logger.info("Work IQ capabilities became ready after one bounded retry.")
         with self._lock:
-            self._allowed = allowed
+            self._allowed = tuple(name for name in allowed if name != ASK_TOOL)
+            self._ask_available = ASK_TOOL in allowed
 
-    def _run_operation(self, operation: _Operation) -> bool:
+    def _run_operation(
+        self, operation: _Operation, *, legacy_state: tuple | None = None
+    ) -> bool:
         try:
             if operation.plan == "readiness":
                 self._run_readiness(operation)
             elif operation.plan == "calendar":
                 self._run_calendar(operation)
-            else:
+            elif operation.plan == "sent_items":
                 self._run_sent_items(operation)
+            elif operation.plan in {"ask_probe", "ask"}:
+                self._run_ask_operation(
+                    operation, legacy_state or (self._state, self._error)
+                )
+            else:
+                raise CapabilityDeniedError("Riveter has no approved plan for this read.")
             return False
+        except CancelledError as exc:
+            self._finish(
+                operation,
+                "cancelled",
+                exc,
+                runtime_state="faulted",
+                runtime_error=exc,
+                authenticated=False,
+            )
+            self._terminate_child()
+            return True
         except TimeoutError as exc:
             self._finish(
                 operation,
@@ -841,6 +1072,122 @@ class WorkIQRuntime:
             )
             self._terminate_child()
             return True
+
+    def _run_ask_operation(self, operation: _Operation, legacy_state: tuple) -> None:
+        data = None
+        error = None
+        try:
+            data = self._run_ask(operation)
+        except (TimeoutError, CancelledError, ProtocolError, TransportError, InvalidResponseError):
+            raise
+        except WorkIQError as exc:
+            error = exc
+            with self._lock:
+                self._ask_ready = False
+                if isinstance(exc, (AuthRequiredError, ConsentRequiredError, EulaRequiredError)):
+                    now = self._monotonic_clock()
+                    if self._ask_blocker is None or now >= self._ask_retry_after:
+                        self._ask_blocker = exc.public()
+                        self._ask_retry_after = now + ASK_AUTH_COOLDOWN_SECONDS
+        with self._lock:
+            if operation.cancel_requested.is_set() or operation.event.is_set() or self._stopping.is_set():
+                raise CancelledError("Work IQ ask was cancelled.")
+            # Nonfatal ask outcomes must not erase the pre-busy calendar state.
+            self._state, self._error = legacy_state
+            self._finish(
+                operation,
+                "failed" if error else "succeeded",
+                error,
+                result_data=data,
+            )
+
+    def _check_ask_cooldown(self) -> None:
+        if self._ask_blocker and self._monotonic_clock() < self._ask_retry_after:
+            self._raise_public_error(self._ask_blocker)
+
+    def _ask_remaining(self, operation: _Operation, deadline: float) -> float:
+        if operation.cancel_requested.is_set() or operation.event.is_set() or self._stopping.is_set():
+            raise CancelledError("Work IQ ask was cancelled.")
+        return self._ask_time_left(deadline)
+
+    def _ask_time_left(self, deadline: float) -> float:
+        remaining = deadline - self._monotonic_clock()
+        if remaining <= 0:
+            raise TimeoutError("Work IQ ask timed out.")
+        return remaining
+
+    def _run_ask(self, operation: _Operation) -> dict | None:
+        deadline = operation.ask_deadline
+        if deadline is None:
+            raise CapabilityDeniedError("Work IQ ask requires an admission deadline.")
+        with self._lock:
+            self._check_ask_cooldown()
+            if not self._ask_available:
+                raise CapabilityDeniedError("Work IQ does not advertise ask.")
+            needs_probe = not self._ask_ready or operation.plan == "ask_probe"
+        if needs_probe:
+            probe = build_ask_operation(ASK_PROBE_QUESTION)
+            self._validate_ask_result(self._rpc(
+                "tools/call",
+                {"name": ASK_TOOL, "arguments": {"question": probe.question}},
+                self._ask_remaining(operation, deadline),
+                ask_operation=operation,
+            ))
+            with self._lock:
+                self._ask_remaining(operation, deadline)
+                self._ask_ready = True
+                self._ask_blocker = None
+                self._ask_retry_after = 0.0
+        if operation.plan == "ask_probe":
+            return None
+        with self._lock:
+            self._ask_remaining(operation, deadline)
+            ask = require_ask_operation(operation.ask)
+        result = self._rpc(
+            "tools/call",
+            {"name": ASK_TOOL, "arguments": {"question": ask.question}},
+            self._ask_remaining(operation, deadline),
+            ask_operation=operation,
+        )
+        self._ask_remaining(operation, deadline)
+        return self._validate_ask_result(result)
+
+    @staticmethod
+    def _ask_remote_error(code: object) -> WorkIQError:
+        errors = {
+            "auth_required": AuthRequiredError("Work IQ authentication is required."),
+            "consent_required": ConsentRequiredError("Work IQ administrator consent is required."),
+            "eula_required": EulaRequiredError("Work IQ requires EULA acceptance."),
+        }
+        if isinstance(code, str) and code in errors:
+            return errors[code]
+        return RemoteError("Work IQ rejected the ask request.")
+
+    def _validate_ask_result(self, result: dict) -> dict:
+        content = result.get("content")
+        is_error = result.get("isError", False)
+        meta = result.get("_meta", {})
+        if not isinstance(content, list) or not isinstance(is_error, bool) or not isinstance(meta, dict):
+            raise InvalidStructuredContentError("Work IQ ask returned invalid content.")
+        if is_error:
+            error = self._ask_remote_error(meta.get("code"))
+            if not isinstance(error, RemoteError):
+                raise error
+            raise ToolError("Work IQ ask failed.")
+        structured = result.get("structuredContent")
+        if (
+            len(content) != 1
+            or not isinstance(content[0], dict)
+            or content[0].get("type") != "text"
+            or not isinstance(content[0].get("text"), str)
+            or not content[0]["text"].strip()
+            or not isinstance(structured, dict)
+            or not isinstance(structured.get("conversationId"), str)
+            or not structured["conversationId"].strip()
+            or ("answer" in structured and structured["answer"] != content[0]["text"])
+        ):
+            raise InvalidStructuredContentError("Work IQ ask returned invalid content.")
+        return {"answer": content[0]["text"], "conversation_id": structured["conversationId"]}
 
     def _run_readiness(self, operation: _Operation) -> None:
         if ACTION_TOOL not in self._allowed:
@@ -960,17 +1307,33 @@ class WorkIQRuntime:
             runtime_state="ready",
         )
 
-    def _rpc(self, method: str, params: dict, timeout: float) -> dict:
+    def _rpc(
+        self, method: str, params: dict, timeout: float,
+        *, ask_operation: _Operation | None = None,
+    ) -> dict:
         with self._lock:
+            active = ask_operation or self._active_operation
             self._request_id += 1
             request_id = self._request_id
-            self._active_request_id = request_id
-        self._send({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        })
+            message = {
+                "jsonrpc": "2.0", "id": request_id, "method": method, "params": params,
+            }
+            if ask_operation is not None:
+                if (
+                    ask_operation.cancel_requested.is_set()
+                    or ask_operation.event.is_set()
+                    or self._stopping.is_set()
+                ):
+                    raise CancelledError("Work IQ ask was cancelled.")
+                timeout = min(
+                    timeout, self._ask_remaining(ask_operation, ask_operation.ask_deadline)
+                )
+                self._active_request_id = request_id
+                self._send(message)
+            else:
+                self._active_request_id = request_id
+        if ask_operation is None:
+            self._send(message)
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -1001,6 +1364,11 @@ class WorkIQRuntime:
             if message["id"] != request_id:
                 raise ProtocolError("Work IQ MCP response correlation failed.")
             if "error" in message:
+                if active and active.plan in {"ask", "ask_probe"}:
+                    error = message["error"]
+                    raise self._ask_remote_error(
+                        error.get("code") if isinstance(error, dict) else None
+                    )
                 raise self._classify_rpc_error(message["error"])
             result = message.get("result")
             if not isinstance(result, dict):
@@ -1342,16 +1710,21 @@ class WorkIQRuntime:
         with self._lock:
             if operation.event.is_set():
                 return
+            if state == "succeeded" and operation.ask_deadline is not None:
+                self._ask_remaining(operation, operation.ask_deadline)
             if runtime_state is not None:
                 self._state = runtime_state
                 self._error = runtime_error.public() if runtime_error else None
             if authenticated is not None:
                 self._authenticated = authenticated
+                if not authenticated:
+                    self._ask_ready = False
             if self._active_operation is operation:
                 self._active_operation = None
                 self._active_request_id = None
             operation.state = state
             operation.calendar = None
+            operation.ask = None
             operation.result = {
                 "ok": error is None,
                 **({"error": error.public()} if error else {}),
@@ -1380,6 +1753,9 @@ class WorkIQRuntime:
     ) -> None:
         with self._lock:
             target_process = process or self._process
+            if target_process is self._process:
+                self._ask_ready = False
+                self._authenticated = False
             target_incoming = incoming or self._incoming
             target_reader = (
                 reader_thread if process is not None else self._reader_thread

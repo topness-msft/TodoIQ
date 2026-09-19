@@ -10,6 +10,7 @@ from enum import Enum
 
 ACTION_TOOL = "do_action"
 FETCH_TOOL = "fetch"
+ASK_TOOL = "ask"
 SENT_ITEMS_URL = (
     "/me/mailFolders/sentitems/messages?$top=20&$select="
     "id,internetMessageHeaders,toRecipients&$orderby=sentDateTime desc"
@@ -34,6 +35,25 @@ class CalendarOperation:
     _mint: object = field(repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class AskOperation:
+    question: str
+    _mint: object = field(repr=False, compare=False)
+
+
+def build_ask_operation(question: object) -> AskOperation:
+    """Mint a question-only read; optional provider arguments are not exposed."""
+    if not isinstance(question, str) or not question.strip():
+        raise CapabilityError("Work IQ ask requires a nonblank question.")
+    return AskOperation(question, _MINT)
+
+
+def require_ask_operation(operation: object) -> AskOperation:
+    if not isinstance(operation, AskOperation) or operation._mint is not _MINT:
+        raise CapabilityError("Work IQ ask operation was not policy-minted.")
+    return build_ask_operation(operation.question)
+
+
 def discover_read_capabilities(tools: object) -> tuple[str, ...]:
     """Return only the exact capabilities required by the owned read plans."""
     if not isinstance(tools, list):
@@ -45,11 +65,12 @@ def discover_read_capabilities(tools: object) -> tuple[str, ...]:
         names.append(tool["name"])
     if len(names) != len(set(names)):
         raise CapabilityError("Work IQ returned duplicate capabilities.")
-    if ACTION_TOOL not in names:
-        raise CapabilityError("Work IQ does not advertise the required read capabilities.")
-    return tuple(
-        name for name in (ACTION_TOOL, FETCH_TOOL) if name in names
+    allowed = tuple(
+        name for name in (ACTION_TOOL, FETCH_TOOL, ASK_TOOL) if name in names
     )
+    if not allowed:
+        raise CapabilityError("Work IQ does not advertise the required read capabilities.")
+    return allowed
 
 
 def _datetime(value: object) -> bool:
