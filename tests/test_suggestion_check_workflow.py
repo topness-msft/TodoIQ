@@ -484,23 +484,29 @@ def test_fast_consecutive_no_people_checks_keep_same_second_queue_correlation(st
     runtime.probe_ask.assert_not_called()
 
 
-def test_queue_dispatches_suggestion_completion_to_direct_but_sync_to_legacy(store, monkeypatch):
+def test_queue_dispatches_suggestion_and_sync_completion_to_direct_owners(store, monkeypatch):
     worker, _ = service(monkeypatch)
+    from tests.test_refresh_workflow import worker as refresh_worker
+    sync, _, _ = refresh_worker(monkeypatch)
     legacy = Mock(return_value={"run_id": "legacy-sync"})
     monkeypatch.setattr("src.services.suggestion_checks.get_exit_info", legacy)
     queue = SuggestionCheckQueue()
-    assert queue._completion_reader("sync") == {"run_id": "legacy-sync"}
+    assert queue._completion_reader("sync") is None
     assert queue._completion_reader("suggestion-check") is None
-    legacy.assert_called_once_with("sync")
+    sync.run()
+    assert queue._completion_reader("sync") == sync.completion()
+    legacy.assert_not_called()
 
 
-def test_browserless_queue_pump_polls_finished_legacy_sync_and_retries_direct_once(store, monkeypatch):
+def test_browserless_queue_pump_observes_direct_sync_and_polls_remaining_skills(store, monkeypatch):
     task = store()
     edit(task["id"], "waiting_activity", json.dumps({
         "version": 2, "producer": "suggestion-check", "check_state": "failed",
         "checked_at": "2026-01-01T00:00:00Z",
     }))
     worker, runtime = service(monkeypatch)
+    from tests.test_refresh_workflow import worker as refresh_worker
+    sync, _, _ = refresh_worker(monkeypatch)
     forbidden = Mock(side_effect=AssertionError("No subprocess launch allowed"))
     monkeypatch.setattr(claude_runner.subprocess, "Popen", forbidden)
     proc = Mock(returncode=0)
@@ -510,34 +516,27 @@ def test_browserless_queue_pump_polls_finished_legacy_sync_and_retries_direct_on
         "started_at": "2026-09-19T12:00:00Z",
     }
     for field, value in {
-        "_processes": {"sync": proc}, "_runs": {"sync": run},
+        "_processes": {"skill:prepare:7": proc}, "_runs": {"skill:prepare:7": run},
         "_exit_info": OrderedDict(), "_log_files": {}, "_start_times": {}, "_timeouts": {},
     }.items():
         monkeypatch.setattr(claude_runner, field, value)
     monkeypatch.setattr(claude_runner, "_utc_now", lambda: "2026-09-19T12:01:00Z")
+    persist = Mock()
+    monkeypatch.setattr(claude_runner, "_skill_persist", persist)
     queue = SuggestionCheckQueue()
     queue.initialize_post_sync(lambda: True)
     queue.pump_once()
-    assert claude_runner.get_exit_info("sync") is None
+    assert claude_runner.get_exit_info("skill:prepare:7") is None
     runtime.execute_ask.assert_not_called()
 
-    conn = db.get_connection()
-    try:
-        conn.execute(
-            "INSERT INTO sync_log (sync_type, synced_at) VALUES (?, ?)",
-            ("full_scan", "2026-09-19T12:00:30Z"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    assert sync.run()["state"] == "succeeded"
     proc.poll.return_value = 0
-    # The cache does not observe process exit. Only the autonomous pump may do so.
-    assert claude_runner.get_exit_info("sync") is None
     queue.pump_once()
-    assert claude_runner.get_exit_info("sync") == {
+    assert claude_runner.get_exit_info("skill:prepare:7") == {
         **run, "finished_at": "2026-09-19T12:01:00Z", "exit_code": 0, "error": None,
     }
-    assert "sync" not in claude_runner._processes
+    persist.assert_called_once_with("skill:prepare:7")
+    assert "skill:prepare:7" not in claude_runner._processes
     assert queue.snapshot()["last_post_sync_recheck"]["accepted"] == 1
     completed = finish(worker)
     queue.pump_once()
@@ -574,9 +573,9 @@ def test_queue_status_poll_preserves_legacy_labels_and_direct_suggestion_authori
     status = SuggestionCheckQueue()._status_reader()
     reader.assert_called_once_with()
     expected = {
-        **{label: True for label in labels if label not in {"suggestion-check", "waiting-check"}},
+        **{label: True for label in labels if label not in {"sync", "parse", "suggestion-check", "waiting-check"}},
         "_runs": {label: metadata for label, metadata in original["_runs"].items()
-                  if label not in {"suggestion-check", "waiting-check"}},
+                  if label not in {"sync", "parse", "suggestion-check", "waiting-check"}},
     }
     if direct_active:
         expected["suggestion-check"] = True
@@ -631,8 +630,7 @@ def test_all_four_entrypoints_use_direct_workflow_without_cli_even_on_failure(
         return {"answer": answer(), "conversation_id": "private"}
     worker, runtime = service(monkeypatch, execute)
     forbidden = Mock(side_effect=AssertionError("Copilot process boundary forbidden"))
-    monkeypatch.setattr(sync_api, "run_copilot", forbidden)
-    monkeypatch.setattr(app_module, "run_copilot", forbidden)
+    monkeypatch.setattr(claude_runner, "run_copilot", forbidden)
     monkeypatch.setattr(claude_runner.subprocess, "Popen", forbidden)
     monkeypatch.setattr(sync_api, "demo_mode", lambda: False)
     queue = SuggestionCheckQueue()
@@ -667,22 +665,25 @@ def test_all_four_entrypoints_use_direct_workflow_without_cli_even_on_failure(
                 "checked_at": "2026-01-01T00:00:00Z",
             }))
             completion, marker = [None], [None]
-            def legacy(label):
-                assert label == "sync", "suggestion completion read from wrong backend"
-                return completion[0]
-            monkeypatch.setattr("src.services.suggestion_checks.get_exit_info", legacy)
+            from src.services import refresh
+            sync = Mock()
+            sync.status.return_value = None
+            sync.completion.side_effect = lambda: completion[0]
+            monkeypatch.setattr(refresh, "get_refresh_service", lambda: sync)
             queue._full_scan_reader = lambda: marker[0]
             queue.initialize_post_sync(lambda: True)
             completion[0] = {
                 "run_id": "11111111-1111-4111-8111-111111111111",
                 "started_at": "2026-09-01T01:00:00Z", "finished_at": "2026-09-01T01:01:00Z",
                 "exit_code": 0, "error": None,
+                "state": "succeeded",
             }
             # Exit zero alone must not schedule anything.
             queue.pump_once()
             assert runtime.execute_ask.call_count == 0
             completion[0] = {**completion[0], "run_id": "22222222-2222-4222-8222-222222222222"}
-            marker[0] = {"id": 1, "sync_type": "full_scan", "synced_at": "2026-09-01T01:00:30Z"}
+            marker[0] = {"id": 1, "sync_type": "full_scan", "synced_at": "2026-09-01T01:00:30Z",
+                         "result_summary": json.dumps({"run_id": completion[0]["run_id"]})}
             queue.pump_once()
             assert queue.snapshot()["last_post_sync_recheck"]["accepted"] == 1
     try:

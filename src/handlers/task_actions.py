@@ -3,34 +3,15 @@
 import json
 import tornado.web
 
-from ..db import get_connection
 from ..models import (
     DELIVERY_CONFLICT_MESSAGE,
     promote_task, dismiss_task, complete_task, start_task,
-    snooze_task, transition_task, get_task, update_task,
+    snooze_task, transition_task, get_task, request_parse,
 )
 from ..services.claude_runner import run_copilot
+from ..services.parsing import get_parse_service
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode, todo_parse_enabled
 from .ws import broadcast
-
-PARSE_BASE_TIMEOUT = 300  # 5 min base
-PARSE_PER_TASK_TIMEOUT = 180  # +3 min per task
-
-
-def _parse_timeout() -> float:
-    """Calculate parse timeout based on number of queued/unparsed tasks."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM tasks "
-            "WHERE parse_status IN ('unparsed', 'queued') "
-            "AND status NOT IN ('deleted', 'completed')"
-        ).fetchone()
-        count = row[0] if row else 1
-    finally:
-        conn.close()
-    return PARSE_BASE_TIMEOUT + (max(count, 1) * PARSE_PER_TASK_TIMEOUT)
-
 
 class TaskActionHandler(tornado.web.RequestHandler):
     """POST /api/tasks/<id>/action — perform a lifecycle action."""
@@ -110,14 +91,15 @@ class TaskActionHandler(tornado.web.RequestHandler):
         # Auto-trigger coaching parse when accepting a suggested task
         # (promote to active, or any transition out of suggested)
         if pre_status == "suggested" and task["status"] != "dismissed" and not task.get("coaching_text"):
-            task = update_task(tid, parse_status="queued")
-            run_copilot("/todo-parse", label="parse", timeout=_parse_timeout())
+            request_parse(tid, "coaching_only")
+            task = get_task(tid)
+            get_parse_service().launch((tid,))
         self.write(json.dumps({"task": task}))
         broadcast({"type": "task_updated", "task": task})
 
 
 class TaskRefreshHandler(tornado.web.RequestHandler):
-    """POST /api/tasks/<id>/refresh — queue task for re-parsing by Claude."""
+    """POST /api/tasks/<id>/refresh — queue coaching without rebuilding the task."""
 
     def set_default_headers(self):
         self.set_header("Content-Type", "application/json")
@@ -134,13 +116,11 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
             self.write(json.dumps({"error": "Task not found"}))
             return
 
-        # Set to 'queued' so UI shows progression; the Stop hook / todo-parse
-        # will move it to 'parsing' then 'parsed'
-        updated = update_task(tid, parse_status="queued")
+        request_parse(tid, "coaching_only")
+        updated = get_task(tid)
         self.write(json.dumps({"task": updated}))
         broadcast({"type": "task_updated", "task": updated})
-        # Auto-trigger parsing
-        run_copilot("/todo-parse", label="parse", timeout=_parse_timeout())
+        get_parse_service().launch((tid,))
 
 _VALID_SKILLS = {"respond-email", "schedule-meeting", "follow-up", "prepare", "teams-message", "cowork-prompt"}
 

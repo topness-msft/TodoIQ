@@ -10,9 +10,9 @@ from ..models import (
     DELIVERY_CONFLICT_MESSAGE,
     create_task, get_task, list_tasks, update_task, update_task_for_action_type,
     delete_task,
-    get_contexts, get_stats, get_last_sync,
+    get_contexts, get_stats, get_last_sync, request_parse,
 )
-from ..services.claude_runner import run_copilot
+from ..services.parsing import get_parse_service
 from .ws import broadcast
 
 
@@ -53,17 +53,19 @@ class TaskListHandler(tornado.web.RequestHandler):
         title = body.get("title", "").strip()
         raw_input = body.get("raw_input", "").strip()
 
-        # If raw_input is provided but no title, save as unparsed for Claude to parse
+        # Only newly admitted raw input requests full extraction.
         if raw_input and not title:
             task = create_task(
                 title=raw_input,
                 raw_input=raw_input,
                 status="active",
                 parse_status="unparsed",
+                parse_intent="full",
                 source_url=_extract_teams_url(raw_input),
             )
-            # Auto-trigger parsing
-            run_copilot("/todo-parse", label="parse")
+            request_parse(task["id"], "full")
+            task = get_task(task["id"])
+            get_parse_service().launch((task["id"],))
         elif title:
             task = create_task(
                 title=title,

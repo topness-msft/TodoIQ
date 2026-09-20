@@ -141,9 +141,9 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         )
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch("src.handlers.sync_api.get_task")
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_scoped_check_enqueues_exact_task(
         self, run_copilot, get_task, _is_running, _demo_mode
     ):
@@ -162,8 +162,8 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
-    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
+    @patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden"))
     @patch("src.handlers.sync_api.checks.get_checks")
     def test_global_check_keeps_existing_budget(
         self, get_checks, run_copilot, _is_running, _demo_mode
@@ -189,7 +189,7 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
     @patch("src.handlers.sync_api.checks.get_checks")
     @patch("src.handlers.sync_api.get_task")
-    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden"))
     def test_targeted_request_queues_while_global_is_running(
         self, run_copilot, get_task, get_checks, _demo_mode
     ):
@@ -204,7 +204,7 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
     @patch("src.handlers.sync_api.checks.get_checks")
-    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden"))
     def test_global_request_is_refused_while_direct_global_is_running(
         self, run_copilot, get_checks, _demo_mode
     ):
@@ -216,8 +216,8 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=True)
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.handlers.sync_api.is_sync_running", return_value=True)
+    @patch("src.services.claude_runner.run_copilot")
     def test_global_request_is_refused_while_target_is_running(
         self, run_copilot, _is_running, _demo_mode
     ):
@@ -230,8 +230,8 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
-    @patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden"))
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
+    @patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden"))
     @patch("src.handlers.sync_api.checks.get_checks")
     def test_raced_global_already_running_result_is_one_valid_409_response(
         self, get_checks, run_copilot, _is_running, _demo_mode
@@ -251,13 +251,15 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         }
         run_copilot.assert_not_called()
 
+    @patch("src.services.parsing._completion", None)
+    @patch("src.services.refresh._completion", None)
     @patch("src.handlers.sync_api.checks.get_checks")
     @patch("src.handlers.sync_api.get_exit_info")
     @patch("src.handlers.sync_api.get_status")
     def test_runner_status_merges_migrated_suggestion_with_all_legacy_labels(
         self, get_status, get_exit_info, get_checks
     ):
-        labels = ["sync", "parse", "skill:prepare:123"]
+        labels = ["skill:prepare:123"]
         legacy = {name: {"run_id": name, "started_at": START_A} for name in labels}
         done = {name: {"run_id": name + "-old"} for name in labels}
         get_status.return_value = {**dict.fromkeys(labels, True), "_runs": legacy}
@@ -278,7 +280,7 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         assert "_suggestion_check_queue" in payload
 
     @patch("src.handlers.sync_api.get_last_sync", return_value=None)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch("src.handlers.sync_api.checks.get_checks")
     def test_sync_status_uses_in_app_suggestion_without_changing_public_shape(
         self, get_checks, _running, _sync
@@ -292,9 +294,9 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         assert payload["suggestion_check_running"] is True
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch("src.handlers.sync_api.get_task")
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_invalid_present_ids_never_fall_through_to_global(
         self, run_copilot, get_task, _is_running, _demo_mode
     ):
@@ -311,9 +313,9 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch("src.handlers.sync_api.get_task", return_value=None)
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_missing_task_is_404_without_launch(
         self, run_copilot, _get_task, _is_running, _demo_mode
     ):
@@ -323,12 +325,12 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch(
         "src.handlers.sync_api.get_task",
         return_value={"id": 2693, "status": "active"},
     )
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_non_suggested_task_is_409_without_launch(
         self, run_copilot, _get_task, _is_running, _demo_mode
     ):
@@ -339,12 +341,12 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch(
         "src.handlers.sync_api.get_task",
         return_value={"id": 2693, "status": "suggested"},
     )
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_duplicate_targeted_request_returns_same_accepted_job(
         self, run_copilot, _get_task, _is_running, _demo_mode
     ):
@@ -358,12 +360,12 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
         run_copilot.assert_not_called()
 
     @patch("src.handlers.sync_api.demo_mode", return_value=False)
-    @patch("src.handlers.sync_api.is_running", return_value=False)
+    @patch("src.handlers.sync_api.is_sync_running", return_value=False)
     @patch(
         "src.handlers.sync_api.get_task",
         return_value={"id": 2693, "status": "suggested"},
     )
-    @patch("src.handlers.sync_api.run_copilot")
+    @patch("src.services.claude_runner.run_copilot")
     def test_targeted_queue_capacity_returns_429(
         self, run_copilot, _get_task, _is_running, _demo_mode
     ):
@@ -536,6 +538,7 @@ class PostSyncHarness:
             "finished_at": finished_at,
             "exit_code": exit_code,
             "error": error,
+            "state": "succeeded" if exit_code == 0 and not error else "failed",
         }
         self.marker = (
             None
@@ -544,6 +547,7 @@ class PostSyncHarness:
                 "id": marker_id,
                 "sync_type": "full_scan",
                 "synced_at": marker_time,
+                "result_summary": json.dumps({"run_id": run_id}),
             }
         )
 

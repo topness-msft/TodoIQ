@@ -11,6 +11,32 @@ TodoNess scans your Teams messages, meetings, and flagged emails to surface acti
 - WorkIQ MCP configured for Microsoft 365 task discovery
 - Cowork authenticated for drafting and approved actions
 
+### Direct Work IQ migration
+
+Application-run refresh, task parsing, suggestion checks, and waiting checks
+now use Riveter's pinned Work IQ MCP runtime, not Copilot CLI. Install the
+runtime with `powershell -ExecutionPolicy Bypass -File scripts\setup_workiq.ps1`.
+Readiness and EULA acceptance remain explicit dashboard actions; there is no
+CLI fallback for migrated workflows.
+
+Refresh has one 300-second deadline for direct Teams/meeting discovery,
+awaiting-response discovery, flagged Inbox mail without a date cutoff,
+directory verification, reconciliation, parsing, and coaching. Broad unflagged
+mail discovery remains disabled. All discovery batches and identity evidence
+validate before the first refresh task write. Selected People, including an
+empty selection, remain authoritative during parsing.
+
+Valid task updates may survive a later failure, but only a successful run
+advances the sync marker and starts post-pull suggestion retries. Both
+dashboards require the exact run's matching durable marker before showing
+success. Per-task claims and captured-input checks protect concurrent edits
+and active or unconfirmed deliveries.
+
+Standalone skills and structured draft/execution still use Copilot CLI until
+their migration gates pass. Before activating this refresh/parse cutover, stop
+legacy `sync` and `parse` CLI workers as well as the old server. Stopping the
+server alone does not stop its children. Manual slash commands remain available.
+
 ## Quick Start
 
 ```bash

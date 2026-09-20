@@ -1,4 +1,4 @@
-"""Inactive, application-owned parsing. Importing this module starts nothing.
+"""Application-owned parsing. Importing this module starts nothing.
 
 One process-wide run slot serves both a workflow-thread inline caller and the
 optional background facade. Runtime calls, captured rows and directory evidence
@@ -21,6 +21,7 @@ from .checks import (
     _questions, _unique_object, _waiting_answers,
 )
 from .workiq_directory_profiles import project_profile
+from .runtime_mode import DEMO_DISABLED_MESSAGE, todo_parse_enabled
 from .workiq_policy import CalendarAction, build_calendar_operation
 from .workiq_runtime import (
     CancelledError, DirectoryAmbiguousError, DirectoryNotFoundError,
@@ -227,7 +228,8 @@ def validate_result(answer, mode, requested_questions):
 
 
 def _profile(value, *, expected_aad=None):
-    if not isinstance(value, dict):
+    required = {"aad_object_id", "display_name", "email", "upn", "user_type"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {"resolution"}):
         raise ValueError("Invalid directory profile")
     return project_profile({
         "id": value.get("aad_object_id"), "displayName": value.get("display_name"),
@@ -332,6 +334,63 @@ def _render_skill(value, action, people):
     raise ValueError("Unsupported skill output")
 
 
+def resolve_person_hint(hint, *, runtime_provider, check_remaining):
+    """Resolve a hint without writes using the caller's deadline/cancel context.
+
+    check_remaining must check the owning workflow, not the global parse slot.
+    The returned profile is proof for a later guarded transaction, not a write.
+    """
+    def read(operation, *args):
+        remaining = check_remaining()
+        value = getattr(runtime_provider(), operation)(*args, timeout=remaining)
+        check_remaining()
+        return value
+
+    check_remaining()
+    alternatives = []
+    try:
+        known = _canonical(hint)
+        if known is not None:
+            aliases = {alias["alias_value"] for alias in known["_prior_identity"]["aliases"]
+                       if alias["alias_kind"] in {"email", "upn"} and alias["confidence"] in {"aad", "email", "user"}}
+            if all(not hint.get(key) or person_identity.normalize_email(hint[key]) in aliases
+                   for key in ("email", "upn")):
+                check_remaining()
+                return _person(known), known
+        aad = hint.get("aad_object_id") or hint.get("aadObjectId")
+        email = hint.get("email") or hint.get("upn")
+        if aad:
+            profile = _profile(read("read_directory_user_by_aad", aad), expected_aad=aad)
+        elif email:
+            profile = _profile(read("read_directory_user_by_email", email))
+        else:
+            name = " ".join(str(hint.get("name") or "").split())
+            if len(name.split()) < 2:
+                return {"name": name or "Unknown", "unresolved": True, "alternatives": []}, None
+            candidates = read("find_directory_users_by_exact_name", name)
+            if not isinstance(candidates, list) or len(candidates) > 10:
+                raise ValueError("Invalid directory candidates")
+            candidates = [_profile(item) for item in candidates]
+            if len({item["aad_object_id"] for item in candidates}) != len(candidates):
+                raise ValueError("Duplicate directory candidates")
+            alternatives = [_person(item) for item in candidates]
+            if len(candidates) != 1 or candidates[0]["display_name"].casefold() != name.casefold():
+                return {"name": name, "unresolved": True, "alternatives": alternatives}, None
+            profile = candidates[0]
+        for address in (hint.get("email"), hint.get("upn")):
+            if address and person_identity.normalize_email(address) not in {profile["email"], profile["upn"]}:
+                raise ValueError("Directory query mismatch")
+        for address in (profile["email"], profile["upn"]):
+            existing = _canonical({"email": address}) if address else None
+            if existing is not None and existing["aad_object_id"] != profile["aad_object_id"]:
+                raise ValueError("Directory proof contradicts verified identity")
+        check_remaining()
+        return _person(profile), profile if profile["user_type"] == "Member" else None
+    except (DirectoryNotFoundError, DirectoryAmbiguousError):
+        check_remaining()
+        return {"name": hint.get("name") or "Unknown", "unresolved": True, "alternatives": alternatives}, None
+
+
 class ParseService:
     """A small facade over the single module-owned parse lifecycle, not a queue."""
 
@@ -362,6 +421,8 @@ class ParseService:
     def _admit(self):
         global _current, _cancel
         with _lock:
+            if not todo_parse_enabled():
+                return {"ok": False, "state": "disabled", "message": DEMO_DISABLED_MESSAGE}
             if _current is not None:
                 return None
             _cancel = threading.Event()
@@ -376,7 +437,9 @@ class ParseService:
         started = self._monotonic()
         admission = self._admit()
         if admission is None:
-            return {"state": "busy", "deferred": True}
+            return {"ok": False, "message": "'parse' already running.", "state": "busy", "deferred": True}
+        if admission["state"] == "disabled":
+            return admission
         selected = tuple(task_ids) if task_ids is not None else None
         self._thread = threading.Thread(
             target=self._execute, args=(selected, deadline, started),
@@ -385,9 +448,10 @@ class ParseService:
         try:
             self._thread.start()
         except Exception:
+            self._thread = None
             self._finish("failed")
-            raise
-        return admission
+            return {"ok": False, "state": "failed", "message": "Parsing could not start. Retry this task."}
+        return {**admission, "ok": True, "message": "'parse' started."}
 
     def run(self, task_ids=None, *, deadline=None):
         """Synchronous seam for a future refresh workflow thread, never IOLoop."""
@@ -400,8 +464,11 @@ class ParseService:
         if threading.current_thread().name.startswith("workiq-mcp"):
             raise RuntimeError("Parsing cannot run on the MCP worker")
         started = self._monotonic()
-        if self._admit() is None:
+        admission = self._admit()
+        if admission is None:
             return {"state": "busy", "deferred": True}
+        if admission["state"] == "disabled":
+            return admission
         return self._execute(task_ids, deadline, started)
 
     def _remaining(self, deadline):
@@ -415,7 +482,11 @@ class ParseService:
     def _finish(self, state):
         global _current, _completion, _cancel
         with _lock:
-            _completion = {**_current, "state": state, "finished_at": _now()}
+            _completion = {
+                **_current, "state": state, "finished_at": _now(),
+                "exit_code": 0 if state == "succeeded" else 1,
+                "error": None if state == "succeeded" else models.PARSE_FAILURE_MESSAGE,
+            }
             _current = None
             _cancel = None
             return dict(_completion)
@@ -479,34 +550,10 @@ class ParseService:
         return response["answer"]
 
     def _resolve_hint(self, hint, deadline):
-        alternatives = []
-        try:
-            known = _canonical(hint)
-            if known is not None:
-                return _person(known), known
-            aad = hint.get("aad_object_id") or hint.get("aadObjectId")
-            email = hint.get("email") or hint.get("upn")
-            if aad:
-                profile = _profile(self._call("read_directory_user_by_aad", deadline, aad), expected_aad=aad)
-            elif email:
-                profile = _profile(self._call("read_directory_user_by_email", deadline, email))
-                if person_identity.normalize_email(email) not in {profile["email"], profile["upn"]}:
-                    raise ValueError("Directory query mismatch")
-            else:
-                name = " ".join(str(hint.get("name") or "").split())
-                if len(name.split()) < 2:
-                    return {"name": name or "Unknown", "unresolved": True, "alternatives": []}, None
-                candidates = self._call("find_directory_users_by_exact_name", deadline, name)
-                if not isinstance(candidates, list) or len(candidates) > 10:
-                    raise ValueError("Invalid directory candidates")
-                candidates = [_profile(item) for item in candidates]
-                alternatives = [_person(item) for item in candidates]
-                if len(candidates) != 1 or candidates[0]["display_name"].casefold() != name.casefold():
-                    return {"name": name, "unresolved": True, "alternatives": alternatives}, None
-                profile = candidates[0]
-            return _person(profile), profile if profile["user_type"] == "Member" else None
-        except (DirectoryNotFoundError, DirectoryAmbiguousError):
-            return {"name": hint.get("name") or "Unknown", "unresolved": True, "alternatives": alternatives}, None
+        return resolve_person_hint(
+            hint, runtime_provider=self._runtime_provider,
+            check_remaining=lambda: self._remaining(deadline),
+        )
 
     def _teams(self, task, deadline):
         located = source_locator.resolve(task["source_locator"], task["source_url"])
@@ -752,3 +799,11 @@ class ParseService:
             f'{index}. {slot["label"]} ({duration} min) — all attendees free (tentative accepted)'
             for index, slot in enumerate(safe[:3], 1)
         ) + "\n\n" + footer)
+
+
+_service = ParseService()
+
+
+def get_parse_service():
+    """One app-wide instance, including the thread joined by inline refresh."""
+    return _service

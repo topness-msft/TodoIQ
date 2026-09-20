@@ -55,7 +55,7 @@ class TestSingleTaskWaitingCheck(tornado.testing.AsyncHTTPTestCase):
     def _post(self, body):
         with (
             mock.patch("src.handlers.sync_api.checks.get_waiting_checks", return_value=self._fake_runner()),
-            mock.patch("src.handlers.sync_api.run_copilot", side_effect=AssertionError("CLI forbidden")),
+            mock.patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden")),
         ):
             return self.fetch("/api/sync-status", method="POST",
                               body=json.dumps(body))

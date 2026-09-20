@@ -5,6 +5,7 @@ import json
 import sys
 import os
 import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -24,10 +25,13 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         conn = db_module.get_connection()
         db_module.init_db(conn)
         conn.close()
+        self.parse_patch = patch("src.handlers.task_actions.get_parse_service")
+        self.parse_patch.start()
         super().setUp()
 
     def tearDown(self):
         super().tearDown()
+        self.parse_patch.stop()
         os.unlink(self.tmp.name)
 
     def get_app(self):
@@ -62,7 +66,8 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(task["description"], "2% organic")
         self.assertEqual(task["status"], "active")
 
-    def test_create_task_raw_input(self):
+    @patch("src.handlers.task_api.get_parse_service")
+    def test_create_task_raw_input(self, get_parser):
         teams_url = (
             "https://teams.microsoft.com/l/chat/"
             "19:08b7be88-37ac-4e2b-82af-f8bb67e5f2f7_"
@@ -84,11 +89,14 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(resp.code, 201)
         data = json.loads(resp.body)
         task = data["task"]
-        self.assertEqual(task["parse_status"], "unparsed")
+        self.assertEqual(task["parse_status"], "queued")
+        self.assertEqual(task["parse_intent"], "full")
         self.assertIsNotNone(task["raw_input"])
         self.assertEqual(task["source_url"], teams_url)
+        get_parser.return_value.launch.assert_called_once_with((task["id"],))
 
-    def test_create_task_raw_input_does_not_promote_non_teams_url(self):
+    @patch("src.handlers.task_api.get_parse_service")
+    def test_create_task_raw_input_does_not_promote_non_teams_url(self, get_parser):
         body = {"raw_input": "Review https://example.com/meeting-notes tomorrow"}
         resp = self.fetch(
             "/api/tasks",
@@ -99,6 +107,7 @@ class TestTaskAPI(tornado.testing.AsyncHTTPTestCase):
         self.assertEqual(resp.code, 201)
         task = json.loads(resp.body)["task"]
         self.assertIsNone(task["source_url"])
+        get_parser.return_value.launch.assert_called_once_with((task["id"],))
 
     def test_create_task_no_title_or_raw_input(self):
         body = {"description": "No title"}

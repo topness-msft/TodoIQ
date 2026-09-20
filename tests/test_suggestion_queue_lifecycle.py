@@ -22,7 +22,7 @@ def test_periodic_global_yields_to_targeted_queue():
 
     with (
         patch.object(app_module, "get_connection") as get_connection,
-        patch.object(app_module, "run_copilot") as run_copilot,
+        patch("src.services.claude_runner.run_copilot") as run_copilot,
     ):
         app_module._check_suggestions(queue)
 
@@ -45,6 +45,7 @@ def test_start_server_registers_and_starts_one_queue_pump():
         item = Mock()
         item.callback = callback
         item.interval = interval
+        item.start.side_effect = lambda: initialization_order.append(("start", interval))
         callbacks.append(item)
         return item
 
@@ -52,10 +53,11 @@ def test_start_server_registers_and_starts_one_queue_pump():
     queue.initialize_post_sync.side_effect = (
         lambda enabled_reader: initialization_order.append(("initialize", enabled_reader))
     )
+    application.listen.side_effect = lambda *args, **kwargs: initialization_order.append(("listen", None))
     with (
         patch.object(app_module, "get_connection", return_value=connection),
-        patch.object(app_module, "init_db"),
-        patch.object(app_module, "_recover_stuck_parses"),
+        patch.object(app_module, "init_db", side_effect=lambda conn: initialization_order.append(("init_db", conn))) as init_db,
+        patch.object(app_module, "_recover_stuck_parses", side_effect=lambda: initialization_order.append(("recover", None))) as recover,
         patch.object(app_module, "recover_stuck_previews", return_value=0),
         patch.object(app_module, "missing_settings_warning", return_value=None),
         patch.object(app_module, "make_app", return_value=application),
@@ -76,9 +78,15 @@ def test_start_server_registers_and_starts_one_queue_pump():
         returned, _ = app_module.start_server(0)
 
     assert returned is application
+    init_db.assert_called_once_with(connection)
+    recover.assert_called_once_with()
     queue.initialize_post_sync.assert_called_once()
     assert queue.initialize_post_sync.call_args.args[0]() is True
-    assert initialization_order[0][0] == "initialize"
+    names = [event[0] for event in initialization_order]
+    assert names[:4] == ["init_db", "recover", "initialize", "listen"]
+    assert initialization_order.index(("recover", None)) < initialization_order.index(
+        ("start", app_module.PARSE_CHECK_INTERVAL_MS)
+    )
     queue_callbacks = [
         item for item in callbacks
         if item.callback == queue.pump_once
@@ -101,7 +109,7 @@ def test_queue_callback_stops_during_server_shutdown():
 
 def test_periodic_global_launches_direct_batch_without_cli():
     with (
-        patch.object(app_module, "run_copilot", side_effect=AssertionError("CLI forbidden")),
+        patch("src.services.claude_runner.run_copilot", side_effect=AssertionError("CLI forbidden")),
         patch.object(app_module, "checks") as checks,
     ):
         app_module._check_suggestions()

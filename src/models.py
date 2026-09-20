@@ -383,7 +383,7 @@ def infer_parse_intent(task: dict) -> str:
 
 
 def request_parse(task_id: int, intent: str = "coaching_only") -> bool:
-    """Inactive admission seam; callers explicitly admit raw tasks as full."""
+    """Callers explicitly admit new raw tasks as full."""
     if intent not in PARSE_MODES:
         raise ValueError("Invalid parse intent")
     conn = get_connection()
@@ -405,7 +405,7 @@ def request_parse(task_id: int, intent: str = "coaching_only") -> bool:
 
 
 def recover_parse_requests() -> int:
-    """Explicit startup seam, never invoked on import or by an existing caller."""
+    """Preserve durable intent and make interrupted claims explicitly retryable."""
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -492,6 +492,24 @@ def fail_parse_claim(snapshot: dict, *, stale: bool = False) -> bool:
         conn.close()
 
 
+def _prior_profiles_unchanged(conn, profiles):
+    for profile in profiles:
+        prior = profile.get("_prior_identity")
+        if prior is None:
+            continue
+        person = conn.execute("SELECT * FROM person WHERE id=?", (prior["person"]["id"],)).fetchone()
+        aliases = [dict(alias) for alias in conn.execute(
+            "SELECT * FROM person_alias WHERE person_id=? ORDER BY alias_kind,alias_value", (prior["person"]["id"],),
+        )]
+        name_aliases = [dict(alias) for alias in conn.execute(
+            "SELECT * FROM person_alias WHERE alias_kind='name' AND alias_value=? "
+            "AND confidence='user' ORDER BY person_id", (prior["name"],),
+        )]
+        if person is None or dict(person) != prior["person"] or aliases != prior["aliases"] or name_aliases != prior["name_aliases"]:
+            return False
+    return True
+
+
 def write_parse_result(snapshot: dict, projection: dict, profiles: list, *, check_deadline) -> str:
     """CAS the entire claimed input; identities and note answers share the commit."""
     from .services.person_backfill import _apply_profile
@@ -506,22 +524,7 @@ def write_parse_result(snapshot: dict, projection: dict, profiles: list, *, chec
         conn.execute("BEGIN IMMEDIATE")
         check_deadline()
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (snapshot["id"],)).fetchone()
-        identity_changed = False
-        for profile in profiles:
-            prior = profile.get("_prior_identity")
-            if prior is None:
-                continue
-            person = conn.execute("SELECT * FROM person WHERE id=?", (prior["person"]["id"],)).fetchone()
-            aliases = [dict(alias) for alias in conn.execute(
-                "SELECT * FROM person_alias WHERE person_id=? ORDER BY alias_kind,alias_value", (prior["person"]["id"],),
-            )]
-            name_aliases = [dict(alias) for alias in conn.execute(
-                "SELECT * FROM person_alias WHERE alias_kind='name' AND alias_value=? "
-                "AND confidence='user' ORDER BY person_id", (prior["name"],),
-            )]
-            if person is None or dict(person) != prior["person"] or aliases != prior["aliases"] or name_aliases != prior["name_aliases"]:
-                identity_changed = True
-                break
+        identity_changed = not _prior_profiles_unchanged(conn, profiles)
         if row is None or dict(row) != snapshot or row["parse_status"] != "parsing" or identity_changed:
             if row is not None and row["parse_status"] == "parsing":
                 conn.execute(
@@ -554,6 +557,143 @@ def write_parse_result(snapshot: dict, projection: dict, profiles: list, *, chec
         check_deadline()
         conn.commit()
         return "completed"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+_REFRESH_INSERT_FIELDS = frozenset({
+    "title", "description", "priority", "source_type", "source_id", "source_url",
+    "source_locator", "source_snippet", "key_people", "action_type", "coaching_text",
+})
+_REFRESH_AUGMENT_STATES = frozenset({"suggested", "active", "in_progress", "completed"})
+
+
+def snapshot_refresh_tasks() -> tuple[dict, ...]:
+    """Capture raw persisted rows, including suppressing terminal statuses."""
+    conn = get_connection()
+    try:
+        return tuple(dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY id"))
+    finally:
+        conn.close()
+
+
+def write_refresh_candidate(snapshot, projection, profiles, *, check_deadline) -> str:
+    """Commit one reconciled insert/augmentation with no network under the lock."""
+    from .services.person_backfill import _apply_profile
+
+    if snapshot is None:
+        if set(projection) != _REFRESH_INSERT_FIELDS:
+            raise ValueError("Invalid refresh insertion")
+    else:
+        allowed = {"source_snippet", "priority"} if snapshot["status"] == "suggested" else (
+            {"source_snippet"} if snapshot["status"] in _REFRESH_AUGMENT_STATES else set()
+        )
+        if not set(projection) <= allowed or profiles:
+            raise ValueError("Invalid refresh augmentation")
+        if "priority" in projection and projection["priority"] >= snapshot["priority"]:
+            raise ValueError("Refresh may only increase suggested urgency")
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        check_deadline()
+        if snapshot is None:
+            if conn.execute("SELECT 1 FROM tasks WHERE source_id=?", (projection["source_id"],)).fetchone():
+                return "stale"
+            if not _prior_profiles_unchanged(conn, profiles):
+                return "stale"
+            now = _now()
+            fields = {
+                **projection, "status": "suggested", "parse_status": "parsed",
+                "skill_output": None, "created_at": now, "updated_at": now,
+            }
+            cursor = conn.execute(
+                "INSERT INTO tasks (" + ",".join(fields) + ") VALUES (" + ",".join("?" for _ in fields) + ")",
+                tuple(fields.values()),
+            )
+            for profile in profiles:
+                prior = profile.get("_prior_identity")
+                if prior:
+                    _person_identity.link_task_person(
+                        conn, cursor.lastrowid, prior["person"]["id"], profile["role"],
+                        evidence_kind=profile["lookup_kind"],
+                        evidence_ref=f'task:{cursor.lastrowid}:person:{profile["person_index"]}',
+                        lookup_kind=profile["lookup_kind"], confirmation_mode="exact", confirmed_at=now,
+                    )
+                else:
+                    _apply_profile(conn, cursor.lastrowid, profile)
+            outcome = "created"
+        else:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (snapshot["id"],)).fetchone()
+            if row is None or dict(row) != snapshot:
+                return "stale"
+            if _has_unresolved_delivery(conn, snapshot["id"]):
+                return "deferred"
+            if not projection:
+                return "skipped"
+            fields = {**projection, "updated_at": _now()}
+            conn.execute(
+                "UPDATE tasks SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?",
+                (*fields.values(), snapshot["id"]),
+            )
+            outcome = "updated"
+        check_deadline()
+        conn.commit()
+        return outcome
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def write_refresh_coaching(snapshot, text, *, check_deadline) -> str:
+    """Legacy upgrade is coaching-only, not parse/notes/skill re-generation."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        check_deadline()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (snapshot["id"],)).fetchone()
+        if row is None or dict(row) != snapshot:
+            return "stale"
+        if _has_unresolved_delivery(conn, snapshot["id"]):
+            return "deferred"
+        conn.execute(
+            "UPDATE tasks SET coaching_text=?,suggestion_refreshed_at=?,updated_at=?,cowork_revision=? WHERE id=?",
+            (text, _now(), _now(), row["cowork_revision"] + int(text != row["coaching_text"]), snapshot["id"]),
+        )
+        check_deadline()
+        conn.commit()
+        return "coaching_upgraded"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def commit_refresh_marker(run_id, counts, *, check_deadline) -> dict:
+    """Publish the required-step success marker before terminal sync metadata."""
+    fields = {"email", "chat", "meeting", "created", "updated", "skipped", "coaching_upgraded",
+              "deferred", "parse_completed", "parse_deferred"}
+    if set(counts) != fields or any(type(v) is not int or v < 0 for v in counts.values()):
+        raise ValueError("Invalid refresh counts")
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        check_deadline()
+        stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        cursor = conn.execute(
+            "INSERT INTO sync_log (sync_type,result_summary,tasks_created,tasks_updated,synced_at) VALUES (?,?,?,?,?)",
+            ("full_scan", json.dumps({**counts, "run_id": run_id}),
+             counts["created"], counts["updated"], stamp),
+        )
+        row = dict(conn.execute("SELECT * FROM sync_log WHERE id=?", (cursor.lastrowid,)).fetchone())
+        check_deadline()
+        conn.commit()
+        return row
     except Exception:
         conn.rollback()
         raise

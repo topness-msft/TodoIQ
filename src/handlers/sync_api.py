@@ -1,14 +1,14 @@
-"""Sync triggers and merged legacy CLI / two direct check workflow statuses."""
+"""Direct sync triggers and merged direct workflows / remaining skill statuses."""
 
 import json
 import logging
 import tornado.web
 
 from ..models import get_last_sync, get_task
-from ..services.claude_runner import run_copilot, is_running, get_status, get_exit_info
+from ..services.claude_runner import get_status, get_exit_info
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 from ..services.suggestion_checks import QueueFull, SuggestionCheckQueue
-from ..services import checks
+from ..services import checks, refresh
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +41,16 @@ def _suggestion_queue(application) -> SuggestionCheckQueue:
 
 
 def is_sync_running() -> bool:
-    """Check if a background sync process is still running."""
-    return is_running("sync")
+    return refresh.get_refresh_service().status() is not None
 
 
 def run_sync() -> dict:
-    """Launch `copilot -p /todo-refresh` if not already running."""
-    return run_copilot("/todo-refresh", label="sync")
+    return refresh.get_refresh_service().launch()
 
 
 class SyncStatusHandler(tornado.web.RequestHandler):
     """GET /api/sync-status — last sync info + running state.
-    POST /api/sync-status — launch sync subprocess.
+    POST /api/sync-status — launch the direct sync workflow.
     """
 
     def set_default_headers(self):
@@ -215,8 +213,8 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
         completed = get_exit_info()
         # Flat format for backward compat: {label: true, ...}
         # Plus "completed" key with exit info for error tracking
-        result = checks.merged_status(running)
-        result["_completed"] = checks.merged_completions(completed)
+        result = refresh.merged_status(checks.merged_status(running))
+        result["_completed"] = refresh.merged_completions(checks.merged_completions(completed))
         result["_suggestion_check_queue"] = _suggestion_queue(
             self.application
         ).snapshot()

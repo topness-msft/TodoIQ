@@ -9,7 +9,7 @@ import tornado.web
 
 from src import app, models
 from src.handlers import sync_api
-from src.services import checks, suggestion_checks
+from src.services import checks, suggestion_checks, claude_runner
 from tests.test_waiting_check_workflow import store, presence
 from tests.test_suggestion_check_workflow import finish
 
@@ -29,7 +29,7 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         self.worker = checks.WaitingChecks(runtime_provider=lambda: self.runtime)
         self.patches = [
             patch.object(checks, "get_waiting_checks", return_value=self.worker),
-            patch.object(sync_api, "run_copilot", side_effect=AssertionError("CLI forbidden")),
+            patch.object(claude_runner, "run_copilot", side_effect=AssertionError("CLI forbidden")),
             patch.object(sync_api, "demo_mode", return_value=False),
         ]
         for item in self.patches:
@@ -55,7 +55,7 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
             assert finish(self.worker)["outcome"] == "succeeded"
             assert models.get_task(task["id"])["status"] == "completed"
         assert not self.runtime.mock_calls
-        sync_api.run_copilot.assert_not_called()
+        claude_runner.run_copilot.assert_not_called()
 
     def test_global_launch_and_missing_or_invalid_never_broaden(self):
         for value in ("not-id", True, {}, 2.5, "1;evil"):
@@ -66,7 +66,7 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         result = self.post()
         assert result.code == 200 and json.loads(result.body)["ok"]
         assert finish(self.worker)["outcome"] == "succeeded"
-        sync_api.run_copilot.assert_not_called()
+        claude_runner.run_copilot.assert_not_called()
 
     def test_targeted_global_busy_remains_200_ok_false_and_other_failure_500(self):
         task = models.create_task(title="Synthetic target")
@@ -88,8 +88,7 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         app._check_waiting()
         assert finish(self.worker)["outcome"] == "failed"
         assert self.runtime.execute_ask.call_count == 3
-        sync_api.run_copilot.assert_not_called()
-        app.run_copilot.assert_not_called()
+        claude_runner.run_copilot.assert_not_called()
 
     def test_both_labels_merged_with_flat_runs_completions_and_queue(self):
         legacy = {"sync": True, "parse": True, "skill:prepare:7": True,
@@ -111,7 +110,10 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         assert payload["_runs"]["suggestion-check"]["run_id"] == "suggestion"
         assert payload["_completed"]["waiting-check"]["run_id"] == "waiting-done"
         assert payload["_completed"]["suggestion-check"]["run_id"] == "suggestion-done"
-        for label in ("sync", "parse", "skill:prepare:7"):
+        for label in ("sync", "parse"):
+            assert label not in payload and label not in payload["_runs"]
+            assert payload["_completed"].get(label) != done[label]
+        for label in ("skill:prepare:7",):
             assert payload[label] and payload["_runs"][label] == legacy["_runs"][label]
             assert payload["_completed"][label] == done[label]
         assert payload["waiting-check"] and payload["suggestion-check"]
@@ -128,6 +130,6 @@ def test_idle_direct_labels_remove_stale_legacy_runs_and_completions(monkeypatch
               "_runs": {"sync": {"run_id": "keep"}, "suggestion-check": {}, "waiting-check": {}}}
     reader = Mock(return_value=legacy)
     monkeypatch.setattr(suggestion_checks, "get_status", reader)
-    assert suggestion_checks._check_status() == {"sync": True, "_runs": {"sync": {"run_id": "keep"}}}
+    assert suggestion_checks._check_status() == {"_runs": {}}
     reader.assert_called_once_with()
     assert checks.merged_completions({"sync": {}, "suggestion-check": {}, "waiting-check": {}}) == {"sync": {}}

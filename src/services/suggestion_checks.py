@@ -2,6 +2,7 @@
 
 from collections import OrderedDict, deque
 from datetime import datetime, timezone
+import json
 import logging
 import uuid
 
@@ -9,7 +10,7 @@ from ..db import get_connection
 from ..models import get_last_sync, get_task
 from . import waiting_activity
 from .claude_runner import get_exit_info, get_status
-from . import checks
+from . import checks, refresh
 
 
 logger = logging.getLogger(__name__)
@@ -20,15 +21,16 @@ VALID_RESULTS = {"likely_resolved", "still_pending", "unclear"}
 
 
 def _check_status():
-    # Polling materializes legacy sync exits even when no browser is connected.
+    # Remaining CLI skills still need polling to persist their output.
     legacy = get_status()
-    return checks.merged_status(legacy)
+    return refresh.merged_status(checks.merged_status(legacy))
 
 
 def _completion(label):
-    # Full-scan correlation is still owned by legacy sync until Stage 3.
     if label == LABEL:
         return checks.get_checks().completion()
+    if label == "sync":
+        return refresh.get_refresh_service().completion()
     return get_exit_info(label)
 
 
@@ -120,7 +122,7 @@ def _utc_second(value):
         return None
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(None):
         return None
-    return parsed.astimezone(timezone.utc).replace(microsecond=0)
+    return parsed.astimezone(timezone.utc)
 
 
 def _marker_id(marker):
@@ -499,12 +501,20 @@ class SuggestionCheckQueue:
             return "Could not safely identify the completed sync."
         if completed.get("exit_code") != 0 or completed.get("error"):
             return "Sync did not complete successfully."
+        if completed.get("state") != "succeeded":
+            return "Sync did not complete all required steps."
         if marker is None:
             return "Could not match the completed sync to a full-scan marker."
         if marker.get("sync_type") != "full_scan" or marker_id is None:
             return "Could not safely read the completed sync marker."
         if marker_id <= prior_marker_id:
             return "Sync did not produce a new full-scan marker."
+        try:
+            summary = json.loads(marker.get("result_summary") or "")
+        except (ValueError, TypeError):
+            return "Could not safely correlate the completed sync marker."
+        if not isinstance(summary, dict) or summary.get("run_id") != completed["run_id"]:
+            return "Could not match the completed sync UUID to its marker."
 
         started = _utc_second(completed.get("started_at"))
         finished = _utc_second(completed.get("finished_at"))

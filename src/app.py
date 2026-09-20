@@ -34,8 +34,10 @@ from .handlers.cowork import (
 )
 from .models import (
     get_expired_snoozed, unsnooze_task, get_task, recover_stuck_previews,
+    recover_parse_requests, select_parse_ids,
 )
-from .services.claude_runner import run_copilot
+from .services.parsing import get_parse_service
+from .services.refresh import get_refresh_service
 from .services.cowork_runner import resolve_cowork_island, warm_barrier_precheck
 from .services.suggestion_checks import SuggestionCheckQueue
 from .services import checks
@@ -62,8 +64,8 @@ BACKUP_KEEP_DAYS = 7
 
 
 def _periodic_sync():
-    """Called every 30 minutes to launch `copilot -p /todo-refresh`."""
-    result = run_copilot("/todo-refresh", label="sync")
+    """Called every 30 minutes to launch the single direct refresh owner."""
+    result = get_refresh_service().launch()
     logger.info(f"Periodic sync: {result['message']}")
 
 
@@ -107,35 +109,13 @@ def _backup_db():
         logger.error(f"DB backup failed: {e}")
 
 
-PARSE_BASE_TIMEOUT = 300  # 5 min base
-PARSE_PER_TASK_TIMEOUT = 180  # +3 min per task
-
-
 def _check_unparsed():
-    """Called every 30 seconds to catch orphaned unparsed/queued tasks.
-
-    If a parse subprocess was already running when a new task arrived,
-    run_copilot silently skipped it. This callback retriggers the parse
-    once the previous one finishes, so no task stays stuck.
-
-    Timeout scales with batch size: 5 min base + 3 min per task.
-    """
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM tasks "
-            "WHERE parse_status IN ('unparsed', 'queued') "
-            "AND status NOT IN ('deleted', 'completed')"
-        ).fetchone()
-        count = row[0] if row else 0
-    finally:
-        conn.close()
-
-    if count:
-        timeout = PARSE_BASE_TIMEOUT + (count * PARSE_PER_TASK_TIMEOUT)
-        result = run_copilot("/todo-parse", label="parse", timeout=timeout)
+    """Drain an exact pending snapshot; errors require explicit retry."""
+    selected = select_parse_ids()
+    if selected:
+        result = get_parse_service().launch(selected)
         if result["ok"]:
-            logger.info(f"Parse check: triggered parse for {count} task(s) (timeout={timeout}s)")
+            logger.info("Parse check: triggered parse for %d task(s)", len(selected))
 
 
 def _check_snoozed():
@@ -206,22 +186,10 @@ def setup_logging(log_file=None):
 
 
 def _recover_stuck_parses():
-    """Reset tasks stuck in 'queued' or 'parsing' back to 'unparsed'.
-
-    On restart, any subprocess that was mid-parse is gone — these tasks
-    would be stuck forever without this recovery step.
-    """
-    conn = get_connection()
-    try:
-        cursor = conn.execute(
-            "UPDATE tasks SET parse_status = 'unparsed' "
-            "WHERE parse_status IN ('queued', 'parsing')"
-        )
-        conn.commit()
-        if cursor.rowcount:
-            logger.info(f"Startup recovery: reset {cursor.rowcount} stuck task(s) to unparsed")
-    finally:
-        conn.close()
+    """Retain known intent and expose interrupted claims as retryable errors."""
+    recovered = recover_parse_requests()
+    if recovered:
+        logger.info("Startup recovery: marked %d interrupted parse(s) for retry", recovered)
 
 
 def start_server(port=8766):

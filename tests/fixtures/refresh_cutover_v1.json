@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "REQ-RF-JSON-NONE",
+    "requirement_id": "RF-JSON",
+    "purpose": "Synthetic explicit empty discovery, not a recorded provider answer.",
+    "input": {"version": 1, "batch": "direct", "outcome": "none", "num_results": 0, "candidates": []},
+    "expected": {"count": 0}
+  },
+  {
+    "case_id": "REQ-RF-PRIORITY-GROUP",
+    "requirement_id": "RF-PRIORITY",
+    "purpose": "Synthetic group priority cap is five.",
+    "input": {"relevance_tier": "Group", "base_priority": 4},
+    "expected": {"priority": 5}
+  },
+  {
+    "case_id": "REQ-RF-IDENTITY-UNRESOLVED",
+    "requirement_id": "RF-DIR",
+    "purpose": "Synthetic missing identity never authorizes a canonical person link.",
+    "input": {"name": "Example Person", "email": "example@example.test", "upn": null, "aad_object_id": null},
+    "expected": {"canonical_links": 0}
+  }
+]

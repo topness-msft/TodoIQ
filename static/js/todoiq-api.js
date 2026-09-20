@@ -353,26 +353,25 @@ if (typeof removeDueDate === 'function') {
   };
 }
 
-// Override: doSync
-doSync = async function() {
-  const b = document.getElementById('sync-btn');
-  b.classList.add('syncing');
-  toast('Syncing with WorkIQ...');
-  try {
-    await fetch('/api/sync-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    setTimeout(async () => {
-      await fetchTasks();
-      b.classList.remove('syncing');
-      toast('Sync complete');
-    }, 5000);
-  } catch (e) {
-    b.classList.remove('syncing');
-    toast('Sync failed');
+const todoSyncMonitor = createRiveterSyncMonitor(event => {
+  const button = document.getElementById('sync-btn');
+  button.classList.toggle('syncing', event.busy);
+  button.disabled = event.busy;
+  button.setAttribute('aria-busy', String(event.busy));
+  button.title = event.busy ? 'Syncing with WorkIQ...' : 'Sync with WorkIQ';
+  button.setAttribute('aria-label', button.title);
+  if (!event.changed) return;
+  if (event.state === 'submitting') toast('Syncing with WorkIQ...');
+  if (event.state === 'failed') toast('Sync failed: ' + event.message);
+  if (event.state === 'unconfirmed') toast(event.message);
+  if (event.state === 'succeeded') {
+    fetchTasks();
+    toast('Sync complete');
   }
+});
+
+doSync = function() {
+  return todoSyncMonitor.sync();
 };
 
 // Override: retryParse
@@ -802,6 +801,7 @@ cwConfirmDest = async function(id) {
 
   // Fetch real tasks
   await fetchTasks();
+  todoSyncMonitor.start();
 
   // Connect WebSocket
   connectWS();

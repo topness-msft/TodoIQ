@@ -3760,36 +3760,35 @@ function renderRichText(text, keyPeople) {
 }
 
 // ── Sync Status ────────────────────────────────────────────────────────
-// Server runs `claude -p /todo-refresh` every 30 min via PeriodicCallback.
-// Dashboard button also triggers it on demand.
-var _syncPollTimer = null;
+var _syncMonitor = createRiveterSyncMonitor(function(event) {
+    if (event.status) updateSyncUI(event.status);
+    var button = document.getElementById('sync-btn');
+    var feedback = document.getElementById('sync-feedback');
+    if (button) {
+        button.classList.toggle('syncing', event.busy);
+        button.disabled = event.busy;
+        button.setAttribute('aria-busy', String(event.busy));
+        button.title = event.busy ? 'Refreshing Microsoft 365...' : 'Sync with M365';
+        button.setAttribute('aria-label', button.title);
+    }
+    if (feedback) {
+        if (event.state === 'failed' || event.state === 'unconfirmed') {
+            feedback.textContent = (event.state === 'failed' ? 'Refresh failed: ' : '') + event.message;
+            feedback.hidden = false;
+        } else if (event.state !== 'idle') {
+            feedback.textContent = '';
+            feedback.hidden = true;
+        }
+    }
+    if (event.state === 'succeeded' && event.changed) fetchTasks();
+});
 
 function fetchSyncStatus() {
-    fetch('/api/sync-status')
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            updateSyncUI(data);
-        })
-        .catch(function() {});
+    return _syncMonitor.poll();
 }
 
 function updateSyncUI(data) {
-    var btn = document.getElementById('sync-btn');
     var statusText = document.getElementById('sync-status-text');
-
-    if (data.sync_running) {
-        btn.classList.add('syncing');
-        btn.title = 'Sync running...';
-        _startFastPoll();
-    } else {
-        var wasSyncing = btn.classList.contains('syncing');
-        btn.classList.remove('syncing');
-        btn.title = 'Sync with M365';
-        if (wasSyncing) {
-            fetchTasks();
-            _stopFastPoll();
-        }
-    }
 
     if (data.last_sync && data.last_sync.synced_at) {
         var newSyncTime = data.last_sync.synced_at;
@@ -3825,68 +3824,12 @@ function updateSyncUI(data) {
     }
 }
 
-function _startFastPoll() {
-    if (_syncPollTimer) return;
-    _syncPollTimer = setInterval(function() {
-        fetchSyncStatus();
-        fetchTasks();
-    }, 5000);
-}
-
-function _stopFastPoll() {
-    if (_syncPollTimer) {
-        clearInterval(_syncPollTimer);
-        _syncPollTimer = null;
-    }
-}
-
-// ── Background Sync Watcher ────────────────────────────────────────────
-// Polls sync status every 30s to detect periodic syncs completing in the
-// background (the fast-poll only runs after a manual sync click).
-var _syncWatcherTimer = null;
-
 function startSyncWatcher() {
-    _syncWatcherTimer = setInterval(function() {
-        // Skip if fast-poll is already running (manual sync in progress)
-        if (_syncPollTimer) return;
-        fetch('/api/sync-status')
-            .then(function(res) { return res.json(); })
-            .then(function(data) {
-                updateSyncUI(data);
-                // Detect sync running → start fast poll to track it
-                if (data.sync_running) {
-                    _startFastPoll();
-                }
-            })
-            .catch(function() {});
-    }, 30000);
+    return _syncMonitor.start();
 }
 
 function requestSync() {
-    var btn = document.getElementById('sync-btn');
-    if (btn.classList.contains('syncing')) return;
-
-    btn.classList.add('syncing');
-    btn.title = 'Sync running...';
-
-    fetch('/api/sync-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-    })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-        if (data.ok) {
-            _startFastPoll();
-        } else {
-            btn.classList.remove('syncing');
-            btn.title = data.message || 'Sync failed';
-        }
-    })
-    .catch(function(err) {
-        btn.classList.remove('syncing');
-        btn.title = 'Sync with M365';
-        console.error('Sync request failed:', err);
-    });
+    return _syncMonitor.sync();
 }
 
 // ── Cowork action card ─────────────────────────────────────────────────

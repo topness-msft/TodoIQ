@@ -49,7 +49,6 @@ def store(tmp_path, monkeypatch):
     conn.close()
     forbidden = Mock(side_effect=AssertionError("CLI/live forbidden"))
     monkeypatch.setattr(claude_runner, "run_copilot", forbidden)
-    monkeypatch.setattr(app, "run_copilot", forbidden)
     monkeypatch.setattr(wire, "get_runtime", forbidden)
     def seed(**over):
         values = {

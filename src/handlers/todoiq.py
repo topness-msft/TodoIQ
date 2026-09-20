@@ -23,7 +23,13 @@ class TodoIQHandler(tornado.web.RequestHandler):
                 h = hashlib.md5(af.read()).hexdigest()[:8]
         except FileNotFoundError:
             h = "0"
-        adapter_tag = f'<script src="/static/js/todoiq-api.js?v={h}"></script>'
+        monitor_path = os.path.join(static_dir, "js", "sync-status.js")
+        with open(monitor_path, "rb") as monitor:
+            monitor_hash = hashlib.md5(monitor.read()).hexdigest()[:8]
+        adapter_tag = (
+            f'<script src="/static/js/sync-status.js?v={monitor_hash}"></script>'
+            f'<script src="/static/js/todoiq-api.js?v={h}"></script>'
+        )
         html = html.replace("</body>", adapter_tag + "\n</body>")
 
         self.set_header("Content-Type", "text/html; charset=utf-8")
