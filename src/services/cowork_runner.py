@@ -644,8 +644,8 @@ def schedule_attendees(task) -> list[dict]:
     return selected
 
 
-def schedule_duration_minutes(task) -> int:
-    """Return the requested meeting length, then the configured/default length."""
+def schedule_duration_minutes(task, *, extra_context=None, default_minutes=30) -> int:
+    """Return explicit task/context duration, then the configured/caller default."""
     number_words = {
         "five": 5,
         "ten": 10,
@@ -679,8 +679,9 @@ def schedule_duration_minutes(task) -> int:
     def token_value(token, words):
         return float(token) if token[0].isdigit() else words[token.lower()]
 
-    for field in ("title", "user_notes", "description", "coaching_text"):
-        text = _clean(_get(task, field))
+    contexts = [_get(task, field) for field in ("title", "user_notes", "description", "coaching_text")]
+    for context in [*contexts, extra_context]:
+        text = _clean(context)
         normalized = re.sub(r"\s+", " ", text.replace("-", " ")).strip().lower()
         hour_minute = re.search(
             r"\b(" + hour_word_pattern + r"|\d+(?:\.\d+)?)"
@@ -747,7 +748,7 @@ def schedule_duration_minutes(task) -> int:
                 return value
     prefs = meeting_preferences() or {}
     value = prefs.get("default_minutes")
-    return value if isinstance(value, int) and 5 <= value <= 480 else 30
+    return value if isinstance(value, int) and 5 <= value <= 480 else default_minutes
 
 
 def _source_reference_lines(task) -> list[str]:

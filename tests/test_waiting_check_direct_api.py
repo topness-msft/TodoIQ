@@ -91,9 +91,9 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         claude_runner.run_copilot.assert_not_called()
 
     def test_both_labels_merged_with_flat_runs_completions_and_queue(self):
-        legacy = {"sync": True, "parse": True, "skill:prepare:7": True,
+        legacy = {"sync": True, "parse": True, "skill:prepare:7": True, "other": True,
                   "suggestion-check": True, "waiting-check": True,
-                  "_runs": {key: {"run_id": "legacy"} for key in ("sync", "parse", "skill:prepare:7", "suggestion-check", "waiting-check")}}
+                  "_runs": {key: {"run_id": "legacy"} for key in ("sync", "parse", "skill:prepare:7", "suggestion-check", "waiting-check", "other")}}
         done = {key: {"run_id": "legacy-done"} for key in legacy if key != "_runs"}
         suggestion = Mock()
         suggestion.status.return_value = {"suggestion-check": True, "_runs": {"suggestion-check": {"run_id": "suggestion"}}}
@@ -110,10 +110,10 @@ class WaitingCheckAPI(tornado.testing.AsyncHTTPTestCase):
         assert payload["_runs"]["suggestion-check"]["run_id"] == "suggestion"
         assert payload["_completed"]["waiting-check"]["run_id"] == "waiting-done"
         assert payload["_completed"]["suggestion-check"]["run_id"] == "suggestion-done"
-        for label in ("sync", "parse"):
+        for label in ("sync", "parse", "skill:prepare:7"):
             assert label not in payload and label not in payload["_runs"]
             assert payload["_completed"].get(label) != done[label]
-        for label in ("skill:prepare:7",):
+        for label in ("other",):
             assert payload[label] and payload["_runs"][label] == legacy["_runs"][label]
             assert payload["_completed"][label] == done[label]
         assert payload["waiting-check"] and payload["suggestion-check"]

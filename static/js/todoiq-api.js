@@ -106,6 +106,8 @@ function connectWS() {
           break;
         case 'skill_running':
           toast('Running ' + (msg.skill || 'skill') + '...');
+          if (selectedId === msg.task_id) _showGeneratingCard();
+          pollForSkillResult(msg.task_id, msg.skill, msg.run_id);
           break;
       }
     } catch (err) { console.error('WS error:', err); }
@@ -386,6 +388,7 @@ retryParse = async function(id) {
 async function redoSkill(id, actionType) {
   const skillMap = {
     'respond-email': 'respond-email',
+    'teams-message': 'teams-message',
     'follow-up': 'follow-up',
     'schedule-meeting': 'schedule-meeting',
     'prepare': 'prepare',
@@ -403,10 +406,12 @@ async function redoSkill(id, actionType) {
     const data = await res.json();
     if (data.ok === false && data.message?.includes('already running')) {
       toast('Already generating — please wait');
+    } else if (!res.ok || data.ok !== true) {
+      throw new Error('Skill was not admitted');
     } else {
       toast('Generating — this runs in the background...');
     }
-    pollForSkillResult(id);
+    pollForSkillResult(id, skill, data.run_id);
   } catch (e) {
     toast('Failed to regenerate');
     if (selectedId === id) selectTask(id);
@@ -431,32 +436,66 @@ async function isSkillRunning(id) {
     const res = await fetch('/api/runner-status');
     const data = await res.json();
     for (const key of Object.keys(data)) {
-      if (key.includes(':' + id) && data[key] === true) return true;
+      if (key.startsWith('skill:') && key.endsWith(':' + id) && data[key] === true) {
+        return { skill: key.split(':')[1], run_id: data._runs?.[key]?.run_id };
+      }
     }
   } catch(e) {}
   return false;
 }
 
-function pollForSkillResult(id) {
+const _skillResultPolls = new Map();
+
+function pollForSkillResult(id, skill, runId) {
+  if (!skill) return;
+  const label = `skill:${skill}:${id}`;
+  const existing = _skillResultPolls.get(label);
+  if (existing && (!runId || existing.runId === runId)) return;
+  if (existing) clearInterval(existing.timer);
+  const entry = { runId, timer: null, busy: false };
   let attempts = 0;
-  const poll = setInterval(async () => {
+  const stop = () => {
+    clearInterval(entry.timer);
+    if (_skillResultPolls.get(label) === entry) _skillResultPolls.delete(label);
+  };
+  entry.timer = setInterval(async () => {
+    if (entry.busy) return;
+    entry.busy = true;
     attempts++;
-    if (attempts > 90) {
-      clearInterval(poll);
-      toast('Generation timed out — check back later');
+    if (attempts > 240) {
+      stop();
+      toast('Generation status unavailable — the request has not been cancelled');
       if (selectedId === id) selectTask(id);
       return;
     }
     try {
-      const res = await fetch(`/api/tasks/${id}`);
-      const data = await res.json();
-      if (data.task?.skill_output) {
-        clearInterval(poll);
-        updateLocalTask(data.task);
-        toast('AI draft generated');
+      const statusRes = await fetch('/api/runner-status');
+      if (!statusRes.ok) return;
+      const status = await statusRes.json();
+      if (_skillResultPolls.get(label) !== entry) return;
+      if (status[label] === true) {
+        if (!entry.runId) entry.runId = status._runs?.[label]?.run_id;
+        return;
       }
-    } catch(e) {}
+      const completed = status._completed?.[label];
+      if (!completed || (entry.runId && completed.run_id !== entry.runId)) return;
+      const res = await fetch(`/api/tasks/${id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (_skillResultPolls.get(label) !== entry) return;
+      if (data.task) {
+        stop();
+        updateLocalTask(data.task);
+        toast(completed.persisted === true ? 'AI draft generated' :
+          'Draft unchanged — ' + (completed.error || 'review the task and retry'));
+      }
+    } catch(e) {
+      // A missing poll is not proof of completion or failure.
+    } finally {
+      entry.busy = false;
+    }
   }, 2000);
+  _skillResultPolls.set(label, entry);
 }
 
 // Override: doSnoozeHours
@@ -814,7 +853,7 @@ cwConfirmDest = async function(id) {
     isSkillRunning(id).then(running => {
       if (running && selectedId === id) {
         _showGeneratingCard();
-        pollForSkillResult(id);
+        pollForSkillResult(id, running.skill, running.run_id);
       }
     });
   };

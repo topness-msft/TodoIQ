@@ -10,7 +10,7 @@ from ..db import get_connection
 from ..models import get_last_sync, get_task
 from . import waiting_activity
 from .claude_runner import get_exit_info, get_status
-from . import checks, refresh
+from . import checks, refresh, skills
 
 
 logger = logging.getLogger(__name__)
@@ -21,9 +21,8 @@ VALID_RESULTS = {"likely_resolved", "still_pending", "unclear"}
 
 
 def _check_status():
-    # Remaining CLI skills still need polling to persist their output.
     legacy = get_status()
-    return refresh.merged_status(checks.merged_status(legacy))
+    return skills.merged_status(refresh.merged_status(checks.merged_status(legacy)))
 
 
 def _completion(label):
@@ -31,6 +30,8 @@ def _completion(label):
         return checks.get_checks().completion()
     if label == "sync":
         return refresh.get_refresh_service().completion()
+    if label.startswith("skill:"):
+        return skills.get_skill_service().completions().get(label)
     return get_exit_info(label)
 
 

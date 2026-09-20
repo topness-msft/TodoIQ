@@ -6,7 +6,7 @@ exist only for the current run; completion retains only bounded public counts.
 """
 
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 import json
 import re
 import threading
@@ -15,14 +15,14 @@ import uuid
 
 from .. import models
 from ..db import get_connection
-from . import person_identity, source_locator
+from . import generation, person_identity, source_locator
+from .generation import render_output as _render_skill, validate_value as _skill
 from .checks import (
     BLOCKERS, MAX_QUESTIONS, OOO_INSTRUCTIONS, _answered_notes, _presence_result,
     _questions, _unique_object, _waiting_answers,
 )
 from .workiq_directory_profiles import project_profile
 from .runtime_mode import DEMO_DISABLED_MESSAGE, todo_parse_enabled
-from .workiq_policy import CalendarAction, build_calendar_operation
 from .workiq_runtime import (
     CancelledError, DirectoryAmbiguousError, DirectoryNotFoundError,
     TimeoutError as WorkIQTimeoutError, get_runtime,
@@ -147,52 +147,6 @@ def validate_hints(answer):
     return value["hints"]
 
 
-def _skill(value, action):
-    if action in {"general", "review-document"}:
-        if value is not None:
-            raise ValueError("Unexpected skill output")
-        return
-    if value is None:
-        return
-    if not isinstance(value, dict):
-        raise ValueError("Invalid skill output")
-    if set(value) == {"blocked"}:
-        _text(value["blocked"], 1000)
-        return
-    fields = {
-        "respond-email": {"to", "subject", "body", "tone", "key_points"},
-        "teams-message": {"to", "message", "tone", "purpose"},
-        "follow-up": {"channel", "to", "subject", "message", "last_interaction", "days_since_contact", "urgency"},
-        "awaiting-response": {"channel", "to", "subject", "message", "last_interaction", "days_since_contact", "urgency"},
-        "prepare": {"event", "date", "checklist", "talking_points", "materials", "questions", "estimate_minutes"},
-    }
-    if action not in fields or set(value) != fields[action]:
-        raise ValueError("Invalid skill fields")
-    for key, item in value.items():
-        if key == "to":
-            if type(item) is not int or not 0 <= item < _MAX_PEOPLE:
-                raise ValueError("Invalid recipient index")
-        elif key in {"estimate_minutes", "days_since_contact"}:
-            if key == "days_since_contact" and item is None:
-                continue
-            if type(item) is not int or not (1 if key == "estimate_minutes" else 0) <= item <= 10000:
-                raise ValueError("Invalid skill duration")
-        elif key == "date":
-            _date(item)
-        elif key in {"key_points", "checklist", "talking_points", "materials", "questions"}:
-            if not isinstance(item, list) or not 1 <= len(item) <= 20:
-                raise ValueError("Invalid skill list")
-            for text in item:
-                _text(text, 1000)
-        elif key == "subject" and item is None and action in {"follow-up", "awaiting-response"}:
-            if value["channel"] != "Teams":
-                raise ValueError("Missing email subject")
-        else:
-            _text(item, 8000 if key in {"body", "message"} else 2000)
-    if "channel" in value and value["channel"] not in {"Email", "Teams"}:
-        raise ValueError("Invalid skill channel")
-
-
 def validate_result(answer, mode, requested_questions):
     if mode not in models.PARSE_MODES:
         raise ValueError("Invalid parse mode")
@@ -294,44 +248,6 @@ def _canonical(hint):
         return profile
     finally:
         conn.close()
-
-
-def _render_skill(value, action, people):
-    if value is None:
-        return None
-    if "blocked" in value:
-        return "Draft unavailable: " + value["blocked"]
-    recipient = None
-    if "to" in value:
-        index = value["to"]
-        if index >= len(people):
-            raise ValueError("Unknown skill recipient")
-        person = people[index]
-        if person.get("unresolved") is True or not person.get("email"):
-            raise ValueError("Unverified skill recipient")
-        recipient = f'{person["name"]} <{person["email"]}>'
-    bullets = lambda items: "\n".join("- " + item for item in items)
-    if action == "respond-email":
-        return (f'To: {recipient}\nSubject: {value["subject"]}\n\n{value["body"]}\n\n'
-                f'---\nTone: {value["tone"]}\nKey points addressed:\n{bullets(value["key_points"])}')
-    if action == "teams-message":
-        return (f'To: {people[value["to"]]["name"]} (via Teams)\n\n{value["message"]}\n\n'
-                f'---\nTone: {value["tone"]}\nPurpose: {value["purpose"]}')
-    if action in {"follow-up", "awaiting-response"}:
-        subject = f'Subject: {value["subject"]}\n' if value["channel"] == "Email" else ""
-        return (f'Channel: {value["channel"]}\nTo: {recipient}\n{subject}\n{value["message"]}\n\n'
-                f'---\nLast interaction: {value["last_interaction"]}\n'
-                f'Days since last contact: {value["days_since_contact"] if value["days_since_contact"] is not None else "unknown"}\n'
-                f'Urgency: {value["urgency"]}')
-    if action == "prepare":
-        checklist = "\n".join("[ ] " + item for item in value["checklist"])
-        return (f'Preparation Notes: {value["event"]}\nDate: {value["date"] or "unknown"}\n'
-                f'Attendees: {", ".join(p["name"] for p in people)}\n\nBefore the meeting:\n{checklist}\n\n'
-                f'Key talking points:\n{bullets(value["talking_points"])}\n\n'
-                f'Materials to bring/share:\n{bullets(value["materials"])}\n\n'
-                f'Questions to ask:\n{bullets(value["questions"])}\n\n'
-                f'Time estimate: {value["estimate_minutes"]} minutes of prep')
-    raise ValueError("Unsupported skill output")
 
 
 def resolve_person_hint(hint, *, runtime_provider, check_remaining):
@@ -636,12 +552,6 @@ class ParseService:
         people_json = json.dumps(people, ensure_ascii=True)
         if selected and json.loads(task["key_people"]) == people:
             people_json = task["key_people"]
-        from .cowork_runner import meeting_preferences, standing_instructions, voice_layer
-        # Work IQ cannot load a locally named voice skill.
-        voice = {
-            channel: "\n".join(line for line in voice_layer(channel).splitlines() if not line.startswith("Use the skill "))
-            for channel in ("email", "teams")
-        }
         manual_raw = bool(task["raw_input"]) and task["source_type"] == "manual"
         payload = {
             "mode": mode, "today": date.today().isoformat(), "people": people,
@@ -651,8 +561,7 @@ class ParseService:
             )},
             "questions": requested, "manual_raw": manual_raw,
             "recent_context": teams[2] if teams else None,
-            "standing_instructions": standing_instructions(), "voice": voice,
-            "meeting_preferences": meeting_preferences(),
+            **generation.generation_settings(),
         }
         result = validate_result(self._ask(RESULT_INSTRUCTIONS, payload, deadline), mode, requested)
         projection = {
@@ -693,112 +602,10 @@ class ParseService:
         return projection, profiles
 
     def _schedule(self, task, people, deadline):
-        """Only measured calendar slots; incomplete facts produce honest output."""
-        from .cowork_runner import meeting_preferences, schedule_duration_minutes
-        from .structured_delivery import _slots_from_find_times, _working_hours_status
-        from dateutil import tz
-
-        preferences = meeting_preferences() or {}
-        default = preferences.get("default_minutes", 25)
-        offset = int(preferences.get("start_offset_minutes") or 0) % 30
-        if not 5 <= default <= 480:
-            default = 25
-        duration = schedule_duration_minutes({
-            "title": (task["user_notes"] or "") + "\n" + (task["raw_input"] or ""),
-            "description": task["title"] + "\n" + (task["description"] or ""),
-            "coaching_text": f"{default} minutes",
-        })
-        footer = f'Duration: {duration} min\nAttendees: {", ".join(p.get("name", "Unknown") for p in people)}'
-        unavailable = "Calendar availability is not verified; no meeting times are suggested.\n" + footer
-        if not people or any(p.get("unresolved") is True or not p.get("email") for p in people):
-            return unavailable
-        attendees = {p["email"].lower() for p in people}
-        me = _profile(self._call("read_self_profile", deadline))
-        all_addresses = attendees | {me["email"] or me["upn"]}
-        start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=1)
-        end = start + timedelta(days=7)
-        if task.get("due_date"):
-            end = min(end, datetime.combine(date.fromisoformat(task["due_date"]) + timedelta(days=1),
-                                            datetime.min.time(), tzinfo=timezone.utc))
-        if end <= start:
-            return unavailable
-        window = {"start": {"dateTime": start.replace(tzinfo=None).isoformat(), "timeZone": "UTC"},
-                  "end": {"dateTime": end.replace(tzinfo=None).isoformat(), "timeZone": "UTC"}}
-        body = {
-            "attendees": [{"type": "required", "emailAddress": {"address": email}} for email in sorted(attendees)],
-            "timeConstraint": {"activityDomain": "work", "timeSlots": [window]},
-            "meetingDuration": f"PT{duration + offset}M", "maxCandidates": 10,
-            "returnSuggestionReasons": True, "minimumAttendeePercentage": 100,
-        }
-        measured = self._call("execute_calendar", deadline, build_calendar_operation(CalendarAction.FIND_MEETING_TIMES, body))
-        schedule = self._call("execute_calendar", deadline, build_calendar_operation(CalendarAction.GET_SCHEDULE, {
-            "schedules": sorted(all_addresses), "startTime": window["start"], "endTime": window["end"],
-        }))
-        hours = {}
-        for entry in schedule.get("value", []):
-            email = str(entry.get("scheduleId") or "").lower()
-            working = entry.get("workingHours")
-            if email in hours or entry.get("error") or not isinstance(working, dict):
-                return unavailable
-            zone_name = (working.get("timeZone") or {}).get("name")
-            if not isinstance(zone_name, str) or not zone_name.strip():
-                return unavailable
-            zone = tz.gettz(zone_name)
-            if (
-                zone is None or not working.get("daysOfWeek")
-                or not re.fullmatch(r"\d\d:\d\d:\d\d(?:\.\d+)?", str(working.get("startTime")))
-                or not re.fullmatch(r"\d\d:\d\d:\d\d(?:\.\d+)?", str(working.get("endTime")))
-            ):
-                return unavailable
-            try:
-                opens = datetime.fromisoformat("2000-01-01T" + working["startTime"]).time()
-                closes = datetime.fromisoformat("2000-01-01T" + working["endTime"]).time()
-            except ValueError:
-                return unavailable
-            if opens >= closes:
-                return unavailable
-            hours[email] = (working, zone)
-        if set(hours) != all_addresses:
-            return unavailable
-        suggestions = measured.get("meetingTimeSuggestions")
-        if (
-            "@odata.nextLink" in measured or "@odata.nextLink" in schedule
-            or not isinstance(suggestions, list) or len(suggestions) > 10
-        ):
-            return unavailable
-        candidates = []
-        for suggestion in suggestions:
-            entries = suggestion.get("attendeeAvailability", []) if isinstance(suggestion, dict) else []
-            addresses = [
-                str(((entry.get("attendee") or {}).get("emailAddress") or {}).get("address") or "").lower()
-                for entry in entries if isinstance(entry, dict)
-            ]
-            if len(addresses) != len(set(addresses)) or set(addresses) != attendees:
-                continue
-            candidates.extend(_slots_from_find_times(
-                {"meetingTimeSuggestions": [suggestion]}, attendees, duration, offset, "UTC",
-            ))
-        safe = []
-        for slot in candidates:
-            begins = datetime.fromisoformat(slot["start"])
-            ends = datetime.fromisoformat(slot["end"])
-            if begins < start or ends > end or set(slot["availability"].values()) - {"free", "tentative", "workingElsewhere"}:
-                continue
-            if any(
-                _working_hours_status(working, slot["start"], slot["end"]) is not None
-                or (begins.astimezone(zone).hour < 13 and ends.astimezone(zone).hour >= 12
-                    and ends.astimezone(zone).time() > datetime.min.time().replace(hour=12))
-                for working, zone in hours.values()
-            ):
-                continue
-            safe.append(slot)
-        safe.sort(key=lambda slot: (datetime.fromisoformat(slot["start"]).astimezone(hours[me["email"] or me["upn"]][1]).hour >= 12, slot["start"]))
-        if not safe:
-            return unavailable
-        return ("Suggested meeting slots:\n" + "\n".join(
-            f'{index}. {slot["label"]} ({duration} min) — all attendees free (tentative accepted)'
-            for index, slot in enumerate(safe[:3], 1)
-        ) + "\n\n" + footer)
+        return generation.schedule(
+            task, people,
+            generation.GenerationContext(self._runtime_provider, lambda: self._remaining(deadline)),
+        )
 
 
 _service = ParseService()

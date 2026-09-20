@@ -259,7 +259,7 @@ class SuggestionCheckAPITest(tornado.testing.AsyncHTTPTestCase):
     def test_runner_status_merges_migrated_suggestion_with_all_legacy_labels(
         self, get_status, get_exit_info, get_checks
     ):
-        labels = ["skill:prepare:123"]
+        labels = ["other"]
         legacy = {name: {"run_id": name, "started_at": START_A} for name in labels}
         done = {name: {"run_id": name + "-old"} for name in labels}
         get_status.return_value = {**dict.fromkeys(labels, True), "_runs": legacy}

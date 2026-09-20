@@ -32,10 +32,25 @@ dashboards require the exact run's matching durable marker before showing
 success. Per-task claims and captured-input checks protect concurrent edits
 and active or unconfirmed deliveries.
 
-Standalone skills and structured draft/execution still use Copilot CLI until
-their migration gates pass. Before activating this refresh/parse cutover, stop
-legacy `sync` and `parse` CLI workers as well as the old server. Stopping the
-server alone does not stop its children. Manual slash commands remain available.
+All six application standalone skills also use direct workers. Email, Teams,
+follow-up, and preparation drafts use validated typed outputs and embedded
+voice rules. Scheduling uses measured calendar availability and configured
+duration/start-offset settings. `cowork-prompt` remains a deterministic
+scheduling/rescheduling handoff, even for tasks with another action type.
+It writes `cowork_prompt`; the other five skills write `skill_output`.
+
+Each request has its own UUID, deadline, and cancellation token. Only the newest
+request for each task/output column can publish, and captured-input checks
+protect user edits and explicit output clears. Failed, stale, cancelled,
+timed-out, or superseded requests keep the previous output. Persistence does
+not depend on an open browser. Both dashboards follow the actual request
+completion; historical output is not evidence of a successful rerun.
+
+Structured draft/execution still uses Copilot CLI until its migration gate
+passes. Before activating the cutover, stop legacy `sync`, `parse`, and
+`skill:*` CLI workers as well as the old server. Stopping the server alone does
+not stop its children. Manual slash commands remain available. Standalone
+skills remain disabled in demo mode and do not resume after a server restart.
 
 ## Quick Start
 

@@ -8,7 +8,7 @@ from ..models import get_last_sync, get_task
 from ..services.claude_runner import get_status, get_exit_info
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode
 from ..services.suggestion_checks import QueueFull, SuggestionCheckQueue
-from ..services import checks, refresh
+from ..services import checks, refresh, skills
 
 logger = logging.getLogger(__name__)
 
@@ -213,8 +213,9 @@ class RunnerStatusHandler(tornado.web.RequestHandler):
         completed = get_exit_info()
         # Flat format for backward compat: {label: true, ...}
         # Plus "completed" key with exit info for error tracking
-        result = refresh.merged_status(checks.merged_status(running))
-        result["_completed"] = refresh.merged_completions(checks.merged_completions(completed))
+        result = skills.merged_status(refresh.merged_status(checks.merged_status(running)))
+        result["_completed"] = skills.merged_completions(
+            refresh.merged_completions(checks.merged_completions(completed)))
         result["_suggestion_check_queue"] = _suggestion_queue(
             self.application
         ).snapshot()

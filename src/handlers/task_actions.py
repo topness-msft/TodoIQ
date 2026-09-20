@@ -8,7 +8,7 @@ from ..models import (
     promote_task, dismiss_task, complete_task, start_task,
     snooze_task, transition_task, get_task, request_parse,
 )
-from ..services.claude_runner import run_copilot
+from ..services.skills import VALID_SKILLS, get_skill_service
 from ..services.parsing import get_parse_service
 from ..services.runtime_mode import DEMO_DISABLED_MESSAGE, demo_mode, todo_parse_enabled
 from .ws import broadcast
@@ -122,11 +122,11 @@ class TaskRefreshHandler(tornado.web.RequestHandler):
         broadcast({"type": "task_updated", "task": updated})
         get_parse_service().launch((tid,))
 
-_VALID_SKILLS = {"respond-email", "schedule-meeting", "follow-up", "prepare", "teams-message", "cowork-prompt"}
+_VALID_SKILLS = VALID_SKILLS
 
 
 class TaskSkillHandler(tornado.web.RequestHandler):
-    """POST /api/tasks/<id>/skill — run a Claude skill on a task."""
+    """POST /api/tasks/<id>/skill — start a direct read-only skill request."""
 
     def set_default_headers(self):
         self.set_header("Content-Type", "application/json")
@@ -160,7 +160,8 @@ class TaskSkillHandler(tornado.web.RequestHandler):
             self.write(json.dumps({"error": "Task not found"}))
             return
 
-        label = f"skill:{skill}:{tid}"
-        result = run_copilot(f"/{skill} {tid}", label=label)
-        broadcast({"type": "skill_running", "task_id": tid, "skill": skill})
+        result = get_skill_service().launch(tid, skill)
+        if result["ok"]:
+            broadcast({"type": "skill_running", "task_id": tid, "skill": skill,
+                       "run_id": result["run_id"], "started_at": result["started_at"]})
         self.write(json.dumps(result))

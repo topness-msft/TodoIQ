@@ -556,7 +556,7 @@ def test_queue_status_poll_preserves_legacy_labels_and_direct_suggestion_authori
     store, monkeypatch, direct_active
 ):
     worker, _ = service(monkeypatch)
-    labels = ["sync", "parse", "waiting-check", "skill:prepare:7", "suggestion-check"]
+    labels = ["sync", "parse", "waiting-check", "skill:prepare:7", "suggestion-check", "other"]
     legacy = {
         **dict.fromkeys(labels, True),
         "_runs": {label: {"run_id": "legacy-" + label, "started_at": "legacy"} for label in labels},
@@ -573,9 +573,9 @@ def test_queue_status_poll_preserves_legacy_labels_and_direct_suggestion_authori
     status = SuggestionCheckQueue()._status_reader()
     reader.assert_called_once_with()
     expected = {
-        **{label: True for label in labels if label not in {"sync", "parse", "suggestion-check", "waiting-check"}},
+        **{label: True for label in labels if label not in {"sync", "parse", "suggestion-check", "waiting-check", "skill:prepare:7"}},
         "_runs": {label: metadata for label, metadata in original["_runs"].items()
-                  if label not in {"sync", "parse", "suggestion-check", "waiting-check"}},
+                  if label not in {"sync", "parse", "suggestion-check", "waiting-check", "skill:prepare:7"}},
     }
     if direct_active:
         expected["suggestion-check"] = True
