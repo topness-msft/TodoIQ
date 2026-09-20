@@ -52,7 +52,7 @@ class TestDatabaseSchema(unittest.TestCase):
             "suggestion_refreshed_at", "created_at", "updated_at",
             "action_type", "is_quick_hit", "error_message", "cowork_prompt",
             "snoozed_until", "skill_output", "waiting_activity",
-            "cowork_revision",
+            "cowork_revision", "parse_intent",
         }
         self.assertEqual(cols, expected)
 

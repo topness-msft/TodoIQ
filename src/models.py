@@ -213,6 +213,7 @@ def create_task(
     key_people: str | None = None,
     related_meeting: str | None = None,
     user_notes: str = "",
+    parse_intent: str | None = None,
 ) -> dict:
     """Create a new task and return it as a dict."""
     conn = get_connection()
@@ -241,13 +242,13 @@ def create_task(
                (title, description, status, parse_status, raw_input, priority,
                 due_date, committed_date, source_type, source_id, source_url,
                 source_date, source_snippet, coaching_text, action_type, skill_output, key_people,
-                related_meeting, user_notes, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                related_meeting, user_notes, created_at, updated_at, parse_intent)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 title, description, status, parse_status, raw_input, priority,
                 due_date, committed_date, source_type, source_id, source_url,
                 source_date, source_snippet, coaching_text, action_type, skill_output, key_people,
-                related_meeting, user_notes, now, now,
+                related_meeting, user_notes, now, now, parse_intent,
             ),
         )
         task_id = cursor.lastrowid
@@ -346,6 +347,213 @@ def write_suggestion_check(snapshot: dict, activity: dict, user_notes: str | Non
             _raise_if_unresolved_delivery(conn, snapshot["id"])
         conn.commit()
         return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+PARSE_FAILURE_MESSAGE = "Parsing could not finish. Retry this task."
+PARSE_STALE_MESSAGE = "Task changed while parsing. Retry this task."
+PARSE_MODES = frozenset({"full", "coaching_only"})
+_PARSE_COMMON_FIELDS = frozenset({"coaching_text", "skill_output", "user_notes", "key_people"})
+_PARSE_FULL_FIELDS = _PARSE_COMMON_FIELDS | frozenset({
+    "title", "description", "priority", "due_date", "related_meeting",
+    "action_type", "is_quick_hit", "waiting_activity", "source_type", "source_snippet",
+})
+
+
+def infer_parse_intent(task: dict) -> str:
+    """Conservatively recognize legacy, never-derived raw input, not its state."""
+    if task.get("parse_intent") in PARSE_MODES:
+        return task["parse_intent"]
+    untouched = (
+        bool(task.get("raw_input")) and task.get("source_type") == "manual"
+        and not task.get("description") and task.get("key_people") is None
+        and not any(task.get(key) for key in (
+            "coaching_text", "skill_output", "related_meeting", "waiting_activity",
+            "cowork_prompt", "cowork_revision", "is_quick_hit", "suggestion_refreshed_at",
+            "source_snippet", "source_date",
+        ))
+        and task.get("priority", 3) == 3 and task.get("due_date") is None
+        and task.get("action_type", "general") == "general"
+    )
+    return "full" if untouched else "coaching_only"
+
+
+def request_parse(task_id: int, intent: str = "coaching_only") -> bool:
+    """Inactive admission seam; callers explicitly admit raw tasks as full."""
+    if intent not in PARSE_MODES:
+        raise ValueError("Invalid parse intent")
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None or row["status"] in {"deleted", "completed"}:
+            return False
+        merged = "full" if row["parse_status"] != "parsed" and infer_parse_intent(dict(row)) == "full" else intent
+        if row["parse_status"] != "queued" or row["parse_intent"] != merged or row["error_message"] is not None:
+            conn.execute(
+                "UPDATE tasks SET parse_status='queued',parse_intent=?,error_message=NULL,updated_at=? WHERE id=?",
+                (merged, _now(), task_id),
+            )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def recover_parse_requests() -> int:
+    """Explicit startup seam, never invoked on import or by an existing caller."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE parse_status IN ('unparsed','queued','parsing','error') "
+            "AND status NOT IN ('completed','deleted')"
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            if row["parse_intent"] is None:
+                conn.execute("UPDATE tasks SET parse_intent=? WHERE id=?",
+                             (infer_parse_intent(dict(row)), row["id"]))
+            if row["parse_status"] == "parsing":
+                conn.execute(
+                    "UPDATE tasks SET parse_status='error',error_message=?,updated_at=? WHERE id=?",
+                    (PARSE_FAILURE_MESSAGE, _now(), row["id"]),
+                )
+                recovered += 1
+        conn.commit()
+        return recovered
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def select_parse_ids(task_ids=None) -> tuple[int, ...]:
+    conn = get_connection()
+    try:
+        selected = tuple(row[0] for row in conn.execute(
+            "SELECT id FROM tasks WHERE parse_status IN ('unparsed','queued') "
+            "AND status NOT IN ('completed','deleted') ORDER BY id"
+        ))
+        if task_ids is None:
+            return selected
+        requested = set(task_ids)
+        if any(type(task_id) is not int or task_id < 1 for task_id in requested):
+            raise ValueError("Invalid task selection")
+        return tuple(task_id for task_id in selected if task_id in requested)
+    finally:
+        conn.close()
+
+
+def claim_parse_task(task_id: int, *, check_deadline) -> tuple[str, dict | None]:
+    """Claim one eligible row, capturing every persisted input under the lock."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        check_deadline()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None or row["parse_status"] not in {"unparsed", "queued"} or row["status"] in {"completed", "deleted"}:
+            return "skipped", None
+        if _has_unresolved_delivery(conn, task_id):
+            return "deferred", None
+        conn.execute(
+            "UPDATE tasks SET parse_status='parsing',parse_intent=?,error_message=NULL,updated_at=? "
+            "WHERE id=? AND parse_status IN ('unparsed','queued')",
+            (infer_parse_intent(dict(row)), _now(), task_id),
+        )
+        snapshot = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+        check_deadline()
+        conn.commit()
+        return "claimed", snapshot
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def fail_parse_claim(snapshot: dict, *, stale: bool = False) -> bool:
+    """Only this run's still-parsing claim; a newer queued request always wins."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE tasks SET parse_status='error',error_message=?,updated_at=? "
+            "WHERE id=? AND parse_status='parsing'",
+            (PARSE_STALE_MESSAGE if stale else PARSE_FAILURE_MESSAGE, _now(), snapshot["id"]),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def write_parse_result(snapshot: dict, projection: dict, profiles: list, *, check_deadline) -> str:
+    """CAS the entire claimed input; identities and note answers share the commit."""
+    from .services.person_backfill import _apply_profile
+
+    allowed = _PARSE_FULL_FIELDS if snapshot["parse_intent"] == "full" else _PARSE_COMMON_FIELDS
+    if not set(projection) <= allowed or not {"coaching_text", "skill_output", "user_notes"} <= set(projection):
+        raise ValueError("Invalid parse projection")
+    if snapshot["parse_intent"] == "coaching_only" and projection["skill_output"] is not None:
+        raise ValueError("Invalid coaching skill output")
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        check_deadline()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (snapshot["id"],)).fetchone()
+        identity_changed = False
+        for profile in profiles:
+            prior = profile.get("_prior_identity")
+            if prior is None:
+                continue
+            person = conn.execute("SELECT * FROM person WHERE id=?", (prior["person"]["id"],)).fetchone()
+            aliases = [dict(alias) for alias in conn.execute(
+                "SELECT * FROM person_alias WHERE person_id=? ORDER BY alias_kind,alias_value", (prior["person"]["id"],),
+            )]
+            name_aliases = [dict(alias) for alias in conn.execute(
+                "SELECT * FROM person_alias WHERE alias_kind='name' AND alias_value=? "
+                "AND confidence='user' ORDER BY person_id", (prior["name"],),
+            )]
+            if person is None or dict(person) != prior["person"] or aliases != prior["aliases"] or name_aliases != prior["name_aliases"]:
+                identity_changed = True
+                break
+        if row is None or dict(row) != snapshot or row["parse_status"] != "parsing" or identity_changed:
+            if row is not None and row["parse_status"] == "parsing":
+                conn.execute(
+                    "UPDATE tasks SET parse_status='error',error_message=?,updated_at=? WHERE id=?",
+                    (PARSE_STALE_MESSAGE, _now(), snapshot["id"]),
+                )
+            conn.commit()
+            return "stale"
+        try:
+            _raise_if_unresolved_delivery(conn, snapshot["id"])
+        except ValueError:
+            conn.execute("UPDATE tasks SET parse_status='queued' WHERE id=?", (snapshot["id"],))
+            conn.commit()
+            return "deferred"
+        changed = (
+            any(key in projection and projection[key] != row[key] for key in _COWORK_REVISION_FIELDS)
+            or projection.get("action_type", row["action_type"]) != row["action_type"]
+        )
+        for profile in profiles:
+            _apply_profile(conn, snapshot["id"], profile)
+        fields = {
+            **projection, "parse_status": "parsed", "error_message": None,
+            "suggestion_refreshed_at": _now(), "updated_at": _now(),
+            "cowork_revision": row["cowork_revision"] + int(changed),
+        }
+        conn.execute(
+            "UPDATE tasks SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?",
+            (*fields.values(), snapshot["id"]),
+        )
+        check_deadline()
+        conn.commit()
+        return "completed"
     except Exception:
         conn.rollback()
         raise

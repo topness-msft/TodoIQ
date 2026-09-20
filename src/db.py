@@ -15,6 +15,7 @@ _STATUS_CHECK = (
 _PARSE_STATUS_CHECK = (
     "CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error'))"
 )
+_PARSE_INTENT_CHECK = "CHECK (parse_intent IN ('full','coaching_only'))"
 
 
 def _quote_identifier(value: str) -> str:
@@ -34,6 +35,8 @@ def _task_column_definition(row) -> str:
         return f"{quoted} TEXT NOT NULL DEFAULT 'active' {_STATUS_CHECK}"
     if name == "parse_status":
         return f"{quoted} TEXT NOT NULL DEFAULT 'parsed' {_PARSE_STATUS_CHECK}"
+    if name == "parse_intent":
+        return f"{quoted} TEXT {_PARSE_INTENT_CHECK}"
     if name == "priority":
         return f"{quoted} INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5)"
     if name == "source_type":
@@ -218,6 +221,7 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE tasks ADD COLUMN waiting_activity TEXT")
         conn.commit()
     for column, definition in (
+        ("parse_intent", f"TEXT {_PARSE_INTENT_CHECK}"),
         ("source_date", "TEXT"),
         ("error_message", "TEXT"),
         ("cowork_prompt", "TEXT"),
@@ -542,6 +546,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     snoozed_until   TEXT,
     parse_status    TEXT NOT NULL DEFAULT 'parsed'
                         CHECK (parse_status IN ('unparsed','queued','parsing','parsed','error')),
+    parse_intent    TEXT CHECK (parse_intent IN ('full','coaching_only')),
     raw_input       TEXT,
     error_message   TEXT,
     is_quick_hit    INTEGER NOT NULL DEFAULT 0,
