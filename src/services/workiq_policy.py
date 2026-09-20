@@ -25,6 +25,8 @@ SOURCE_EMAIL_SELECT = (
 )
 RECOVERY_CHATS_URL = "/me/chats?$select=id,topic,chatType,webUrl&$top=50"
 RECOVERY_SELF_URL = "/me?$select=id,mail,userPrincipalName"
+DIRECTORY_SELECT = "id,displayName,mail,userPrincipalName,userType"
+DIRECTORY_SELF_URL = f"/me?$select={DIRECTORY_SELECT}"
 
 
 class CapabilityError(ValueError):
@@ -63,6 +65,103 @@ class RecoveryReadOperation:
     target_email: str | None
     topic: str | None
     _mint: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class DirectoryLookupOperation:
+    kind: str
+    query_value: str | None
+    _mint: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class SavedTeamsChatOperation:
+    source: SourceReadOperation
+    _mint: object = field(repr=False, compare=False)
+
+
+def _directory_aad(value: object) -> str:
+    if not isinstance(value, str) or re.fullmatch(
+        r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", value,
+    ) is None:
+        raise CapabilityError("Work IQ directory requires an exact AAD UUID.")
+    return value.lower()
+
+
+def _directory_name(value: object) -> str:
+    if (
+        not isinstance(value, str) or not value.strip() or len(value) > 256
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise CapabilityError("Work IQ directory requires a bounded full name.")
+    return " ".join(value.split())
+
+
+def build_directory_operation(kind: str, query_value: object = None) -> DirectoryLookupOperation:
+    """Mint exact reads only; callers cannot supply a path, fields, or limits."""
+    if kind == "self" and query_value is None:
+        value = None
+    elif kind == "aad_exact":
+        value = _directory_aad(query_value)
+    elif kind == "email_exact":
+        value = _recovery_email(query_value)
+    elif kind == "full_name_candidates":
+        value = _directory_name(query_value)
+    else:
+        raise CapabilityError("Work IQ directory lookup is not allowed.")
+    return DirectoryLookupOperation(kind, value, (_MINT, kind, value))
+
+
+def require_directory_operation(operation: object) -> DirectoryLookupOperation:
+    if (
+        not isinstance(operation, DirectoryLookupOperation)
+        or operation._mint != (_MINT, operation.kind, operation.query_value)
+    ):
+        raise CapabilityError("Work IQ directory operation was not policy-minted.")
+    return build_directory_operation(operation.kind, operation.query_value)
+
+
+def _directory_path(operation: DirectoryLookupOperation) -> str:
+    operation = require_directory_operation(operation)
+    if operation.kind == "self":
+        return DIRECTORY_SELF_URL
+    if operation.kind == "aad_exact":
+        return f"/users/{quote(operation.query_value, safe='')}?$select={DIRECTORY_SELECT}"
+    literal = operation.query_value.replace("'", "''")
+    query = (
+        f"mail eq '{literal}' or userPrincipalName eq '{literal}'"
+        if operation.kind == "email_exact" else f"displayName eq '{literal}'"
+    )
+    limit = 2 if operation.kind == "email_exact" else 10
+    return f"/users?$filter={quote(query, safe='')}&$select={DIRECTORY_SELECT}&$top={limit}"
+
+
+def build_saved_teams_operation(locator: object) -> SavedTeamsChatOperation:
+    source = build_source_operation(locator)
+    if source.kind != "teams_chat":
+        raise CapabilityError("Work IQ participants require an exact saved Teams chat.")
+    return SavedTeamsChatOperation(source, (_MINT, source))
+
+
+def require_saved_teams_operation(operation: object) -> SavedTeamsChatOperation:
+    if (
+        not isinstance(operation, SavedTeamsChatOperation)
+        or operation._mint != (_MINT, operation.source)
+    ):
+        raise CapabilityError("Work IQ saved chat operation was not policy-minted.")
+    source = require_source_operation(operation.source)
+    return build_saved_teams_operation({
+        "kind": source.kind, "source": source.locator_source, **dict(source.identifiers),
+    })
+
+
+def _saved_teams_context_path(operation: SavedTeamsChatOperation) -> str:
+    operation = require_saved_teams_operation(operation)
+    chat = dict(operation.source.identifiers)["conversation_id"]
+    return (
+        f"/me/chats/{quote(chat, safe='')}/messages?"
+        "$select=id,chatId,createdDateTime,from,body,webUrl&$top=20"
+    )
 
 
 def _recovery_email(value: object) -> str:

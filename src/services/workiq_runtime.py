@@ -44,6 +44,12 @@ from .workiq_policy import (
     _source_email_conversation_path,
     RecoveryReadOperation, build_recovery_operation, require_recovery_operation,
     RECOVERY_CHATS_URL, RECOVERY_SELF_URL, _recovery_members_path, _recovery_email,
+    DirectoryLookupOperation, SavedTeamsChatOperation,
+    build_directory_operation, require_directory_operation, _directory_path, _directory_aad,
+    build_saved_teams_operation, require_saved_teams_operation, _saved_teams_context_path,
+)
+from .workiq_directory_profiles import (
+    DirectoryProfileError, DirectoryNoMatchError, DirectoryAmbiguityError, project_lookup,
 )
 from .workiq_setup import (
     WorkIQAccountError,
@@ -151,6 +157,14 @@ class SourceHTTPError(WorkIQError):
     code = "source_http"
 
 
+class DirectoryNotFoundError(SourceNotFoundError):
+    code = "directory_not_found"
+
+
+class DirectoryAmbiguousError(SourceUnreadableError):
+    code = "directory_ambiguous"
+
+
 class _SourceText(HTMLParser):
     """Extract inert, bounded evidence text; never retain raw HTML in a result."""
 
@@ -201,6 +215,8 @@ class _Operation:
     ask: AskOperation | None = None
     source: SourceReadOperation | None = None
     recovery: RecoveryReadOperation | None = None
+    directory: DirectoryLookupOperation | None = None
+    saved_teams: SavedTeamsChatOperation | None = None
     # Shared absolute admission deadline for ask and source reads.
     ask_deadline: float | None = None
     state: str = "queued"
@@ -469,6 +485,8 @@ class WorkIQRuntime:
                 operation.ask = None
                 operation.source = None
                 operation.recovery = None
+                operation.directory = None
+                operation.saved_teams = None
             raise QueueFullError("Work IQ read queue is full.") from exc
         return operation.job_id
 
@@ -499,8 +517,8 @@ class WorkIQRuntime:
             ):
                 self._expire_ask(operation)
         with self._lock:
-            result = operation.public(include_data=operation.plan not in {"source", "recovery"} or source_data)
-            if operation.plan in {"ask", "ask_probe", "source", "recovery"} and operation.result:
+            result = operation.public(include_data=operation.plan not in {"source", "recovery", "directory", "saved_teams"} or source_data)
+            if operation.plan in {"ask", "ask_probe", "source", "recovery", "directory", "saved_teams"} and operation.result:
                 operation.result.pop("data", None)
             return result
 
@@ -561,16 +579,55 @@ class WorkIQRuntime:
         recovery = build_recovery_operation(target, topic=topic)
         return self._read_sealed_source(recovery, deadline)
 
+    def read_self_profile(self, *, timeout: float) -> dict:
+        """Return transient normalized profile fields, including email (not mail)."""
+        deadline = self._monotonic_clock() + timeout
+        return self._read_sealed_source(build_directory_operation("self"), deadline)
+
+    def read_directory_user_by_aad(self, aad_object_id: str, *, timeout: float) -> dict:
+        """Read one exact AAD profile; Guest profiles remain external_unresolved."""
+        deadline = self._monotonic_clock() + timeout
+        return self._read_sealed_source(build_directory_operation("aad_exact", aad_object_id), deadline)
+
+    def read_directory_user_by_email(self, email_or_upn: str, *, timeout: float) -> dict:
+        """Return one verified mail/UPN match or typed not-found/ambiguity."""
+        deadline = self._monotonic_clock() + timeout
+        return self._read_sealed_source(build_directory_operation("email_exact", email_or_upn), deadline)
+
+    def find_directory_users_by_exact_name(self, display_name: str, *, timeout: float) -> list[dict]:
+        """Return at most ten complete candidates; never select or bind a person."""
+        deadline = self._monotonic_clock() + timeout
+        result = self._read_sealed_source(build_directory_operation("full_name_candidates", display_name), deadline)
+        return result["candidates"]
+
+    def read_saved_teams_chat_participants(self, locator: dict, *, timeout: float) -> dict:
+        """Read a future caller's task-snapshot resolved teams_chat locator only.
+
+        Returns conversation_id, self, participants, recent_context. Each participant
+        has membership_id, profile, resolution (confirmed_internal or
+        external_unresolved). Recent context has context_only=True, complete,
+        and normalized source items; it cannot support absence claims. Nothing
+        persists, including on partial membership/profile or transport failure.
+        """
+        deadline = self._monotonic_clock() + timeout
+        return self._read_sealed_source(build_saved_teams_operation(locator), deadline)
+
     def _read_sealed_source(self, sealed, deadline):
-        recovery = isinstance(sealed, RecoveryReadOperation)
+        if isinstance(sealed, DirectoryLookupOperation):
+            plan, sealed = "directory", require_directory_operation(sealed)
+        elif isinstance(sealed, SavedTeamsChatOperation):
+            plan, sealed = "saved_teams", require_saved_teams_operation(sealed)
+        elif isinstance(sealed, RecoveryReadOperation):
+            plan, sealed = "recovery", require_recovery_operation(sealed)
+        else:
+            plan, sealed = "source", require_source_operation(sealed)
         with self._lock:
             self._check_source_cooldown()
         # Reuse Stage 1's owner-aware admission/start-lock deadline path.
         self._start_for_ask(deadline)
         job_id = self._enqueue_operation(_Operation(
             job_id=str(uuid.uuid4()), timeout=self._ask_time_left(deadline),
-            plan="recovery" if recovery else "source",
-            source=None if recovery else sealed, recovery=sealed if recovery else None,
+            plan=plan, **{plan: sealed},
             ask_deadline=deadline,
         ))
         try:
@@ -591,6 +648,8 @@ class WorkIQRuntime:
                 if stored:
                     stored.source = None
                     stored.recovery = None
+                    stored.directory = None
+                    stored.saved_teams = None
                     if stored.result:
                         stored.result.pop("data", None)
 
@@ -846,6 +905,8 @@ class WorkIQRuntime:
                 operation.ask = None
                 operation.source = None
                 operation.recovery = None
+                operation.directory = None
+                operation.saved_teams = None
                 if operation.result:
                     operation.result.pop("data", None)
             thread_stopped = not thread or not thread.is_alive()
@@ -1112,7 +1173,7 @@ class WorkIQRuntime:
                 self._run_ask_operation(
                     operation, legacy_state or (self._state, self._error)
                 )
-            elif operation.plan in {"source", "recovery"}:
+            elif operation.plan in {"source", "recovery", "directory", "saved_teams"}:
                 self._run_source_operation(
                     operation, legacy_state or (self._state, self._error)
                 )
@@ -1346,7 +1407,14 @@ class WorkIQRuntime:
         data = None
         error = None
         try:
-            data = self._run_recovery(operation) if operation.plan == "recovery" else self._run_source(operation)
+            if operation.plan == "directory":
+                data = self._run_directory(operation)
+            elif operation.plan == "saved_teams":
+                data = self._run_saved_teams(operation)
+            elif operation.plan == "recovery":
+                data = self._run_recovery(operation)
+            else:
+                data = self._run_source(operation)
         except (TimeoutError, CancelledError, ProtocolError, TransportError, InvalidResponseError):
             raise
         except WorkIQError as exc:
@@ -1369,17 +1437,35 @@ class WorkIQRuntime:
                 self._source_blocker = None
                 self._source_retry_after = 0.0
 
-    def _source_fetch(self, operation: _Operation, path: str) -> dict:
+    def _source_fetch(
+        self, operation: _Operation, path: str, *, context: SavedTeamsChatOperation | None = None,
+    ) -> dict:
+        if context is not None:
+            context = require_saved_teams_operation(context)
+            if (
+                operation.plan != "saved_teams" or operation.saved_teams != context
+                or path != _saved_teams_context_path(context)
+            ):
+                raise CapabilityDeniedError("Only the sealed recent-chat context may be partial.")
         result = self._rpc(
             "tools/call", {"name": FETCH_TOOL, "arguments": {"entityUrls": [path]}},
             self._ask_remaining(operation, operation.ask_deadline),
             ask_operation=operation,
         )
         self._ask_remaining(operation, operation.ask_deadline)
-        data = self._validate_source_envelope(result)
+        data = (
+            self._validate_source_envelope(result, context_only=True)
+            if context is not None else self._validate_source_envelope(result)
+        )
         row = result["structuredContent"]["results"][0]
         if "entityUrl" in row and row["entityUrl"] != path:
             raise SourceUnreadableError("Work IQ source response identity did not match.")
+        if context is not None:
+            return {
+                "page": data,
+                "complete": "@odata.nextLink" not in data
+                and not any(key.lower() == "link" for key in row.get("headers", {})),
+            }
         return data
 
     def _run_source(self, operation: _Operation) -> dict:
@@ -1425,6 +1511,92 @@ class WorkIQRuntime:
             return _recovery_email(value)
         except CapabilityError:
             raise SourceUnreadableError("Work IQ recovery identity was invalid.") from None
+
+    def _fetch_directory(self, operation: _Operation, lookup: DirectoryLookupOperation) -> dict:
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            self._check_source_cooldown()
+            if FETCH_TOOL not in self._allowed:
+                raise CapabilityDeniedError("Work IQ does not advertise directory reads.")
+            lookup = require_directory_operation(lookup)
+        try:
+            data = self._source_fetch(operation, _directory_path(lookup))
+        except SourceNotFoundError:
+            raise DirectoryNotFoundError("Work IQ could not find this directory profile.") from None
+        self._source_complete(data)
+        try:
+            return project_lookup(data, lookup)
+        except DirectoryNoMatchError:
+            raise DirectoryNotFoundError("Work IQ found no exact directory match.") from None
+        except DirectoryAmbiguityError:
+            raise DirectoryAmbiguousError("Work IQ found multiple directory candidates.") from None
+        except DirectoryProfileError:
+            raise SourceUnreadableError("Work IQ directory identity was unverifiable.") from None
+
+    def _run_directory(self, operation: _Operation) -> dict:
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            lookup = require_directory_operation(operation.directory)
+        return self._fetch_directory(operation, lookup)
+
+    def _run_saved_teams(self, operation: _Operation) -> dict:
+        with self._lock:
+            self._ask_remaining(operation, operation.ask_deadline)
+            saved = require_saved_teams_operation(operation.saved_teams)
+        chat = dict(saved.source.identifiers)["conversation_id"]
+        self_profile = self._fetch_directory(operation, build_directory_operation("self"))
+        self_id = self_profile["aad_object_id"]
+        self_addresses = {self_profile["email"], self_profile["upn"]} - {None}
+        members = self._recovery_page(self._source_fetch(operation, _recovery_members_path(chat)))
+        identities, membership_ids, addresses = set(), set(), set()
+        validated = []
+        self_count = 0
+        for member in members:
+            try:
+                identifier = _directory_aad(member.get("userId"))
+            except CapabilityError:
+                # Do not guess a user ID by decoding arbitrary opaque membership IDs.
+                raise SourceUnreadableError("Work IQ chat member has no exact AAD identity.") from None
+            membership_id = self._source_id(member["id"]) if member.get("id") is not None else None
+            address = self._recovery_address(member.get("email"))
+            if (
+                identifier.lower() in identities
+                or (membership_id is not None and membership_id in membership_ids)
+                or (address is not None and address in addresses)
+            ):
+                raise SourceUnreadableError("Work IQ chat membership contains duplicate identities.")
+            identities.add(identifier.lower())
+            if membership_id is not None:
+                membership_ids.add(membership_id)
+            if address is not None:
+                addresses.add(address)
+            if identifier == self_id:
+                if address is not None and address not in self_addresses:
+                    raise SourceUnreadableError("Work IQ chat self identity was inconsistent.")
+                self_count += 1
+            else:
+                if identifier.lower() == self_id.lower() or address in self_addresses:
+                    raise SourceUnreadableError("Work IQ chat self identity was ambiguous.")
+                validated.append((identifier, membership_id, address))
+        if self_count != 1:
+            raise SourceUnreadableError("Work IQ chat membership did not contain exactly one self.")
+        participants = []
+        for identifier, membership_id, address in validated:
+            profile = self._fetch_directory(operation, build_directory_operation("aad_exact", identifier))
+            if address is not None and address not in (profile["email"], profile["upn"]):
+                raise SourceUnreadableError("Work IQ chat member profile did not match membership.")
+            participants.append({
+                "membership_id": membership_id, "profile": profile,
+                "resolution": "confirmed_internal" if profile["user_type"] == "Member" else "external_unresolved",
+            })
+        context_page = self._source_fetch(operation, _saved_teams_context_path(saved), context=saved)
+        context = self._project_source_page(saved.source, chat, context_page["page"], context=saved)
+        return {
+            "conversation_id": chat, "self": self_profile, "participants": participants,
+            "recent_context": {
+                "context_only": True, "complete": context_page["complete"], "items": context["items"],
+            },
+        }
 
     def _run_recovery(self, operation: _Operation) -> dict:
         with self._lock:
@@ -1495,7 +1667,7 @@ class WorkIQRuntime:
         result["recovery_kind"] = "recent_chat_membership"
         return result
 
-    def _validate_source_envelope(self, result: dict) -> dict:
+    def _validate_source_envelope(self, result: dict, *, context_only: bool = False) -> dict:
         content = result.get("content")
         is_error = result.get("isError", False)
         meta = result.get("_meta", {})
@@ -1538,7 +1710,7 @@ class WorkIQRuntime:
                 for key, value in headers.items()
             ):
                 raise SourceUnreadableError("Work IQ source headers were malformed.")
-            if any(key.lower() == "link" for key in headers):
+            if not context_only and any(key.lower() == "link" for key in headers):
                 raise SourcePartialError("Work IQ source returned a partial page.")
         return data
 
@@ -1707,11 +1879,20 @@ class WorkIQRuntime:
 
     def _project_source_page(
         self, source: SourceReadOperation, conversation: str | None, data: dict,
+        *, context: SavedTeamsChatOperation | None = None,
     ) -> dict:
-        self._source_complete(data)
+        if context is None:
+            self._source_complete(data)
+        else:
+            context = require_saved_teams_operation(context)
+            if source != context.source or conversation != dict(context.source.identifiers)["conversation_id"]:
+                raise CapabilityDeniedError("Recent context requires the exact saved chat.")
+            if "@odata.nextLink" in data:
+                self._source_url(data["@odata.nextLink"], hosts={"graph.microsoft.com"})
         values = data.get("value")
         email = source.kind == "email"
-        if not isinstance(values, list) or len(values) > (25 if email else 50) or "id" in data:
+        limit = 20 if context is not None else 25 if email else 50
+        if not isinstance(values, list) or len(values) > limit or "id" in data:
             raise SourceUnreadableError("Work IQ source collection was invalid.")
         ids = dict(source.identifiers)
         items = []
@@ -1719,6 +1900,8 @@ class WorkIQRuntime:
         for item in values:
             if not isinstance(item, dict):
                 raise SourceUnreadableError("Work IQ source item was invalid.")
+            if context is not None and item.get("chatId") != conversation:
+                raise SourceUnreadableError("Work IQ context message did not match the saved chat.")
             item_id = self._source_id(item.get("id"))
             if item_id in seen:
                 raise SourceUnreadableError("Work IQ source contained duplicate items.")
@@ -1764,7 +1947,7 @@ class WorkIQRuntime:
         return {
             "source_kind": source.kind, "locator_source": source.locator_source,
             "source_identity": ids, "conversation_id": conversation,
-            "complete": True, "items": items,
+            "complete": "@odata.nextLink" not in data, "items": items,
         }
 
     def _run_readiness(self, operation: _Operation) -> None:
@@ -1942,7 +2125,7 @@ class WorkIQRuntime:
             if message["id"] != request_id:
                 raise ProtocolError("Work IQ MCP response correlation failed.")
             if "error" in message:
-                if active and active.plan in {"ask", "ask_probe", "source"}:
+                if active and active.plan in {"ask", "ask_probe", "source", "directory", "saved_teams"}:
                     error = message["error"]
                     raise self._ask_remote_error(
                         error.get("code") if isinstance(error, dict) else None
@@ -2274,6 +2457,8 @@ class WorkIQRuntime:
             "source_forbidden": SourceForbiddenError,
             "source_not_found": SourceNotFoundError,
             "source_http": SourceHTTPError,
+            "directory_not_found": DirectoryNotFoundError,
+            "directory_ambiguous": DirectoryAmbiguousError,
             "timeout": TimeoutError,
             "cancelled": CancelledError,
         }
@@ -2311,6 +2496,8 @@ class WorkIQRuntime:
             operation.ask = None
             operation.source = None
             operation.recovery = None
+            operation.directory = None
+            operation.saved_teams = None
             operation.result = {
                 "ok": error is None,
                 **({"error": error.public()} if error else {}),
